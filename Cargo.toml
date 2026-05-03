@@ -1,0 +1,79 @@
+# Root workspace manifest (virtual): no [package] section here.                                             
+# This file configures the whole workspace: members, shared deps, and lint policy.
+
+[workspace]
+# All crates live under crates/* (each subfolder with a Cargo.toml is a member).
+members = ["crates/*"]
+
+# Cargo feature resolver version.
+# "3" is the current resolver in newer Cargo; it improves feature unification behavior.
+# Resolver controls how Cargo computes finally enabled features across the workspace; v3 avoids accidental feature
+#bleed across targets/deps.
+resolver = "3"
+
+[workspace.package]
+# Default Rust edition for all member crates that opt into edition.workspace = true.
+# (Each crate can still override if needed, but we want consistency.)
+edition = "2024"
+
+[workspace.lints.rust]
+# Forbid any usage of unsafe code across all crates that opt into workspace lints.
+# This prevents accidental `unsafe {}` blocks from compiling.
+unsafe_code = "forbid"
+
+# Treat all Rust compiler warnings as hard errors across the workspace.
+# This forces “clean builds” and prevents warning drift.
+warnings = "deny"
+
+[workspace.lints.clippy]
+# Turn on (deny) the full set of default clippy lints.
+# This makes clippy findings fail the build when you run clippy.
+all = "deny"
+
+# Turn on the stricter “pedantic” clippy lints.
+# These can be noisy, but they enforce consistent best practices early.
+pedantic = "deny"
+
+########################################
+#####     Now the dependencies     #####
+########################################
+
+[workspace.dependencies]
+# Shared dependency versions for member crates.
+# Each crate can reference these via `tokio.workspace = true`, etc.
+
+# Tokio is the async runtime. Features:
+# - macros: enables #[tokio::main] and #[tokio::test]
+# - rt-multi-thread: multithreaded runtime (typical for servers)
+# - signal: OS signal handling (useful for graceful shutdown later)
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+
+# Axum is the web framework (built on hyper/tower).
+# Feature:
+# - macros: enables route macros like routing::get/post via attribute macros.
+axum = { version = "0.7", features = ["macros"] }
+
+# Tower provides middleware abstractions and layering (used heavily with axum).
+tower = "0.5"
+
+# http provides core HTTP types (Request/Response/HeaderMap/Uri) shared across ecosystem crates.
+http = "1"
+
+# bytes provides efficient byte buffers (useful for request/response body capture and streaming).
+bytes = "1"
+
+# Serde is the serialization framework.
+# Feature:
+# - derive: enables #[derive(Serialize, Deserialize)]
+serde = { version = "1", features = ["derive"] }
+
+# serde_json is JSON support for serde (parsing, Value, serialization).
+serde_json = "1"
+
+# uuid provides UUID generation (useful for request ids, tool call ids later).
+# Feature:
+# - v4: enables random UUIDv4 generation.
+uuid = { version = "1", features = ["v4"] }
+
+
+

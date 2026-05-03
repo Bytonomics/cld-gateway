@@ -1,0 +1,8 @@
+[toolchain]
+channel = "stable"
+
+
+# What this does:
+# ensures cargo fmt and cargo clippy are available and keeps the toolchain consistent.
+components = ["rustfmt", "clippy"]
+

@@ -1,0 +1,10 @@
+[package]
+name = "gatewayd"
+version = "0.0.0"
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+gateway-core = { path = "../gateway-core" }

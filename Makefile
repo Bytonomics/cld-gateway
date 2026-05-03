@@ -1,0 +1,21 @@
+.PHONY: check fmt-check fmt-fix clippy test metadata tree
+
+check: fmt-check clippy test
+
+fmt-check:
+	cargo fmt --check
+
+fmt-fix:
+	cargo fmt
+
+clippy:
+	cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+test:
+	cargo test --workspace --all-features
+
+metadata:
+	cargo metadata --no-deps --format-version 1
+
+tree:
+	cargo tree --workspace

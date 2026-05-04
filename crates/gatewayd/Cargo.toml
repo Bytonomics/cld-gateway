@@ -7,4 +7,7 @@ edition.workspace = true
 workspace = true
 
 [dependencies]
-gateway-core = { path = "../gateway-core" }
+gateway-http-anthropic = { path = "../gateway-http-anthropic" }
+gateway-observability = { path = "../gateway-observability" }
+axum.workspace = true
+tokio.workspace = true

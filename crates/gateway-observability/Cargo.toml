@@ -7,3 +7,15 @@ edition.workspace = true
 workspace = true
 
 [dependencies]
+gateway-core = { path = "../gateway-core" }
+bytes.workspace = true
+axum.workspace = true
+dirs.workspace = true
+http.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio.workspace = true

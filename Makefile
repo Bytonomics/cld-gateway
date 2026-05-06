@@ -1,4 +1,5 @@
 .PHONY: check fmt-check fmt-fix clippy test metadata tree
+.PHONY: verify-test
 
 check: fmt-check clippy test
 
@@ -13,6 +14,9 @@ clippy:
 
 test:
 	cargo test --workspace --all-features
+
+verify-test:
+	RUN_WIREMOCK=1 cargo test --workspace --all-features
 
 metadata:
 	cargo metadata --no-deps --format-version 1

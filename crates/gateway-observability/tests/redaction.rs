@@ -70,6 +70,7 @@ fn append_exchange_record_writes_one_json_object_per_line() {
         request_id: "req-1".to_string(),
         started_at_unix_ms: 0,
         duration_ms: 1,
+        meta: None,
         request: HttpRequestRecord {
             method: "GET".to_string(),
             uri: "/health".to_string(),

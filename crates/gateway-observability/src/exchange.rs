@@ -3,11 +3,19 @@
 use serde::Serialize;
 use serde_json::Value;
 
+#[derive(Debug, Serialize, Clone, Default)]
+pub struct ExchangeMeta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_resolution: Option<gateway_core::model_map::ModelResolution>,
+}
+
 #[derive(Debug, Serialize, Clone)]
 pub struct ExchangeRecord {
     pub request_id: String,
     pub started_at_unix_ms: u128,
     pub duration_ms: u128,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meta: Option<ExchangeMeta>,
     pub request: HttpRequestRecord,
     pub response: HttpResponseRecord,
 }

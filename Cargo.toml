@@ -81,4 +81,21 @@ dirs = "6"
 # tempfile is used only in tests for safe filesystem fixtures.
 tempfile = "3"
 
+# base64 is used for base64url decoding JWT payloads (exp extraction).
+base64 = "0.22"
+
+# thiserror provides structured error types without string matching.
+thiserror = "2"
+
+# reqwest is used for OAuth refresh + backend HTTP client (Days 8/10).
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# serde_urlencoded is used for OAuth form-encoded refresh requests (Day 8).
+serde_urlencoded = "0.7"
+
+# wiremock is used for deterministic HTTP contract tests without real network (Days 8/10).
+wiremock = "0.6"
+
+# url is used to manage base URLs for clients and wiremock (Day 10).
+url = "2"
 

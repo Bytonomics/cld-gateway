@@ -5,6 +5,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod model_map;
+
 #[derive(Debug)]
 pub enum Error {
     InvalidInputError(&'static str),
@@ -25,9 +27,14 @@ pub struct RequestId(pub String);
 /// Wrapper to make it harder to accidentally print secrets.
 /// (We’ll still avoid Debug/Display on secret-bearing types later.)
 #[derive(Clone)]
-pub struct Secret<T>(pub T);
+pub struct Secret<T>(T);
 
 impl<T> Secret<T> {
+    #[must_use]
+    pub fn new(value: T) -> Self {
+        Self(value)
+    }
+
     pub fn expose(&self) -> &T {
         &self.0
     }

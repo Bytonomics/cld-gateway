@@ -9,3 +9,5 @@ workspace = true
 [dependencies]
 axum.workspace = true
 serde_json.workspace = true
+gateway-auth-codex = { path = "../gateway-auth-codex" }
+gateway-core = { path = "../gateway-core" }

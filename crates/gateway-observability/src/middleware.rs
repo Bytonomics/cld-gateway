@@ -1,7 +1,8 @@
 #![forbid(unsafe_code)]
 
 use crate::exchange::{
-    CapturedBody, CapturedBodyData, ExchangeRecord, HttpRequestRecord, HttpResponseRecord,
+    CapturedBody, CapturedBodyData, ExchangeMeta, ExchangeRecord, HttpRequestRecord,
+    HttpResponseRecord,
 };
 use crate::paths::default_exchange_log_path;
 use crate::redact::{redact_headers, redact_json_keys};
@@ -61,6 +62,10 @@ pub async fn capture_http_exchange(
     );
 
     let (response_parts, response_body) = res.into_parts();
+    let model_resolution = response_parts
+        .extensions
+        .get::<gateway_core::model_map::ModelResolution>()
+        .cloned();
     let (response_body_capture, response_body_for_client) = capture_body(
         response_parts.headers.get(http::header::CONTENT_TYPE),
         response_body,
@@ -82,6 +87,11 @@ pub async fn capture_http_exchange(
         request_id: request_id.0.clone(),
         started_at_unix_ms,
         duration_ms,
+        meta: if model_resolution.is_some() {
+            Some(ExchangeMeta { model_resolution })
+        } else {
+            None
+        },
         request: HttpRequestRecord {
             method: request_method,
             uri: request_uri,

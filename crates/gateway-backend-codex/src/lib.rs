@@ -5,6 +5,9 @@
 
 #![forbid(unsafe_code)]
 
+pub mod client;
+pub mod types;
+
 #[must_use]
 pub fn ping() -> &'static str {
     "pong"

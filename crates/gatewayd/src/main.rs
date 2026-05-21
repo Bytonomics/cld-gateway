@@ -18,12 +18,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let config = CaptureConfig::default();
-    let app = gateway_http_anthropic::router(AppState::default()).layer(axum::middleware::from_fn(
-        move |req, next| {
+    let app = gateway_http_anthropic::router(AppState::from_env()).layer(
+        axum::middleware::from_fn(move |req, next| {
             let config = config.clone();
             async move { capture_http_exchange(req, next, config).await }
-        },
-    ));
+        }),
+    );
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:8080").await?;
     axum::serve(listener, app).await?;

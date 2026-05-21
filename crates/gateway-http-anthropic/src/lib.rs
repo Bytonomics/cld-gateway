@@ -13,6 +13,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use gateway_core::RequestId;
+use gateway_core::Secret;
 use gateway_core::model_map::resolve_model;
 use gateway_core::model_map::{ModelMap, default_model_map_path, load_model_map};
 use tracing::info;
@@ -22,6 +23,33 @@ use uuid::Uuid;
 pub struct AppState {
     auth: gateway_auth_codex::CodexAuthManager,
     backend: gateway_backend_codex::client::CodexBackendClient,
+    openai_models_url: String,
+    openai_api_key: Option<Secret<String>>,
+}
+
+impl AppState {
+    #[must_use]
+    pub fn from_env() -> Self {
+        Self {
+            openai_models_url: "https://api.openai.com/v1/models".to_string(),
+            openai_api_key: std::env::var("OPENAI_API_KEY").ok().map(Secret::new),
+            ..Self::default()
+        }
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    fn with_openai_models_url(mut self, url: &str) -> Self {
+        self.openai_models_url = url.to_string();
+        self
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    fn with_openai_api_key(mut self, key: &str) -> Self {
+        self.openai_api_key = Some(Secret::new(key.to_string()));
+        self
+    }
 }
 
 pub fn router(state: AppState) -> axum::Router {
@@ -29,7 +57,7 @@ pub fn router(state: AppState) -> axum::Router {
         .route("/health", get(health))
         .route("/auth/status", get(auth_status))
         .route("/auth/refresh", post(auth_refresh))
-        .route("/v1/models", get(v1_models))
+        .route("/v1/models", get(v1_models_with_state))
         .route("/v1/messages", post(v1_messages))
         .fallback(fallback_404)
         .with_state(state)
@@ -87,13 +115,72 @@ async fn fallback_404() -> impl IntoResponse {
     )
 }
 
-async fn v1_models() -> axum::response::Response {
-    let map = load_model_map(&default_model_map_path()).unwrap_or(ModelMap {
-        default_backend_model: "gpt-5.2".to_string(),
-        aliases: std::collections::BTreeMap::new(),
-    });
+async fn v1_models_with_state(State(state): State<AppState>) -> axum::response::Response {
+    let Some(api_key) = state.openai_api_key else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": {
+                    "type": "config_error",
+                    "message": "OPENAI_API_KEY is not set; required to serve /v1/models from api.openai.com"
+                }
+            })),
+        )
+            .into_response();
+    };
 
-    let ids = build_model_id_list(&map);
+    let http = reqwest::Client::new();
+    let res = http
+        .get(&state.openai_models_url)
+        .header(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {}", api_key.expose()),
+        )
+        .send()
+        .await;
+
+    let Ok(res) = res else {
+        return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "error": { "type": "upstream_error", "message": "failed to reach api.openai.com /v1/models" }
+                })),
+            )
+                .into_response();
+    };
+
+    if !res.status().is_success() {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({
+                "error": { "type": "upstream_error", "message": format!("upstream returned {}", res.status()) }
+            })),
+        )
+            .into_response();
+    }
+
+    let json: serde_json::Value = match res.json().await {
+        Ok(v) => v,
+        Err(_) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "error": { "type": "upstream_error", "message": "invalid JSON from upstream /v1/models" }
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let ids_iter = json["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.get("id").and_then(|id| id.as_str()).map(str::to_string));
+
+    let mut ids: Vec<String> = ids_iter.collect();
+    ids.sort();
+    ids.dedup();
 
     let data: Vec<serde_json::Value> = ids
         .iter()
@@ -379,42 +466,56 @@ mod messages_tests {
     }
 }
 
-fn build_model_id_list(map: &ModelMap) -> Vec<String> {
-    // Always return alias keys; optionally also include backend IDs (passthrough allowlist) for
-    // compatibility with Claude Code validation. Keep deterministic ordering.
-    let mut ids: Vec<String> = map.supported_model_ids().into_iter().collect();
-    ids.extend(map.allowed_backend_models());
-    ids.sort();
-    ids.dedup();
-    ids
-}
-
 #[cfg(test)]
-mod tests {
-    use super::build_model_id_list;
-    use gateway_core::model_map::ModelMap;
-    use std::collections::BTreeMap;
+mod models_api_tests {
+    use super::{AppState, router};
+    use axum::body::{Body, to_bytes};
+    use axum::http::Request;
+    use tower::ServiceExt as _;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    #[test]
-    fn model_list_is_sorted_deduped_and_includes_aliases_and_allowlist() {
-        let map = ModelMap {
-            default_backend_model: "gpt-5.2".to_string(),
-            aliases: BTreeMap::from([
-                ("sonnet".to_string(), "gpt-5.2-codex".to_string()),
-                ("haiku".to_string(), "gpt-5.2".to_string()),
-            ]),
-        };
+    #[tokio::test]
+    async fn v1_models_proxies_openai_models_list() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .and(header("authorization", "Bearer test-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                r#"{"object":"list","data":[{"id":"gpt-5.2"},{"id":"gpt-5.2-codex"}]}"#,
+                "application/json",
+            ))
+            .mount(&mock)
+            .await;
 
-        let ids = build_model_id_list(&map);
+        let state = AppState::default()
+            .with_openai_models_url(&format!("{}/v1/models", mock.uri()))
+            .with_openai_api_key("test-key");
 
-        let mut sorted = ids.clone();
-        sorted.sort();
-        sorted.dedup();
-        assert_eq!(ids, sorted);
+        let app = router(state);
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/models")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
-        assert!(ids.contains(&"sonnet".to_string()));
-        assert!(ids.contains(&"haiku".to_string()));
-        assert!(ids.contains(&"gpt-5.2".to_string()));
-        assert!(ids.contains(&"gpt-5.2-codex".to_string()));
+        assert!(res.status().is_success());
+        let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let ids: Vec<String> = json["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["id"].as_str().unwrap().to_string())
+            .collect();
+
+        assert_eq!(
+            ids,
+            vec!["gpt-5.2".to_string(), "gpt-5.2-codex".to_string()]
+        );
     }
 }

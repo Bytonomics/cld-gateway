@@ -410,6 +410,7 @@ dependencies = [
  "gateway-auth-codex",
  "gateway-backend-codex",
  "gateway-core",
+ "reqwest",
  "serde",
  "serde_json",
  "serde_path_to_error",
@@ -417,6 +418,7 @@ dependencies = [
  "tower",
  "tracing",
  "uuid",
+ "wiremock",
 ]
 
 [[package]]

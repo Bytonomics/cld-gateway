@@ -677,4 +677,3 @@ The proxy is successful when:
 # Final Scope Statement
 
 This project is a **Codex/ChatGPT OAuth-authenticated Anthropic-compatible proxy**, not a native CLI. Its purpose is to let Anthropic-oriented agent clients, especially OpenCode, talk to an OpenAI-backed authenticated model path while preserving tool-calling behavior closely enough for real coding-agent workflows.
-

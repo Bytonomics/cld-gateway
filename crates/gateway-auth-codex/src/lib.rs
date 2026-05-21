@@ -113,6 +113,38 @@ pub fn load_access_token_default_path() -> Result<Secret<String>, CodexAuthError
     Ok(Secret::new(access_token))
 }
 
+#[derive(Clone)]
+pub struct CodexCredentials {
+    pub access_token: Secret<String>,
+    pub account_id: String,
+}
+
+/// Loads access token + account id from the default auth path in one IO/parse pass.
+///
+/// # Errors
+///
+/// Returns an error if loading/parsing fails or required fields are missing.
+pub fn load_credentials_default_path() -> Result<CodexCredentials, CodexAuthError> {
+    let bytes = std::fs::read(paths::default_auth_json_path())?;
+    let auth: auth_json::AuthJson = serde_json::from_slice(&bytes)?;
+
+    let access_token = auth
+        .tokens
+        .access_token
+        .ok_or(CodexAuthError::MissingField("tokens.access_token"))?;
+
+    let account_id = auth
+        .tokens
+        .account_id
+        .ok_or(CodexAuthError::MissingField("tokens.account_id"))?;
+
+    Ok(CodexCredentials {
+        access_token: Secret::new(access_token),
+        account_id,
+    })
+}
+
+#[derive(Clone)]
 pub struct CodexAuthManager {
     token_url: String,
     client_id: String,

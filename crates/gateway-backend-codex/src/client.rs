@@ -2,6 +2,7 @@
 
 use crate::types::{CodexBackendRequest, CodexBackendResponse};
 use gateway_auth_codex::CodexAuthManager;
+use reqwest::Response;
 use std::time::Duration;
 use url::Url;
 
@@ -13,6 +14,7 @@ pub enum BackendError {
     UnexpectedStatus(u16),
 }
 
+#[derive(Clone)]
 pub struct CodexBackendClient {
     http: reqwest::Client,
     base_url: String,
@@ -43,6 +45,27 @@ impl CodexBackendClient {
         &self,
         req: &CodexBackendRequest,
     ) -> Result<CodexBackendResponse, BackendError> {
+        let res = self.send_streaming(req).await?;
+        let status = res.status().as_u16();
+        let body_text = res.text().await.map_err(|_| BackendError::RequestFailed)?;
+
+        Ok(CodexBackendResponse {
+            status,
+            body: body_text,
+        })
+    }
+
+    /// Sends a request to the Codex backend and returns the raw streaming response.
+    ///
+    /// This is used for consuming `text/event-stream` bodies (Day 11/13).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on transport failures or non-success HTTP status.
+    pub async fn send_streaming(
+        &self,
+        req: &CodexBackendRequest,
+    ) -> Result<Response, BackendError> {
         let url = format!(
             "{}/backend-api/codex/responses",
             self.base_url.trim_end_matches('/')
@@ -68,8 +91,6 @@ impl CodexBackendClient {
             .map_err(|_| BackendError::RequestFailed)?;
 
         let status = res.status().as_u16();
-        let body_text = res.text().await.map_err(|_| BackendError::RequestFailed)?;
-
         if status == 401 {
             return Err(BackendError::UnexpectedStatus(status));
         }
@@ -78,10 +99,7 @@ impl CodexBackendClient {
             return Err(BackendError::UnexpectedStatus(status));
         }
 
-        Ok(CodexBackendResponse {
-            status,
-            body: body_text,
-        })
+        Ok(res)
     }
 
     /// Day 8 contract: on 401, refresh once, retry once, then fail.
@@ -108,6 +126,34 @@ impl CodexBackendClient {
                 req.account_id = refreshed.account_id;
 
                 self.send(&req).await
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Day 8 contract (streaming): on 401, refresh once, retry once, then fail.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the initial request fails, refresh fails, or retry fails.
+    pub async fn send_streaming_with_refresh_retry(
+        &self,
+        auth: &CodexAuthManager,
+        mut req: CodexBackendRequest,
+    ) -> Result<Response, BackendError> {
+        match self.send_streaming(&req).await {
+            Ok(r) => Ok(r),
+            Err(BackendError::UnexpectedStatus(401)) => {
+                let refreshed = auth
+                    .refresh_and_persist_default_path()
+                    .await
+                    .map_err(|_| BackendError::RequestFailed)?;
+
+                req.access_token = gateway_auth_codex::load_access_token_default_path()
+                    .map_err(|_| BackendError::RequestFailed)?;
+                req.account_id = refreshed.account_id;
+
+                self.send_streaming(&req).await
             }
             Err(e) => Err(e),
         }

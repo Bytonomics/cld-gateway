@@ -6,8 +6,10 @@ use crate::exchange::{
 };
 use crate::paths::default_exchange_log_path;
 use crate::redact::{redact_headers, redact_json_keys};
-use axum::body::{Body, to_bytes};
+use axum::body::Body;
 use axum::middleware::Next;
+use bytes::Bytes;
+use futures_util::StreamExt as _;
 use gateway_core::RequestId;
 use http::{Request, Response};
 use serde_json::Value;
@@ -15,6 +17,8 @@ use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
+use tokio::sync::oneshot;
+use tracing::info;
 use uuid::Uuid;
 
 const BODY_LIMIT_BYTES: usize = 5 * 1024 * 1024;
@@ -44,13 +48,13 @@ pub async fn capture_http_exchange(
     let request_method = request_parts.method.to_string();
     let request_uri = request_parts.uri.to_string();
     let request_headers_redacted = redact_headers(&request_parts.headers);
-    let (request_body_capture, request_body_for_downstream) = capture_body(
+    let (request_body_done, request_body_for_downstream) = capture_body_streaming(
         request_parts.headers.get(http::header::CONTENT_TYPE),
         request_body,
-    )
-    .await;
+    );
 
     req = Request::from_parts(request_parts, request_body_for_downstream);
+    req.extensions_mut().insert(request_id.clone());
 
     let mut res = next.run(req).await;
     res.headers_mut().insert(
@@ -66,75 +70,134 @@ pub async fn capture_http_exchange(
         .extensions
         .get::<gateway_core::model_map::ModelResolution>()
         .cloned();
-    let (response_body_capture, response_body_for_client) = capture_body(
+    let (response_body_done, response_body_for_client) = capture_body_streaming(
         response_parts.headers.get(http::header::CONTENT_TYPE),
         response_body,
-    )
-    .await;
+    );
 
     let res = Response::from_parts(response_parts, response_body_for_client);
+    let response_status = res.status().as_u16();
+    let response_headers_redacted = redact_headers(res.headers());
 
-    let duration_ms = started_at
-        .elapsed()
-        .unwrap_or(Duration::from_millis(0))
-        .as_millis();
-    let started_at_unix_ms = started_at
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or(Duration::from_millis(0))
-        .as_millis();
+    // Log after both request and response bodies are fully consumed (or dropped), so we can
+    // capture bodies up to the limit *without* breaking downstream processing for oversized bodies.
+    let log_path = config.log_path.clone();
+    tokio::spawn(async move {
+        let request_body_capture = request_body_done.await.unwrap_or(CapturedBody {
+            content_type: None,
+            bytes_captured: 0,
+            truncated: false,
+            data: CapturedBodyData::Empty,
+        });
 
-    let exchange = ExchangeRecord {
-        request_id: request_id.0.clone(),
-        started_at_unix_ms,
-        duration_ms,
-        meta: if model_resolution.is_some() {
-            Some(ExchangeMeta { model_resolution })
-        } else {
-            None
-        },
-        request: HttpRequestRecord {
-            method: request_method,
-            uri: request_uri,
-            headers: request_headers_redacted,
-            body: request_body_capture,
-        },
-        response: HttpResponseRecord {
-            status: res.status().as_u16(),
-            headers: redact_headers(res.headers()),
-            body: response_body_capture,
-        },
-    };
+        let response_body_capture = response_body_done.await.unwrap_or(CapturedBody {
+            content_type: None,
+            bytes_captured: 0,
+            truncated: false,
+            data: CapturedBodyData::Empty,
+        });
 
-    let _ = append_exchange_record(&config.log_path, &exchange);
+        let duration_ms = started_at
+            .elapsed()
+            .unwrap_or(Duration::from_millis(0))
+            .as_millis();
+        let started_at_unix_ms = started_at
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or(Duration::from_millis(0))
+            .as_millis();
+
+        let exchange = ExchangeRecord {
+            request_id: request_id.0.clone(),
+            started_at_unix_ms,
+            duration_ms,
+            meta: if model_resolution.is_some() {
+                Some(ExchangeMeta { model_resolution })
+            } else {
+                None
+            },
+            request: HttpRequestRecord {
+                method: request_method,
+                uri: request_uri,
+                headers: request_headers_redacted,
+                body: request_body_capture,
+            },
+            response: HttpResponseRecord {
+                status: response_status,
+                headers: response_headers_redacted,
+                body: response_body_capture,
+            },
+        };
+
+        let _ = append_exchange_record(&log_path, &exchange);
+    });
 
     res
 }
 
-async fn capture_body(
+fn capture_body_streaming(
     content_type: Option<&http::HeaderValue>,
     body: Body,
-) -> (CapturedBody, Body) {
+) -> (oneshot::Receiver<CapturedBody>, Body) {
     let ct = content_type
         .and_then(|v| v.to_str().ok())
         .map(std::string::ToString::to_string);
 
-    // `to_bytes` enforces a limit; if exceeded it returns an error. We treat that as truncation.
-    let bytes_result = to_bytes(body, BODY_LIMIT_BYTES).await;
-    let (bytes, truncated, capture_skipped_due_to_size) = match bytes_result {
-        Ok(b) => (b, false, false),
-        Err(_) => (bytes::Bytes::new(), true, true),
-    };
+    let (tx, rx) = oneshot::channel::<CapturedBody>();
+    let captured: Vec<u8> = Vec::new();
+    let truncated = false;
 
-    let bytes_captured = bytes.len();
+    let stream = body.into_data_stream();
+    let tee_stream = futures_util::stream::unfold(
+        (stream, tx, ct.clone(), captured, truncated),
+        |(mut stream, tx, ct, mut captured, mut truncated)| async move {
+            match stream.next().await {
+                Some(Ok(chunk)) => {
+                    if !truncated {
+                        let was_truncated = truncated;
+                        let remaining = BODY_LIMIT_BYTES.saturating_sub(captured.len());
+                        if remaining == 0 {
+                            truncated = true;
+                        } else if chunk.len() <= remaining {
+                            captured.extend_from_slice(&chunk);
+                        } else {
+                            captured.extend_from_slice(&chunk[..remaining]);
+                            truncated = true;
+                        }
+                        if !was_truncated && truncated {
+                            info!("body capture skipped: exceeded {BODY_LIMIT_BYTES} bytes limit");
+                        }
+                    }
+                    Some((
+                        Ok::<Bytes, axum::Error>(chunk),
+                        (stream, tx, ct, captured, truncated),
+                    ))
+                }
+                Some(Err(err)) => Some((
+                    Err::<Bytes, axum::Error>(err),
+                    (stream, tx, ct, captured, truncated),
+                )),
+                None => {
+                    let captured_body = build_captured_body(ct, &captured, truncated);
+                    let _ = tx.send(captured_body);
+                    None
+                }
+            }
+        },
+    );
 
-    let data = if capture_skipped_due_to_size {
+    (rx, Body::from_stream(tee_stream))
+}
+
+fn build_captured_body(ct: Option<String>, captured: &[u8], truncated: bool) -> CapturedBody {
+    let bytes_captured = captured.len();
+
+    let data = if truncated {
         CapturedBodyData::Binary {
             note: format!("body capture skipped: exceeded {BODY_LIMIT_BYTES} bytes limit"),
         }
-    } else if bytes.is_empty() {
+    } else if captured.is_empty() {
         CapturedBodyData::Empty
-    } else if let Ok(as_str) = std::str::from_utf8(&bytes) {
-        // Try JSON first (regardless of header; Claude Code payloads may omit content-type).
+    } else if let Ok(as_str) = std::str::from_utf8(captured) {
         match serde_json::from_str::<Value>(as_str) {
             Ok(json) => CapturedBodyData::Json {
                 value: redact_json_keys(json),
@@ -149,15 +212,12 @@ async fn capture_body(
         }
     };
 
-    (
-        CapturedBody {
-            content_type: ct,
-            bytes_captured,
-            truncated,
-            data,
-        },
-        Body::from(bytes),
-    )
+    CapturedBody {
+        content_type: ct,
+        bytes_captured,
+        truncated,
+        data,
+    }
 }
 
 /// Appends a single exchange record as one JSON object per line.
@@ -182,15 +242,12 @@ pub fn append_exchange_record(path: &Path, record: &ExchangeRecord) -> std::io::
 
 #[cfg(test)]
 mod tests {
-    use super::{BODY_LIMIT_BYTES, capture_body};
+    use super::{BODY_LIMIT_BYTES, build_captured_body};
     use crate::exchange::CapturedBodyData;
-    use axum::body::Body;
 
     #[tokio::test]
-    async fn capture_body_marks_oversize_capture_as_skipped() {
-        let payload = "x".repeat(BODY_LIMIT_BYTES + 1);
-        let (captured, _forwarded) = capture_body(None, Body::from(payload)).await;
-
+    async fn build_captured_body_marks_oversize_capture_as_skipped() {
+        let captured = build_captured_body(None, b"", true);
         assert!(captured.truncated);
         match captured.data {
             CapturedBodyData::Binary { note } => {

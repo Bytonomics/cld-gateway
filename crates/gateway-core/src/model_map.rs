@@ -94,7 +94,7 @@ pub fn resolve_model(map: &ModelMap, requested: &str) -> ModelResolution {
 
     ModelResolution {
         requested: requested_string,
-        selected_backend_model: default_backend_model(),
+        selected_backend_model: map.default_backend_model.clone(),
         selection_reason: "fallback_default",
     }
 }

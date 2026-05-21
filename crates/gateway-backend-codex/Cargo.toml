@@ -9,6 +9,9 @@ workspace = true
 [dependencies]
 gateway-auth-codex = { path = "../gateway-auth-codex" }
 gateway-core = { path = "../gateway-core" }
+bytes.workspace = true
+eventsource-stream.workspace = true
+futures-util.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

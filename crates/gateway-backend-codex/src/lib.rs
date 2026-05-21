@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 pub mod client;
+pub mod sse_unary;
 pub mod types;
 
 #[must_use]

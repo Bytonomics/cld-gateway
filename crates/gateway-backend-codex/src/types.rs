@@ -15,3 +15,9 @@ pub struct CodexBackendResponse {
     pub status: u16,
     pub body: String,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexUnaryDecoded {
+    pub final_text: String,
+    pub backend_model: Option<String>,
+}

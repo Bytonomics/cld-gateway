@@ -1,4 +1,4 @@
-# Root workspace manifest (virtual): no [package] section here.                                             
+# Root workspace manifest (virtual): no [package] section here.
 # This file configures the whole workspace: members, shared deps, and lint policy.
 
 [workspace]
@@ -61,6 +61,7 @@ http = "1"
 
 # bytes provides efficient byte buffers (useful for request/response body capture and streaming).
 bytes = "1"
+futures-util = "0.3"
 
 # Serde is the serialization framework.
 # Feature:
@@ -74,6 +75,9 @@ serde_json = "1"
 # Feature:
 # - v4: enables random UUIDv4 generation.
 uuid = { version = "1", features = ["v4"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde_path_to_error = "0.1"
 
 # dirs provides canonical home_dir() resolution for user-scoped logs/config paths.
 dirs = "6"
@@ -88,7 +92,7 @@ base64 = "0.22"
 thiserror = "2"
 
 # reqwest is used for OAuth refresh + backend HTTP client (Days 8/10).
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 
 # serde_urlencoded is used for OAuth form-encoded refresh requests (Day 8).
 serde_urlencoded = "0.7"
@@ -99,3 +103,5 @@ wiremock = "0.6"
 # url is used to manage base URLs for clients and wiremock (Day 10).
 url = "2"
 
+# eventsource-stream parses `text/event-stream` from a `Stream<Item = Result<bytes::Bytes, _>>` (Day 11).
+eventsource-stream = "0.2"

@@ -8,6 +8,15 @@ workspace = true
 
 [dependencies]
 axum.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+serde_path_to_error.workspace = true
+tracing.workspace = true
 gateway-auth-codex = { path = "../gateway-auth-codex" }
+gateway-backend-codex = { path = "../gateway-backend-codex" }
 gateway-core = { path = "../gateway-core" }
+uuid.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+tower = { workspace = true, features = ["util"] }

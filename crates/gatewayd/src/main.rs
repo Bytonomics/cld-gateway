@@ -10,8 +10,15 @@ use gateway_observability::middleware::{CaptureConfig, capture_http_exchange};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
     let config = CaptureConfig::default();
-    let app = gateway_http_anthropic::router(AppState).layer(axum::middleware::from_fn(
+    let app = gateway_http_anthropic::router(AppState::default()).layer(axum::middleware::from_fn(
         move |req, next| {
             let config = config.clone();
             async move { capture_http_exchange(req, next, config).await }

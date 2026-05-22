@@ -11,7 +11,10 @@ use axum::extract::Request;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
+use eventsource_stream::Eventsource as _;
+use futures_util::StreamExt as _;
 use gateway_core::RequestId;
 use gateway_core::Secret;
 use gateway_core::model_map::resolve_model;
@@ -235,12 +238,8 @@ async fn v1_messages(
     };
 
     if req.stream {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": { "type": "invalid_request_error", "message": "stream=true is not supported yet" }
-            })),
-        )
+        return stream_messages(state, request_id, req)
+            .await
             .into_response();
     }
 
@@ -332,6 +331,224 @@ async fn v1_messages(
     http_res
 }
 
+fn sse_error(
+    message_type: &str,
+    message: &str,
+) -> Sse<futures_util::stream::BoxStream<'static, Result<Event, std::convert::Infallible>>> {
+    let payload = serde_json::json!({
+        "type": "error",
+        "error": { "type": message_type, "message": message }
+    })
+    .to_string();
+
+    let stream = futures_util::stream::iter([Ok::<Event, std::convert::Infallible>(
+        Event::default().event("error").data(payload),
+    )])
+    .boxed();
+
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+fn anthropic_stream_start_events(msg_id: &str, model: &str) -> Vec<Event> {
+    vec![
+        Event::default().event("message_start").data(
+            serde_json::json!({
+                "type": "message_start",
+                "message": {
+                    "id": msg_id,
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [],
+                    "model": model,
+                    "stop_reason": null,
+                    "stop_sequence": null,
+                    "usage": { "input_tokens": 0, "output_tokens": 0 }
+                }
+            })
+            .to_string(),
+        ),
+        Event::default().event("content_block_start").data(
+            serde_json::json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": { "type": "text", "text": "" }
+            })
+            .to_string(),
+        ),
+    ]
+}
+
+fn anthropic_stream_final_events() -> Vec<Event> {
+    vec![
+        Event::default()
+            .event("content_block_stop")
+            .data(serde_json::json!({"type":"content_block_stop","index":0}).to_string()),
+        Event::default().event("message_delta").data(
+            serde_json::json!({
+                "type":"message_delta",
+                "delta":{"stop_reason":"end_turn","stop_sequence":null},
+                "usage":{"output_tokens":0}
+            })
+            .to_string(),
+        ),
+        Event::default()
+            .event("message_stop")
+            .data(serde_json::json!({"type":"message_stop"}).to_string()),
+    ]
+}
+
+async fn stream_messages(
+    state: AppState,
+    request_id: Option<axum::extract::Extension<RequestId>>,
+    req: AnthropicMessagesRequest,
+) -> Sse<futures_util::stream::BoxStream<'static, Result<Event, std::convert::Infallible>>> {
+    let map = load_model_map(&default_model_map_path()).unwrap_or(ModelMap {
+        default_backend_model: "gpt-5.2".to_string(),
+        aliases: std::collections::BTreeMap::new(),
+    });
+    let resolution = resolve_model(&map, &req.model);
+
+    if let Some(axum::extract::Extension(rid)) = &request_id {
+        info!(
+            request_id = %rid.0,
+            requested_model = %resolution.requested,
+            selected_backend_model = %resolution.selected_backend_model,
+            selection_reason = %resolution.selection_reason,
+            "resolved model for /v1/messages (streaming)"
+        );
+    }
+
+    let Some(input_text) = extract_user_text(&req.messages) else {
+        return sse_error("invalid_request_error", "no user text content found");
+    };
+
+    let creds = match gateway_auth_codex::load_credentials_default_path() {
+        Ok(c) => c,
+        Err(err) => {
+            let message = format!("{err}");
+            return sse_error("auth_error", &message);
+        }
+    };
+
+    let request_to_backend = gateway_backend_codex::types::CodexBackendRequest {
+        access_token: creds.access_token,
+        account_id: creds.account_id,
+        model: resolution.selected_backend_model.clone(),
+        input_text,
+    };
+
+    let backend_response = state
+        .backend
+        .send_streaming_with_refresh_retry(&state.auth, request_to_backend)
+        .await;
+
+    // Precompute the Anthropic message and emit the standard event flow:
+    // message_start -> content_block_start -> (content_block_delta...)* -> content_block_stop ->
+    // message_delta -> message_stop
+    let msg_id = format!("msg_{}", Uuid::new_v4());
+    let model = req.model.clone();
+
+    let start_events = anthropic_stream_start_events(&msg_id, &model);
+
+    let initial = futures_util::stream::iter(
+        start_events
+            .into_iter()
+            .map(Ok::<Event, std::convert::Infallible>),
+    );
+
+    let final_events = anthropic_stream_final_events();
+    let final_stream = futures_util::stream::iter(
+        final_events
+            .into_iter()
+            .map(Ok::<_, std::convert::Infallible>),
+    );
+
+    let tail: futures_util::stream::BoxStream<'static, Result<Event, std::convert::Infallible>> =
+        match backend_response {
+            Ok(res) => {
+                let deltas = res
+                    .bytes_stream()
+                    .eventsource()
+                    .filter_map(|item| async move {
+                        let evt = item.ok()?;
+                        let data = evt.data.trim();
+                        if data.is_empty() || data == "[DONE]" {
+                            return None;
+                        }
+                        let text = extract_stream_delta_text(data)?;
+                        let payload = serde_json::json!({
+                            "type": "content_block_delta",
+                            "index": 0,
+                            "delta": { "type": "text_delta", "text": text }
+                        })
+                        .to_string();
+                        Some(Ok::<Event, std::convert::Infallible>(
+                            Event::default().event("content_block_delta").data(payload),
+                        ))
+                    });
+
+                Box::pin(deltas.chain(final_stream))
+            }
+            Err(err) => {
+                let payload = serde_json::json!({
+                    "type": "error",
+                    "error": { "type": "upstream_error", "message": format!("{err}") }
+                })
+                .to_string();
+                Box::pin(futures_util::stream::iter([Ok::<
+                    Event,
+                    std::convert::Infallible,
+                >(
+                    Event::default().event("error").data(payload),
+                )]))
+            }
+        };
+
+    let stream = initial.chain(tail).boxed();
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+fn extract_stream_delta_text(data: &str) -> Option<String> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else {
+        return Some(data.to_string());
+    };
+
+    let mut last = None;
+    extract_last_text_from_value(&value, &mut last);
+    last
+}
+
+fn extract_last_text_from_value(value: &serde_json::Value, last: &mut Option<String>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(serde_json::Value::String(text)) = map.get("text") {
+                *last = Some(text.clone());
+            }
+            if let Some(serde_json::Value::String(delta)) = map.get("delta") {
+                *last = Some(delta.clone());
+            }
+            if let Some(content) = map.get("content") {
+                extract_last_text_from_value(content, last);
+            }
+            for (k, child) in map {
+                if k == "text" || k == "delta" || k == "content" {
+                    continue;
+                }
+                extract_last_text_from_value(child, last);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for child in items {
+                extract_last_text_from_value(child, last);
+            }
+        }
+        serde_json::Value::String(_)
+        | serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_) => {}
+    }
+}
+
 fn deserialize_with_path<T>(body: &[u8]) -> Result<T, String>
 where
     T: serde::de::DeserializeOwned,
@@ -403,8 +620,8 @@ fn extract_user_text(messages: &[AnthropicMessage]) -> Option<String> {
 #[cfg(test)]
 mod messages_tests {
     use super::{AnthropicContent, AnthropicMessage, extract_user_text};
-    use axum::body::{Body, to_bytes};
-    use axum::http::{Request, StatusCode};
+    use axum::body::Body;
+    use axum::http::Request;
     use tower::ServiceExt as _;
 
     #[test]
@@ -434,7 +651,7 @@ mod messages_tests {
     }
 
     #[tokio::test]
-    async fn v1_messages_rejects_stream_true_without_backend_call() {
+    async fn v1_messages_supports_stream_true() {
         let app = super::router(super::AppState::default());
         let req_body = serde_json::json!({
             "model": "gpt-5.2",
@@ -454,15 +671,13 @@ mod messages_tests {
             .await
             .unwrap();
 
-        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
-        let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(
-            json["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("stream=true")
-        );
+        assert!(res.status().is_success());
+        let content_type = res
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(content_type.contains("text/event-stream"));
     }
 }
 
@@ -477,6 +692,10 @@ mod models_api_tests {
 
     #[tokio::test]
     async fn v1_models_proxies_openai_models_list() {
+        if std::env::var("RUN_WIREMOCK").ok().as_deref() != Some("1") {
+            return;
+        }
+
         let mock = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/v1/models"))

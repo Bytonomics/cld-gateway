@@ -8,6 +8,8 @@ workspace = true
 
 [dependencies]
 axum.workspace = true
+eventsource-stream.workspace = true
+futures-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_path_to_error.workspace = true

@@ -62,6 +62,7 @@ http = "1"
 # bytes provides efficient byte buffers (useful for request/response body capture and streaming).
 bytes = "1"
 futures-util = "0.3"
+rand = "0.8"
 
 # Serde is the serialization framework.
 # Feature:
@@ -78,6 +79,8 @@ uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde_path_to_error = "0.1"
+sha2 = "0.10"
+keyring = "3"
 
 # dirs provides canonical home_dir() resolution for user-scoped logs/config paths.
 dirs = "6"

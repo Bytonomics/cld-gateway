@@ -4,6 +4,10 @@ use std::path::PathBuf;
 
 #[must_use]
 pub fn default_auth_json_path() -> PathBuf {
+    if let Ok(path) = std::env::var("CODEX_AUTH_JSON_PATH") {
+        return PathBuf::from(path);
+    }
+
     if let Ok(codex_home) = std::env::var("CODEX_HOME") {
         return PathBuf::from(codex_home).join("auth.json");
     }

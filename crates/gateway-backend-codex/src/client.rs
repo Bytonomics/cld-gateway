@@ -12,6 +12,8 @@ pub enum BackendError {
     RequestFailed,
     #[error("unexpected response status {0}")]
     UnexpectedStatus(u16),
+    #[error("unexpected response status {status}: {body}")]
+    UnexpectedStatusWithBody { status: u16, body: String },
 }
 
 #[derive(Clone)]
@@ -91,11 +93,16 @@ impl CodexBackendClient {
             .map_err(|_| BackendError::RequestFailed)?;
 
         let status = res.status().as_u16();
-        if status == 401 {
-            return Err(BackendError::UnexpectedStatus(status));
-        }
-
         if status >= 300 {
+            let body = res
+                .text()
+                .await
+                .ok()
+                .map(|s| truncate_error_body(&s))
+                .filter(|s| !s.trim().is_empty());
+            if let Some(body) = body {
+                return Err(BackendError::UnexpectedStatusWithBody { status, body });
+            }
             return Err(BackendError::UnexpectedStatus(status));
         }
 
@@ -114,7 +121,10 @@ impl CodexBackendClient {
     ) -> Result<CodexBackendResponse, BackendError> {
         match self.send(&req).await {
             Ok(r) => Ok(r),
-            Err(BackendError::UnexpectedStatus(401)) => {
+            Err(
+                BackendError::UnexpectedStatus(401)
+                | BackendError::UnexpectedStatusWithBody { status: 401, .. },
+            ) => {
                 let refreshed = auth
                     .refresh_and_persist_default_path()
                     .await
@@ -143,7 +153,10 @@ impl CodexBackendClient {
     ) -> Result<Response, BackendError> {
         match self.send_streaming(&req).await {
             Ok(r) => Ok(r),
-            Err(BackendError::UnexpectedStatus(401)) => {
+            Err(
+                BackendError::UnexpectedStatus(401)
+                | BackendError::UnexpectedStatusWithBody { status: 401, .. },
+            ) => {
                 let refreshed = auth
                     .refresh_and_persist_default_path()
                     .await
@@ -160,10 +173,27 @@ impl CodexBackendClient {
     }
 }
 
+fn truncate_error_body(body: &str) -> String {
+    const MAX: usize = 8 * 1024;
+    if body.len() <= MAX {
+        body.to_string()
+    } else {
+        let mut s = body[..MAX].to_string();
+        s.push_str("…(truncated)");
+        s
+    }
+}
+
 fn build_request_body(req: &CodexBackendRequest) -> serde_json::Value {
     // Minimal body that resembles Responses API shape. Keep it flexible until Day 13.
     serde_json::json!({
         "model": req.model,
+        "instructions": req.instructions,
+        // The ChatGPT Codex backend requires `store=false` (Codex CLI sets this) to avoid persisting
+        // requests. If omitted, the backend defaults to storing and rejects the request.
+        "store": false,
+        // We always consume the backend response as `text/event-stream`, so request streaming.
+        "stream": true,
         "input": [
             {
                 "role": "user",

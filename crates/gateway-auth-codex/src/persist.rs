@@ -44,6 +44,7 @@ pub fn atomic_write_json(path: &Path, value: &serde_json::Value) -> Result<(), C
     let dir = path
         .parent()
         .ok_or(CodexAuthError::MissingField("auth.json parent dir"))?;
+    std::fs::create_dir_all(dir)?;
 
     let bytes = serde_json::to_vec_pretty(value)?;
 

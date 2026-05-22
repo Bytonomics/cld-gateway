@@ -33,9 +33,17 @@ pub struct AppState {
 impl AppState {
     #[must_use]
     pub fn from_env() -> Self {
+        let openai_api_key = std::env::var("OPENAI_API_KEY")
+            .ok()
+            .map(Secret::new)
+            .or_else(|| {
+                gateway_auth_codex::load_openai_api_key_default_path()
+                    .ok()
+                    .flatten()
+            });
         Self {
             openai_models_url: "https://api.openai.com/v1/models".to_string(),
-            openai_api_key: std::env::var("OPENAI_API_KEY").ok().map(Secret::new),
+            openai_api_key,
             ..Self::default()
         }
     }
@@ -76,7 +84,7 @@ async fn auth_status() -> impl IntoResponse {
             "logged_in": snap.has_access_token && snap.has_refresh_token,
             "account_id": snap.account_id,
             "expires_at_unix_seconds": snap.expires_at_unix_seconds,
-            "source": "codex_auth_json",
+            "source": "gateway_auth_json",
         })),
         Err(err) => Json(serde_json::json!({
             "logged_in": false,
@@ -95,7 +103,7 @@ async fn auth_refresh() -> axum::response::Response {
             "ok": true,
             "account_id": snap.account_id,
             "expires_at_unix_seconds": snap.expires_at_unix_seconds,
-            "source": "codex_auth_json",
+            "source": "gateway_auth_json",
         }))
         .into_response(),
         Err(err) => (
@@ -125,7 +133,7 @@ async fn v1_models_with_state(State(state): State<AppState>) -> axum::response::
             Json(serde_json::json!({
                 "error": {
                     "type": "config_error",
-                    "message": "OPENAI_API_KEY is not set; required to serve /v1/models from api.openai.com"
+                    "message": "OPENAI_API_KEY is not set (env or ~/.gateway/auth.json); required to serve /v1/models from api.openai.com"
                 }
             })),
         )
@@ -198,7 +206,17 @@ struct AnthropicMessagesRequest {
     model: String,
     messages: Vec<AnthropicMessage>,
     #[serde(default)]
+    system: Vec<AnthropicSystemBlock>,
+    #[serde(default)]
     stream: bool,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct AnthropicSystemBlock {
+    #[serde(rename = "type")]
+    block_type: String,
+    #[serde(default)]
+    text: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -261,6 +279,7 @@ async fn v1_messages(
     let Some(input_text) = extract_user_text(&req.messages) else {
         return bad_request("no user text content found");
     };
+    let instructions = extract_system_text(&req.system).unwrap_or_default();
 
     let creds = match gateway_auth_codex::load_credentials_default_path() {
         Ok(c) => c,
@@ -279,6 +298,7 @@ async fn v1_messages(
         access_token: creds.access_token,
         account_id: creds.account_id,
         model: resolution.selected_backend_model.clone(),
+        instructions,
         input_text,
     };
 
@@ -421,6 +441,7 @@ async fn stream_messages(
     let Some(input_text) = extract_user_text(&req.messages) else {
         return sse_error("invalid_request_error", "no user text content found");
     };
+    let instructions = extract_system_text(&req.system).unwrap_or_default();
 
     let creds = match gateway_auth_codex::load_credentials_default_path() {
         Ok(c) => c,
@@ -434,6 +455,7 @@ async fn stream_messages(
         access_token: creds.access_token,
         account_id: creds.account_id,
         model: resolution.selected_backend_model.clone(),
+        instructions,
         input_text,
     };
 
@@ -614,6 +636,29 @@ fn extract_user_text(messages: &[AnthropicMessage]) -> Option<String> {
         None
     } else {
         Some(parts.join("\n"))
+    }
+}
+
+fn extract_system_text(system: &[AnthropicSystemBlock]) -> Option<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    for block in system {
+        if block.block_type != "text" {
+            continue;
+        }
+        let Some(text) = block.text.as_deref() else {
+            continue;
+        };
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        parts.push(trimmed);
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n\n"))
     }
 }
 

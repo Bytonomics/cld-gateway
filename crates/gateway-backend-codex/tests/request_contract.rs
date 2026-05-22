@@ -21,6 +21,7 @@ async fn sends_required_headers_and_minimal_body() {
         .and(header("accept", "text/event-stream"))
         .and(body_json(serde_json::json!({
             "model": "gpt-5.2",
+            "instructions": "You are a helpful assistant.",
             "input": [
                 {
                     "role": "user",
@@ -42,6 +43,7 @@ async fn sends_required_headers_and_minimal_body() {
         access_token: Secret::new("access_test".to_string()),
         account_id: "acct_test_123".to_string(),
         model: "gpt-5.2".to_string(),
+        instructions: "You are a helpful assistant.".to_string(),
         input_text: "hello".to_string(),
     };
 

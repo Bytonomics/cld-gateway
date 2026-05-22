@@ -9,6 +9,10 @@ workspace = true
 [dependencies]
 gateway-http-anthropic = { path = "../gateway-http-anthropic" }
 gateway-observability = { path = "../gateway-observability" }
+gateway-auth-codex = { path = "../gateway-auth-codex" }
 axum.workspace = true
 tokio.workspace = true
 tracing-subscriber.workspace = true
+tracing.workspace = true
+crossterm.workspace = true
+ratatui.workspace = true

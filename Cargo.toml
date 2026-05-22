@@ -63,6 +63,9 @@ http = "1"
 bytes = "1"
 futures-util = "0.3"
 rand = "0.8"
+tiny_http = "0.12"
+webbrowser = "1"
+urlencoding = "2"
 
 # Serde is the serialization framework.
 # Feature:
@@ -108,3 +111,5 @@ url = "2"
 
 # eventsource-stream parses `text/event-stream` from a `Stream<Item = Result<bytes::Bytes, _>>` (Day 11).
 eventsource-stream = "0.2"
+ratatui = "0.29"
+crossterm = "0.29"

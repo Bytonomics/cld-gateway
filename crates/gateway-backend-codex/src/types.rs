@@ -7,6 +7,7 @@ pub struct CodexBackendRequest {
     pub access_token: Secret<String>,
     pub account_id: String,
     pub model: String,
+    pub instructions: String,
     pub input_text: String,
 }
 

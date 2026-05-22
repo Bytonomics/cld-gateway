@@ -7,7 +7,7 @@
 
 mod auth_json;
 mod jwt;
-mod keyring_auth;
+pub mod login;
 pub mod oauth;
 pub mod paths;
 mod persist;
@@ -58,117 +58,34 @@ pub enum CodexAuthError {
     #[error("token endpoint returned unexpected response")]
     RefreshUnexpectedResponse,
 
-    #[error("failed to load Codex auth from keyring service {service} key {key}")]
-    KeyringLoad {
-        service: &'static str,
-        key: String,
-        #[source]
-        source: keyring::Error,
-    },
+    #[error("no gateway auth found at {path}")]
+    AuthNotFound { path: PathBuf },
 
-    #[error("failed to save Codex auth to keyring service {service} key {key}")]
-    KeyringSave {
-        service: &'static str,
-        key: String,
-        #[source]
-        source: keyring::Error,
-    },
+    #[error("login timed out waiting for browser callback")]
+    LoginTimeout,
 
-    #[error("no Codex auth found in keyring ({service}/{key}) and no auth.json at {path}")]
-    AuthNotFound {
-        service: &'static str,
-        key: String,
-        path: PathBuf,
-    },
+    #[error("login callback missing code/state")]
+    LoginInvalidCallback,
+
+    #[error("login callback state mismatch")]
+    LoginStateMismatch,
+
+    #[error("token exchange failed with status {0}")]
+    LoginTokenExchangeFailed(u16),
 }
 
-#[derive(Debug, Clone)]
-enum AuthStorage {
-    Keyring {
-        service: &'static str,
-        key: String,
-        fallback_path: PathBuf,
-    },
-    File {
-        path: PathBuf,
-    },
-}
-
-impl AuthStorage {
-    fn persist_json_value(&self, value: &serde_json::Value) -> Result<(), CodexAuthError> {
-        match self {
-            AuthStorage::Keyring {
-                service,
-                key,
-                fallback_path,
-            } => {
-                let serialized = serde_json::to_string(value).map_err(CodexAuthError::Json)?;
-                keyring_auth::save_codex_auth_json_to_keyring_key(key, &serialized).map_err(
-                    |err| match err {
-                        keyring_auth::KeyringAuthError::NotFound => CodexAuthError::KeyringSave {
-                            service,
-                            key: key.clone(),
-                            source: keyring::Error::NoEntry,
-                        },
-                        keyring_auth::KeyringAuthError::Keyring(source) => {
-                            CodexAuthError::KeyringSave {
-                                service,
-                                key: key.clone(),
-                                source,
-                            }
-                        }
-                    },
-                )?;
-
-                // If we successfully wrote to keyring, match Codex behavior: best-effort cleanup
-                // of the file fallback (if any). Failures here should not break refresh.
-                let _ = std::fs::remove_file(fallback_path);
-                Ok(())
-            }
-            AuthStorage::File { path } => {
-                persist::atomic_write_json(path, value)?;
-                Ok(())
-            }
+fn load_auth_json_default_path() -> Result<serde_json::Value, CodexAuthError> {
+    let path = paths::default_auth_json_path();
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(CodexAuthError::AuthNotFound { path });
         }
-    }
-}
-
-fn load_auth_json_auto() -> Result<(serde_json::Value, AuthStorage), CodexAuthError> {
-    let (codex_home, key) = keyring_auth::compute_default_key();
-    let service = keyring_auth::keyring_service();
-
-    match keyring_auth::load_codex_auth_json_from_keyring() {
-        Ok(json) => {
-            let value: serde_json::Value = serde_json::from_str(&json)?;
-            Ok((
-                value,
-                AuthStorage::Keyring {
-                    service,
-                    key,
-                    fallback_path: codex_home.join("auth.json"),
-                },
-            ))
+        Err(err) => {
+            return Err(CodexAuthError::IoWithPath { path, source: err });
         }
-        Err(keyring_auth::KeyringAuthError::NotFound) => {
-            let path = paths::default_auth_json_path();
-            let bytes = match std::fs::read(&path) {
-                Ok(bytes) => bytes,
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                    return Err(CodexAuthError::AuthNotFound { service, key, path });
-                }
-                Err(err) => {
-                    return Err(CodexAuthError::IoWithPath { path, source: err });
-                }
-            };
-            let value: serde_json::Value = serde_json::from_slice(&bytes)?;
-            Ok((value, AuthStorage::File { path }))
-        }
-        Err(keyring_auth::KeyringAuthError::Keyring(err)) => Err(CodexAuthError::KeyringLoad {
-            service,
-            key,
-            source: err,
-        }),
-    }
+    };
+    Ok(serde_json::from_slice::<serde_json::Value>(&bytes)?)
 }
 
 /// Loads Codex auth from the provided `auth.json` path and returns a safe snapshot.
@@ -183,20 +100,32 @@ pub fn load_codex_auth(path: &Path) -> Result<CodexAuthSnapshot, CodexAuthError>
     })?;
     let auth: auth_json::AuthJson = serde_json::from_slice(&bytes)?;
 
+    load_codex_auth_from_parsed(auth)
+}
+
+fn load_codex_auth_from_parsed(
+    auth: auth_json::AuthJson,
+) -> Result<CodexAuthSnapshot, CodexAuthError> {
+    let tokens = auth.tokens.ok_or(CodexAuthError::MissingField("tokens"))?;
+
     // `id_token` is part of Codex auth.json; we intentionally don't expose it in the snapshot, but
     // we do read it so it remains covered by parsing/fixtures and doesn't rot.
-    let _id_token_present = auth.tokens.id_token.is_some();
+    let _id_token_present = tokens.id_token.is_some();
 
-    let access_token = auth
-        .tokens
+    let access_token = tokens
         .access_token
         .as_deref()
         .ok_or(CodexAuthError::MissingField("tokens.access_token"))?;
-    let refresh_token_present = auth.tokens.refresh_token.is_some();
+    let refresh_token_present = tokens.refresh_token.is_some();
 
-    let account_id = auth
-        .tokens
+    let account_id = tokens
         .account_id
+        .or_else(|| {
+            tokens
+                .id_token
+                .as_deref()
+                .and_then(jwt::extract_chatgpt_account_id_unverified)
+        })
         .ok_or(CodexAuthError::MissingField("tokens.account_id"))?;
 
     let exp = jwt::extract_exp_unverified(access_token)?;
@@ -209,13 +138,13 @@ pub fn load_codex_auth(path: &Path) -> Result<CodexAuthSnapshot, CodexAuthError>
     })
 }
 
-/// Loads Codex auth from the default path (`$CODEX_HOME/auth.json` or `~/.codex/auth.json`).
+/// Loads gateway auth from the default path (`$GATEWAY_HOME/auth.json` or `~/.gateway/auth.json`).
 ///
 /// # Errors
 ///
 /// Returns an error if loading/parsing fails or required fields are missing.
 pub fn load_codex_auth_default_path() -> Result<CodexAuthSnapshot, CodexAuthError> {
-    let (value, _) = load_auth_json_auto()?;
+    let value = load_auth_json_default_path()?;
     let auth: auth_json::AuthJson = serde_json::from_value(value)?;
     load_codex_auth_from_parsed(auth)
 }
@@ -231,6 +160,37 @@ pub fn load_access_token_default_path() -> Result<Secret<String>, CodexAuthError
     Ok(load_credentials_default_path()?.access_token)
 }
 
+/// Loads `OPENAI_API_KEY` from the gateway auth.json if present.
+///
+/// # Errors
+///
+/// Returns an error if auth.json cannot be read or parsed.
+pub fn load_openai_api_key_default_path() -> Result<Option<Secret<String>>, CodexAuthError> {
+    let value = load_auth_json_default_path()?;
+    let auth: auth_json::AuthJson = serde_json::from_value(value)?;
+    Ok(auth.openai_api_key.map(Secret::new))
+}
+
+/// Persists `OPENAI_API_KEY` into the gateway auth.json.
+///
+/// This mirrors Codex’s file format key name (`OPENAI_API_KEY`), but stores it under `~/.gateway/`.
+///
+/// # Errors
+///
+/// Returns an error if the auth.json cannot be written.
+pub fn write_openai_api_key_default_path(api_key: &str) -> Result<(), CodexAuthError> {
+    let auth = auth_json::AuthJson {
+        auth_mode: Some("api_key".to_string()),
+        openai_api_key: Some(api_key.to_string()),
+        tokens: None,
+        last_refresh: None,
+    };
+    let value = serde_json::to_value(auth)?;
+    let path = paths::default_auth_json_path();
+    persist::atomic_write_json(&path, &value)?;
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct CodexCredentials {
     pub access_token: Secret<String>,
@@ -243,49 +203,27 @@ pub struct CodexCredentials {
 ///
 /// Returns an error if loading/parsing fails or required fields are missing.
 pub fn load_credentials_default_path() -> Result<CodexCredentials, CodexAuthError> {
-    let (value, _) = load_auth_json_auto()?;
+    let value = load_auth_json_default_path()?;
     let auth: auth_json::AuthJson = serde_json::from_value(value)?;
+    let tokens = auth.tokens.ok_or(CodexAuthError::MissingField("tokens"))?;
 
-    let access_token = auth
-        .tokens
+    let access_token = tokens
         .access_token
         .ok_or(CodexAuthError::MissingField("tokens.access_token"))?;
 
-    let account_id = auth
-        .tokens
+    let account_id = tokens
         .account_id
+        .or_else(|| {
+            tokens
+                .id_token
+                .as_deref()
+                .and_then(jwt::extract_chatgpt_account_id_unverified)
+        })
         .ok_or(CodexAuthError::MissingField("tokens.account_id"))?;
 
     Ok(CodexCredentials {
         access_token: Secret::new(access_token),
         account_id,
-    })
-}
-
-fn load_codex_auth_from_parsed(
-    auth: auth_json::AuthJson,
-) -> Result<CodexAuthSnapshot, CodexAuthError> {
-    let _id_token_present = auth.tokens.id_token.is_some();
-
-    let access_token = auth
-        .tokens
-        .access_token
-        .as_deref()
-        .ok_or(CodexAuthError::MissingField("tokens.access_token"))?;
-    let refresh_token_present = auth.tokens.refresh_token.is_some();
-
-    let account_id = auth
-        .tokens
-        .account_id
-        .ok_or(CodexAuthError::MissingField("tokens.account_id"))?;
-
-    let exp = jwt::extract_exp_unverified(access_token)?;
-
-    Ok(CodexAuthSnapshot {
-        account_id,
-        has_access_token: true,
-        has_refresh_token: refresh_token_present,
-        expires_at_unix_seconds: exp,
     })
 }
 
@@ -322,9 +260,8 @@ impl CodexAuthManager {
     pub async fn refresh_and_persist_default_path(
         &self,
     ) -> Result<CodexAuthSnapshot, CodexAuthError> {
-        let (mut auth_value, storage) = load_auth_json_auto()?;
-        self.refresh_and_persist_value(&mut auth_value, &storage)
-            .await
+        let path = paths::default_auth_json_path();
+        self.refresh_and_persist(&path).await
     }
 
     /// Refreshes tokens using the `refresh_token` grant and persists updates atomically back to `path`.
@@ -358,32 +295,7 @@ impl CodexAuthManager {
         load_codex_auth(path)
     }
 
-    async fn refresh_and_persist_value(
-        &self,
-        auth_value: &mut serde_json::Value,
-        storage: &AuthStorage,
-    ) -> Result<CodexAuthSnapshot, CodexAuthError> {
-        let refresh_token = auth_value
-            .pointer("/tokens/refresh_token")
-            .and_then(|v| v.as_str())
-            .ok_or(CodexAuthError::MissingField("tokens.refresh_token"))?;
-
-        let refreshed = oauth::refresh_access_token(
-            &self.http,
-            &self.token_url,
-            &self.client_id,
-            refresh_token,
-        )
-        .await?;
-
-        persist::apply_refreshed_tokens(auth_value, &refreshed)?;
-        storage.persist_json_value(auth_value)?;
-
-        // Re-parse from the updated in-memory auth so callers get a consistent view even if
-        // persistence destination differs from the legacy file path.
-        let auth: auth_json::AuthJson = serde_json::from_value(auth_value.clone())?;
-        load_codex_auth_from_parsed(auth)
-    }
+    // (helper removed) keyring persistence is deferred.
 }
 
 #[must_use]

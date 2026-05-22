@@ -4,15 +4,15 @@ use sha2::Digest as _;
 use sha2::Sha256;
 use std::path::{Path, PathBuf};
 
-const KEYRING_SERVICE: &str = "Codex Auth";
+const KEYRING_SERVICE: &str = "Gateway Auth";
 
 #[must_use]
-pub fn codex_home_dir() -> PathBuf {
-    if let Ok(codex_home) = std::env::var("CODEX_HOME") {
-        return PathBuf::from(codex_home);
+pub fn gateway_home_dir() -> PathBuf {
+    if let Ok(gateway_home) = std::env::var("GATEWAY_HOME") {
+        return PathBuf::from(gateway_home);
     }
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join(".codex")
+    home.join(".gateway")
 }
 
 fn compute_store_key(codex_home: &Path) -> String {
@@ -35,9 +35,9 @@ pub fn keyring_service() -> &'static str {
 
 #[must_use]
 pub fn compute_default_key() -> (PathBuf, String) {
-    let codex_home = codex_home_dir();
-    let key = compute_store_key(&codex_home);
-    (codex_home, key)
+    let gateway_home = gateway_home_dir();
+    let key = compute_store_key(&gateway_home);
+    (gateway_home, key)
 }
 
 #[derive(Debug, thiserror::Error)]

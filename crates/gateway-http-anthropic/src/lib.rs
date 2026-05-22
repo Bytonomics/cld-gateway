@@ -28,6 +28,7 @@ mod types;
 
 use crate::translate::translate_request;
 use crate::types::AnthropicMessagesRequest;
+use gateway_state::ToolCallStore;
 
 #[derive(Clone, Default)]
 pub struct AppState {
@@ -35,6 +36,7 @@ pub struct AppState {
     backend: gateway_backend_codex::client::CodexBackendClient,
     openai_models_url: String,
     openai_api_key: Option<Secret<String>>,
+    tool_calls: ToolCallStore,
 }
 
 impl AppState {
@@ -225,6 +227,9 @@ async fn v1_messages(
 
     log_ignored_stop_sequences(&req.stop_sequences, request_id.as_ref());
     log_ignored_request_controls(&req, request_id.as_ref());
+    if let Err(message) = validate_tool_results(&state, &req) {
+        return bad_request(&message);
+    }
 
     if req.stream {
         return stream_messages(state, request_id, req)
@@ -253,6 +258,13 @@ async fn v1_messages(
     };
 
     let response = if let Some(tool_call) = decoded.tool_call {
+        let _ = state.tool_calls.record_tool_call(
+            &tool_call.call_id,
+            &tool_call.name,
+            request_id
+                .as_ref()
+                .map(|axum::extract::Extension(r)| r.0.as_str()),
+        );
         let input_value: serde_json::Value =
             serde_json::from_str(&tool_call.arguments).unwrap_or(serde_json::json!({}));
         serde_json::json!({
@@ -454,6 +466,32 @@ fn log_ignored_request_controls(
             tracing::warn!("ignoring Anthropic output_config.effort (not forwarded yet)");
         }
     }
+}
+
+fn validate_tool_results(state: &AppState, req: &AnthropicMessagesRequest) -> Result<(), String> {
+    for msg in &req.messages {
+        let crate::types::AnthropicContent::Blocks(blocks) = &msg.content else {
+            continue;
+        };
+        for block in blocks {
+            if block.block_type != "tool_result" {
+                continue;
+            }
+            let Some(tool_use_id) = block.tool_use_id.as_deref() else {
+                continue;
+            };
+            let exists = state
+                .tool_calls
+                .tool_call_exists(tool_use_id)
+                .unwrap_or(false);
+            if !exists {
+                return Err(format!(
+                    "unknown tool_use_id: {tool_use_id} (no prior tool_use emitted by this gateway)"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn sse_error(

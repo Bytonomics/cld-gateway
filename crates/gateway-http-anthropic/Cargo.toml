@@ -17,6 +17,7 @@ tracing.workspace = true
 gateway-auth-codex = { path = "../gateway-auth-codex" }
 gateway-backend-codex = { path = "../gateway-backend-codex" }
 gateway-core = { path = "../gateway-core" }
+gateway-state = { path = "../gateway-state" }
 reqwest.workspace = true
 uuid.workspace = true
 

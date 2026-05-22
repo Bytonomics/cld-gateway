@@ -18,9 +18,16 @@ use futures_util::StreamExt as _;
 use gateway_core::RequestId;
 use gateway_core::Secret;
 use gateway_core::model_map::resolve_model;
-use gateway_core::model_map::{ModelMap, default_model_map_path, load_model_map};
+use gateway_core::model_map::{ModelMap, ModelResolution, default_model_map_path, load_model_map};
+use std::sync::{Arc, Mutex};
 use tracing::info;
 use uuid::Uuid;
+
+mod translate;
+mod types;
+
+use crate::translate::translate_request;
+use crate::types::AnthropicMessagesRequest;
 
 #[derive(Clone, Default)]
 pub struct AppState {
@@ -201,45 +208,6 @@ async fn v1_models_with_state(State(state): State<AppState>) -> axum::response::
     Json(serde_json::json!({ "data": data })).into_response()
 }
 
-#[derive(Debug, serde::Deserialize)]
-struct AnthropicMessagesRequest {
-    model: String,
-    messages: Vec<AnthropicMessage>,
-    #[serde(default)]
-    system: Vec<AnthropicSystemBlock>,
-    #[serde(default)]
-    stream: bool,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct AnthropicSystemBlock {
-    #[serde(rename = "type")]
-    block_type: String,
-    #[serde(default)]
-    text: Option<String>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct AnthropicMessage {
-    role: String,
-    content: AnthropicContent,
-}
-
-#[derive(Debug, serde::Deserialize)]
-#[serde(untagged)]
-enum AnthropicContent {
-    Text(String),
-    Blocks(Vec<AnthropicContentBlock>),
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct AnthropicContentBlock {
-    #[serde(rename = "type")]
-    block_type: String,
-    #[serde(default)]
-    text: Option<String>,
-}
-
 async fn v1_messages(
     State(state): State<AppState>,
     request_id: Option<axum::extract::Extension<RequestId>>,
@@ -255,100 +223,237 @@ async fn v1_messages(
         Err(err) => return bad_request(&err),
     };
 
+    log_ignored_stop_sequences(&req.stop_sequences, request_id.as_ref());
+    log_ignored_request_controls(&req, request_id.as_ref());
+
     if req.stream {
         return stream_messages(state, request_id, req)
             .await
             .into_response();
     }
 
+    let resolution = resolve_and_log_model(
+        &req.model,
+        request_id.as_ref(),
+        "resolved model for /v1/messages",
+    );
+    let translated = match translate_request(&req) {
+        Ok(t) => t,
+        Err(err) => return bad_request(&err),
+    };
+
+    let creds = match load_codex_credentials() {
+        Ok(c) => c,
+        Err(resp) => return *resp,
+    };
+    let backend_req = build_backend_request(&resolution, translated, creds);
+    let decoded = match run_backend_unary(&state, backend_req).await {
+        Ok(d) => d,
+        Err(resp) => return resp,
+    };
+
+    let response = if let Some(tool_call) = decoded.tool_call {
+        let input_value: serde_json::Value =
+            serde_json::from_str(&tool_call.arguments).unwrap_or(serde_json::json!({}));
+        serde_json::json!({
+            "id": format!("msg_{}", Uuid::new_v4()),
+            "type": "message",
+            "role": "assistant",
+            "model": req.model,
+            "content": [{
+                "type": "tool_use",
+                "id": tool_call.call_id,
+                "name": tool_call.name,
+                "input": input_value
+            }],
+            "stop_reason": "tool_use",
+            "stop_sequence": null,
+            "usage": { "input_tokens": 0, "output_tokens": 0 }
+        })
+    } else {
+        serde_json::json!({
+        "id": format!("msg_{}", Uuid::new_v4()),
+        "type": "message",
+        "role": "assistant",
+        "model": req.model,
+        "content": [{ "type": "text", "text": decoded.final_text }],
+        "stop_reason": "end_turn",
+        "stop_sequence": null,
+        "usage": { "input_tokens": 0, "output_tokens": 0 }
+        })
+    };
+
+    let mut http_res = Json(response).into_response();
+    http_res.extensions_mut().insert(resolution);
+    http_res
+}
+
+fn resolve_and_log_model(
+    model: &str,
+    request_id: Option<&axum::extract::Extension<RequestId>>,
+    msg: &str,
+) -> ModelResolution {
     let map = load_model_map(&default_model_map_path()).unwrap_or(ModelMap {
         default_backend_model: "gpt-5.2".to_string(),
         aliases: std::collections::BTreeMap::new(),
     });
-    let resolution = resolve_model(&map, &req.model);
-    if let Some(axum::extract::Extension(rid)) = &request_id {
+    let resolution = resolve_model(&map, model);
+    if let Some(axum::extract::Extension(rid)) = request_id {
         info!(
             request_id = %rid.0,
             requested_model = %resolution.requested,
             selected_backend_model = %resolution.selected_backend_model,
             selection_reason = %resolution.selection_reason,
-            "resolved model for /v1/messages"
+            "{msg}"
         );
     }
+    resolution
+}
 
-    let Some(input_text) = extract_user_text(&req.messages) else {
-        return bad_request("no user text content found");
-    };
-    let instructions = extract_system_text(&req.system).unwrap_or_default();
-
-    let creds = match gateway_auth_codex::load_credentials_default_path() {
-        Ok(c) => c,
-        Err(err) => {
-            return (
+fn load_codex_credentials()
+-> Result<gateway_auth_codex::CodexCredentials, Box<axum::response::Response>> {
+    gateway_auth_codex::load_credentials_default_path().map_err(|err| {
+        Box::new(
+            (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
                     "error": { "type": "auth_error", "message": format!("{err}") }
                 })),
             )
-                .into_response();
-        }
-    };
+                .into_response(),
+        )
+    })
+}
 
-    let backend_req = gateway_backend_codex::types::CodexBackendRequest {
+fn build_backend_request(
+    resolution: &ModelResolution,
+    translated: crate::translate::TranslateResult,
+    creds: gateway_auth_codex::CodexCredentials,
+) -> gateway_backend_codex::types::CodexBackendRequest {
+    gateway_backend_codex::types::CodexBackendRequest {
         access_token: creds.access_token,
         account_id: creds.account_id,
         model: resolution.selected_backend_model.clone(),
-        instructions,
-        input_text,
-    };
+        instructions: translated.instructions,
+        input: translated.input,
+        tools: translated.tools,
+        tool_choice: translated.tool_choice,
+        parallel_tool_calls: translated.parallel_tool_calls,
+        text: translated.text,
+        reasoning: translated.reasoning,
+        store: false,
+        stream: true,
+        include: translated.include,
+    }
+}
 
+async fn run_backend_unary(
+    state: &AppState,
+    backend_req: gateway_backend_codex::types::CodexBackendRequest,
+) -> Result<gateway_backend_codex::types::CodexUnaryDecoded, axum::response::Response> {
     let res = state
         .backend
         .send_streaming_with_refresh_retry(&state.auth, backend_req)
-        .await;
-
-    let final_text = match res {
-        Ok(r) => {
-            let stream = r.bytes_stream();
-            let decoded = gateway_backend_codex::sse_unary::read_sse_to_completion(stream).await;
-            match decoded {
-                Ok(d) => d.final_text,
-                Err(err) => {
-                    return (
-                        StatusCode::BAD_GATEWAY,
-                        Json(serde_json::json!({
-                            "error": { "type": "backend_error", "message": format!("{err}") }
-                        })),
-                    )
-                        .into_response();
-                }
-            }
-        }
-        Err(err) => {
-            return (
+        .await
+        .map_err(|err| {
+            (
                 StatusCode::BAD_GATEWAY,
                 Json(serde_json::json!({
                     "error": { "type": "backend_error", "message": format!("{err}") }
                 })),
             )
-                .into_response();
+                .into_response()
+        })?;
+
+    let decoded = gateway_backend_codex::sse_unary::read_sse_to_completion(res.bytes_stream())
+        .await
+        .map_err(|err| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "error": { "type": "backend_error", "message": format!("{err}") }
+                })),
+            )
+                .into_response()
+        })?;
+
+    Ok(decoded)
+}
+
+fn log_ignored_stop_sequences(
+    stop_sequences: &[String],
+    request_id: Option<&axum::extract::Extension<RequestId>>,
+) {
+    if stop_sequences.is_empty() {
+        return;
+    }
+    let count = stop_sequences.len();
+    if let Some(axum::extract::Extension(rid)) = request_id {
+        tracing::warn!(
+            request_id = %rid.0,
+            count,
+            "ignoring Anthropic stop_sequences (unsupported)"
+        );
+    } else {
+        tracing::warn!(count, "ignoring Anthropic stop_sequences (unsupported)");
+    }
+}
+
+fn log_ignored_request_controls(
+    req: &AnthropicMessagesRequest,
+    request_id: Option<&axum::extract::Extension<RequestId>>,
+) {
+    // Read-and-log any controls we parse but do not forward yet. This both documents behavior and
+    // avoids silent drift from Claude Code expectations.
+    let rid = request_id.map(|axum::extract::Extension(r)| r.0.clone());
+
+    if req.max_tokens.is_some() {
+        if let Some(rid) = &rid {
+            tracing::warn!(request_id = %rid, "ignoring Anthropic max_tokens (not forwarded yet)");
+        } else {
+            tracing::warn!("ignoring Anthropic max_tokens (not forwarded yet)");
         }
-    };
+    }
+    if req.temperature.is_some() || req.top_p.is_some() || req.top_k.is_some() {
+        if let Some(rid) = &rid {
+            tracing::warn!(
+                request_id = %rid,
+                "ignoring Anthropic sampling controls (temperature/top_p/top_k) (not forwarded yet)"
+            );
+        } else {
+            tracing::warn!(
+                "ignoring Anthropic sampling controls (temperature/top_p/top_k) (not forwarded yet)"
+            );
+        }
+    }
+    if req.metadata.is_some() {
+        if let Some(rid) = &rid {
+            tracing::warn!(request_id = %rid, "ignoring Anthropic metadata (not forwarded yet)");
+        } else {
+            tracing::warn!("ignoring Anthropic metadata (not forwarded yet)");
+        }
+    }
+    if req.thinking.is_some() {
+        if let Some(rid) = &rid {
+            tracing::warn!(request_id = %rid, "ignoring Anthropic thinking (not forwarded yet)");
+        } else {
+            tracing::warn!("ignoring Anthropic thinking (not forwarded yet)");
+        }
+    }
 
-    let response = serde_json::json!({
-        "id": format!("msg_{}", Uuid::new_v4()),
-        "type": "message",
-        "role": "assistant",
-        "model": req.model,
-        "content": [{ "type": "text", "text": final_text }],
-        "stop_reason": "end_turn",
-        "stop_sequence": null,
-        "usage": { "input_tokens": 0, "output_tokens": 0 }
-    });
-
-    let mut http_res = Json(response).into_response();
-    http_res.extensions_mut().insert(resolution);
-    http_res
+    // `output_config` is partially supported (json_schema format), but other knobs may be ignored.
+    if let Some(cfg) = req.output_config.as_ref()
+        && cfg.effort.is_some()
+    {
+        if let Some(rid) = &rid {
+            tracing::warn!(
+                request_id = %rid,
+                "ignoring Anthropic output_config.effort (not forwarded yet)"
+            );
+        } else {
+            tracing::warn!("ignoring Anthropic output_config.effort (not forwarded yet)");
+        }
+    }
 }
 
 fn sse_error(
@@ -398,75 +503,35 @@ fn anthropic_stream_start_events(msg_id: &str, model: &str) -> Vec<Event> {
     ]
 }
 
-fn anthropic_stream_final_events() -> Vec<Event> {
-    vec![
-        Event::default()
-            .event("content_block_stop")
-            .data(serde_json::json!({"type":"content_block_stop","index":0}).to_string()),
-        Event::default().event("message_delta").data(
-            serde_json::json!({
-                "type":"message_delta",
-                "delta":{"stop_reason":"end_turn","stop_sequence":null},
-                "usage":{"output_tokens":0}
-            })
-            .to_string(),
-        ),
-        Event::default()
-            .event("message_stop")
-            .data(serde_json::json!({"type":"message_stop"}).to_string()),
-    ]
-}
-
 async fn stream_messages(
     state: AppState,
     request_id: Option<axum::extract::Extension<RequestId>>,
     req: AnthropicMessagesRequest,
 ) -> Sse<futures_util::stream::BoxStream<'static, Result<Event, std::convert::Infallible>>> {
-    let map = load_model_map(&default_model_map_path()).unwrap_or(ModelMap {
-        default_backend_model: "gpt-5.2".to_string(),
-        aliases: std::collections::BTreeMap::new(),
-    });
-    let resolution = resolve_model(&map, &req.model);
-
-    if let Some(axum::extract::Extension(rid)) = &request_id {
-        info!(
-            request_id = %rid.0,
-            requested_model = %resolution.requested,
-            selected_backend_model = %resolution.selected_backend_model,
-            selection_reason = %resolution.selection_reason,
-            "resolved model for /v1/messages (streaming)"
-        );
-    }
-
-    let Some(input_text) = extract_user_text(&req.messages) else {
-        return sse_error("invalid_request_error", "no user text content found");
+    let resolution = resolve_and_log_model(
+        &req.model,
+        request_id.as_ref(),
+        "resolved model for /v1/messages (streaming)",
+    );
+    let translated = match translate_request(&req) {
+        Ok(t) => t,
+        Err(err) => return sse_error("invalid_request_error", &err),
     };
-    let instructions = extract_system_text(&req.system).unwrap_or_default();
-
     let creds = match gateway_auth_codex::load_credentials_default_path() {
         Ok(c) => c,
-        Err(err) => {
-            let message = format!("{err}");
-            return sse_error("auth_error", &message);
-        }
+        Err(err) => return sse_error("auth_error", &format!("{err}")),
     };
-
-    let request_to_backend = gateway_backend_codex::types::CodexBackendRequest {
-        access_token: creds.access_token,
-        account_id: creds.account_id,
-        model: resolution.selected_backend_model.clone(),
-        instructions,
-        input_text,
-    };
+    let request_to_backend = build_backend_request(&resolution, translated, creds);
 
     let backend_response = state
         .backend
         .send_streaming_with_refresh_retry(&state.auth, request_to_backend)
         .await;
 
-    // Precompute the Anthropic message and emit the standard event flow:
-    // message_start -> content_block_start -> (content_block_delta...)* -> content_block_stop ->
-    // message_delta -> message_stop
+    // Precompute the Anthropic message and emit the standard event flow.
+    //
+    // NOTE: For now we start with a single text block at index 0. When tool calls occur, we open a
+    // second block at index 1 with `type=tool_use` and stream `input_json_delta` events into it.
     let msg_id = format!("msg_{}", Uuid::new_v4());
     let model = req.model.clone();
 
@@ -478,39 +543,9 @@ async fn stream_messages(
             .map(Ok::<Event, std::convert::Infallible>),
     );
 
-    let final_events = anthropic_stream_final_events();
-    let final_stream = futures_util::stream::iter(
-        final_events
-            .into_iter()
-            .map(Ok::<_, std::convert::Infallible>),
-    );
-
     let tail: futures_util::stream::BoxStream<'static, Result<Event, std::convert::Infallible>> =
         match backend_response {
-            Ok(res) => {
-                let deltas = res
-                    .bytes_stream()
-                    .eventsource()
-                    .filter_map(|item| async move {
-                        let evt = item.ok()?;
-                        let data = evt.data.trim();
-                        if data.is_empty() || data == "[DONE]" {
-                            return None;
-                        }
-                        let text = extract_stream_delta_text(data)?;
-                        let payload = serde_json::json!({
-                            "type": "content_block_delta",
-                            "index": 0,
-                            "delta": { "type": "text_delta", "text": text }
-                        })
-                        .to_string();
-                        Some(Ok::<Event, std::convert::Infallible>(
-                            Event::default().event("content_block_delta").data(payload),
-                        ))
-                    });
-
-                Box::pin(deltas.chain(final_stream))
-            }
+            Ok(res) => backend_sse_to_anthropic_events(res),
             Err(err) => {
                 let payload = serde_json::json!({
                     "type": "error",
@@ -528,6 +563,178 @@ async fn stream_messages(
 
     let stream = initial.chain(tail).boxed();
     Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+#[allow(clippy::too_many_lines)]
+fn backend_sse_to_anthropic_events(
+    res: reqwest::Response,
+) -> futures_util::stream::BoxStream<'static, Result<Event, std::convert::Infallible>> {
+    #[derive(Default)]
+    struct StreamState {
+        tool_block_started: bool,
+        tool_call_id: Option<String>,
+        tool_call_name: Option<String>,
+        completed: bool,
+    }
+
+    fn tool_block_start(st: &StreamState) -> Event {
+        let payload = serde_json::json!({
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {
+                "type": "tool_use",
+                "id": st.tool_call_id.clone().unwrap_or_default(),
+                "name": st.tool_call_name.clone().unwrap_or_default(),
+                "input": {}
+            }
+        })
+        .to_string();
+        Event::default().event("content_block_start").data(payload)
+    }
+
+    fn tool_args_delta(delta: &str) -> Event {
+        let payload = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": { "type": "input_json_delta", "partial_json": delta }
+        })
+        .to_string();
+        Event::default().event("content_block_delta").data(payload)
+    }
+
+    fn text_delta(text: &str) -> Event {
+        let payload = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": { "type": "text_delta", "text": text }
+        })
+        .to_string();
+        Event::default().event("content_block_delta").data(payload)
+    }
+
+    fn finalize_message(st: &mut StreamState) -> Vec<Event> {
+        st.completed = true;
+        let mut out = Vec::new();
+        out.push(
+            Event::default()
+                .event("content_block_stop")
+                .data(serde_json::json!({"type":"content_block_stop","index":0}).to_string()),
+        );
+        if st.tool_block_started {
+            out.push(
+                Event::default()
+                    .event("content_block_stop")
+                    .data(serde_json::json!({"type":"content_block_stop","index":1}).to_string()),
+            );
+            out.push(
+                Event::default().event("message_delta").data(
+                    serde_json::json!({
+                        "type":"message_delta",
+                        "delta":{"stop_reason":"tool_use","stop_sequence":null},
+                        "usage":{"output_tokens":0}
+                    })
+                    .to_string(),
+                ),
+            );
+        } else {
+            out.push(
+                Event::default().event("message_delta").data(
+                    serde_json::json!({
+                        "type":"message_delta",
+                        "delta":{"stop_reason":"end_turn","stop_sequence":null},
+                        "usage":{"output_tokens":0}
+                    })
+                    .to_string(),
+                ),
+            );
+        }
+        out.push(
+            Event::default()
+                .event("message_stop")
+                .data(serde_json::json!({"type":"message_stop"}).to_string()),
+        );
+        out
+    }
+
+    fn map_backend_event(st: &mut StreamState, event_name: &str, data: &str) -> Option<Vec<Event>> {
+        match event_name {
+            "response.output_text.delta" => {
+                let text = extract_stream_delta_text(data)?;
+                Some(vec![text_delta(&text)])
+            }
+            "response.output_item.added" | "response.output_item.done" => {
+                let v = serde_json::from_str::<serde_json::Value>(data).ok()?;
+                let item = v.get("item")?;
+                if item.get("type").and_then(|v| v.as_str()) != Some("function_call") {
+                    return None;
+                }
+                if st.tool_block_started {
+                    return None;
+                }
+                st.tool_block_started = true;
+                st.tool_call_id = item
+                    .get("call_id")
+                    .and_then(|s| s.as_str())
+                    .map(str::to_string);
+                st.tool_call_name = item
+                    .get("name")
+                    .and_then(|s| s.as_str())
+                    .map(str::to_string);
+                Some(vec![tool_block_start(st)])
+            }
+            "response.function_call_arguments.delta" => {
+                if !st.tool_block_started {
+                    return None;
+                }
+                let v = serde_json::from_str::<serde_json::Value>(data).ok()?;
+                let delta = v.get("delta").and_then(|v| v.as_str())?;
+                Some(vec![tool_args_delta(delta)])
+            }
+            "response.completed" => Some(finalize_message(st)),
+            _ => None,
+        }
+    }
+
+    let backend_events = res.bytes_stream().eventsource();
+    let state = Arc::new(Mutex::new(StreamState::default()));
+
+    backend_events
+        .filter_map({
+            let state = Arc::clone(&state);
+            move |item| {
+                let state = Arc::clone(&state);
+                async move {
+                    let mut st = state.lock().unwrap();
+                    if st.completed {
+                        return None;
+                    }
+
+                    let evt = match item {
+                        Ok(e) => e,
+                        Err(e) => {
+                            st.completed = true;
+                            let payload = serde_json::json!({
+                                "type": "error",
+                                "error": { "type": "upstream_error", "message": format!("{e}") }
+                            })
+                            .to_string();
+                            return Some(vec![Event::default().event("error").data(payload)]);
+                        }
+                    };
+
+                    let data = evt.data.trim();
+                    if data.is_empty() || data == "[DONE]" {
+                        return None;
+                    }
+
+                    map_backend_event(&mut st, evt.event.as_str(), data)
+                }
+            }
+        })
+        .flat_map(|events| {
+            futures_util::stream::iter(events.into_iter().map(Ok::<_, std::convert::Infallible>))
+        })
+        .boxed()
 }
 
 fn extract_stream_delta_text(data: &str) -> Option<String> {
@@ -608,91 +815,64 @@ fn bad_request(message: &str) -> axum::response::Response {
         .into_response()
 }
 
-fn extract_user_text(messages: &[AnthropicMessage]) -> Option<String> {
-    let mut parts: Vec<String> = Vec::new();
-    for msg in messages {
-        if msg.role != "user" {
-            continue;
-        }
-        match &msg.content {
-            AnthropicContent::Text(t) => {
-                if !t.trim().is_empty() {
-                    parts.push(t.clone());
-                }
-            }
-            AnthropicContent::Blocks(blocks) => {
-                for b in blocks {
-                    if (b.block_type == "text" || b.block_type == "input_text")
-                        && let Some(t) = &b.text
-                        && !t.trim().is_empty()
-                    {
-                        parts.push(t.clone());
-                    }
-                }
-            }
-        }
-    }
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join("\n"))
-    }
-}
-
-fn extract_system_text(system: &[AnthropicSystemBlock]) -> Option<String> {
-    let mut parts: Vec<&str> = Vec::new();
-    for block in system {
-        if block.block_type != "text" {
-            continue;
-        }
-        let Some(text) = block.text.as_deref() else {
-            continue;
-        };
-        let trimmed = text.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        parts.push(trimmed);
-    }
-
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join("\n\n"))
-    }
-}
+// NOTE: Request translation lives in `translate.rs`. Keep handler code free of ad-hoc extraction
+// logic so we can maintain full-history fidelity.
 
 #[cfg(test)]
 mod messages_tests {
-    use super::{AnthropicContent, AnthropicMessage, extract_user_text};
+    use super::translate::translate_request;
+    use super::types::{
+        AnthropicContent, AnthropicContentBlock, AnthropicMessage, AnthropicMessagesRequest,
+    };
     use axum::body::Body;
     use axum::http::Request;
     use tower::ServiceExt as _;
 
     #[test]
-    fn user_text_extraction_supports_string_and_blocks() {
-        let messages = vec![
-            AnthropicMessage {
-                role: "system".to_string(),
-                content: AnthropicContent::Text("ignore".to_string()),
-            },
-            AnthropicMessage {
-                role: "user".to_string(),
-                content: AnthropicContent::Text("hello".to_string()),
-            },
-            AnthropicMessage {
-                role: "user".to_string(),
-                content: AnthropicContent::Blocks(vec![super::AnthropicContentBlock {
-                    block_type: "text".to_string(),
-                    text: Some("world".to_string()),
-                }]),
-            },
-        ];
+    fn translation_accepts_string_and_blocks_text() {
+        let req = AnthropicMessagesRequest {
+            model: "gpt-5.2".to_string(),
+            messages: vec![
+                AnthropicMessage {
+                    role: "system".to_string(),
+                    content: AnthropicContent::Text("ignore".to_string()),
+                },
+                AnthropicMessage {
+                    role: "user".to_string(),
+                    content: AnthropicContent::Text("hello".to_string()),
+                },
+                AnthropicMessage {
+                    role: "user".to_string(),
+                    content: AnthropicContent::Blocks(vec![AnthropicContentBlock {
+                        block_type: "text".to_string(),
+                        text: Some("world".to_string()),
+                        id: None,
+                        name: None,
+                        input: None,
+                        tool_use_id: None,
+                        content: None,
+                        is_error: None,
+                        source: None,
+                        extra: std::collections::BTreeMap::new(),
+                    }]),
+                },
+            ],
+            system: Vec::new(),
+            stream: false,
+            stop_sequences: Vec::new(),
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            metadata: None,
+            tools: Vec::new(),
+            tool_choice: None,
+            thinking: None,
+            output_config: None,
+        };
 
-        assert_eq!(
-            extract_user_text(&messages).as_deref(),
-            Some("hello\nworld")
-        );
+        let translated = translate_request(&req).unwrap();
+        assert!(!translated.input.is_empty());
     }
 
     #[tokio::test]

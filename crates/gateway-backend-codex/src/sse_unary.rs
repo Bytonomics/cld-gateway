@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use crate::types::CodexUnaryDecoded;
+use crate::types::{CodexToolCall, CodexUnaryDecoded};
 use bytes::Bytes;
 use eventsource_stream::EventStreamError;
 use eventsource_stream::Eventsource as _;
@@ -38,6 +38,7 @@ where
 {
     let mut event_stream = Box::pin(byte_stream.eventsource());
     let mut last_text: Option<String> = None;
+    let mut last_tool_call: Option<CodexToolCall> = None;
 
     while let Some(item) = event_stream.next().await {
         let event = item.map_err(|e: EventStreamError<E>| SseDecodeError::EventStream {
@@ -54,16 +55,48 @@ where
             continue;
         }
 
+        if let Some(tool_call) = extract_tool_call_from_data(&event.event, data) {
+            last_tool_call = Some(tool_call);
+        }
         if let Some(text) = extract_last_text_from_data(data) {
             last_text = Some(text);
         }
     }
 
-    let final_text = last_text.ok_or(SseDecodeError::NoFinalText)?;
+    let final_text = last_text.unwrap_or_default();
+    if final_text.is_empty() && last_tool_call.is_none() {
+        return Err(SseDecodeError::NoFinalText);
+    }
 
     Ok(CodexUnaryDecoded {
         final_text,
         backend_model: None,
+        tool_call: last_tool_call,
+    })
+}
+
+fn extract_tool_call_from_data(event_name: &str, data: &str) -> Option<CodexToolCall> {
+    // Codex backend uses typed SSE events; tool calls typically surface as a completed output item.
+    if event_name != "response.output_item.done" && event_name != "response.output_item.added" {
+        return None;
+    }
+    let value = serde_json::from_str::<serde_json::Value>(data).ok()?;
+    // Two common shapes observed:
+    // 1) { "type":"response.output_item.done", "item": { "type":"function_call", ... } }
+    // 2) { "item": { "type":"function_call", ... } } (older/variant)
+    let item = value
+        .get("item")
+        .cloned()
+        .or_else(|| value.get("response").and_then(|r| r.get("item")).cloned())?;
+
+    let item_type = item.get("type").and_then(|v| v.as_str())?;
+    if item_type != "function_call" {
+        return None;
+    }
+    Some(CodexToolCall {
+        call_id: item.get("call_id")?.as_str()?.to_string(),
+        name: item.get("name")?.as_str()?.to_string(),
+        arguments: item.get("arguments")?.as_str()?.to_string(),
     })
 }
 

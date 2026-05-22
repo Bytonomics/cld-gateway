@@ -29,7 +29,15 @@ async fn sends_required_headers_and_minimal_body() {
                         { "type": "input_text", "text": "hello" }
                     ]
                 }
-            ]
+            ],
+            "tools": [],
+            "tool_choice": "auto",
+            "parallel_tool_calls": true,
+            "reasoning": null,
+            "text": null,
+            "store": false,
+            "stream": true,
+            "include": []
         })))
         .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
         .mount(&server)
@@ -44,7 +52,18 @@ async fn sends_required_headers_and_minimal_body() {
         account_id: "acct_test_123".to_string(),
         model: "gpt-5.2".to_string(),
         instructions: "You are a helpful assistant.".to_string(),
-        input_text: "hello".to_string(),
+        input: vec![serde_json::json!({
+            "role": "user",
+            "content": [{ "type": "input_text", "text": "hello" }]
+        })],
+        tools: Vec::new(),
+        tool_choice: "auto".to_string(),
+        parallel_tool_calls: true,
+        text: None,
+        reasoning: None,
+        store: false,
+        stream: true,
+        include: Vec::new(),
     };
 
     let res = client.send(&req).await.expect("send");

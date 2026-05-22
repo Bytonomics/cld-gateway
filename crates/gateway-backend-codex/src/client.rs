@@ -185,22 +185,20 @@ fn truncate_error_body(body: &str) -> String {
 }
 
 fn build_request_body(req: &CodexBackendRequest) -> serde_json::Value {
-    // Minimal body that resembles Responses API shape. Keep it flexible until Day 13.
+    // Body that matches Codex's "Responses-like" payload shape as closely as possible.
     serde_json::json!({
         "model": req.model,
         "instructions": req.instructions,
-        // The ChatGPT Codex backend requires `store=false` (Codex CLI sets this) to avoid persisting
-        // requests. If omitted, the backend defaults to storing and rejects the request.
-        "store": false,
-        // We always consume the backend response as `text/event-stream`, so request streaming.
-        "stream": true,
-        "input": [
-            {
-                "role": "user",
-                "content": [
-                    { "type": "input_text", "text": req.input_text }
-                ]
-            }
-        ]
+        "input": req.input,
+        "tools": req.tools,
+        "tool_choice": req.tool_choice,
+        "parallel_tool_calls": req.parallel_tool_calls,
+        "reasoning": req.reasoning,
+        "text": req.text,
+        // Backend contract: must be explicitly false.
+        "store": req.store,
+        // Backend returns SSE when stream=true.
+        "stream": req.stream,
+        "include": req.include,
     })
 }

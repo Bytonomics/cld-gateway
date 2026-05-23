@@ -16,7 +16,6 @@ pub struct TranslateResult {
     pub text: Option<serde_json::Value>,
     pub reasoning: Option<serde_json::Value>,
     pub include: Vec<String>,
-    pub max_output_tokens: Option<u64>,
     pub temperature: Option<f64>,
     pub top_p: Option<f64>,
     pub client_metadata: Option<HashMap<String, String>>,
@@ -32,6 +31,9 @@ pub fn translate_request(req: &AnthropicMessagesRequest) -> Result<TranslateResu
     let text = translate_output_config(req.output_config.as_ref());
 
     let mut client_metadata: HashMap<String, String> = HashMap::new();
+    if let Some(max_tokens) = req.max_tokens {
+        client_metadata.insert("anthropic_max_tokens".to_string(), max_tokens.to_string());
+    }
     if let Some(top_k) = req.top_k {
         client_metadata.insert("anthropic_top_k".to_string(), top_k.to_string());
     }
@@ -51,7 +53,6 @@ pub fn translate_request(req: &AnthropicMessagesRequest) -> Result<TranslateResu
         text,
         reasoning: None,
         include: Vec::new(),
-        max_output_tokens: req.max_tokens.map(u64::from),
         temperature: req.temperature,
         top_p: req.top_p,
         client_metadata,
@@ -197,39 +198,78 @@ fn tool_use_item(block: &AnthropicContentBlock) -> Result<Option<serde_json::Val
 fn tool_result_item(block: &AnthropicContentBlock) -> Option<serde_json::Value> {
     let call_id = block.tool_use_id.as_deref()?;
     let _is_error = block.is_error.unwrap_or(false);
-    let output_text = extract_tool_result_text(block);
+    let output = tool_result_output_value(block);
     Some(serde_json::json!({
         "type": "function_call_output",
         "call_id": call_id,
         // Codex protocol wire format: `output` is either a plain string or an array of
-        // structured content items. Keep it as text for now.
-        "output": output_text
+        // structured content items ("content_items").
+        "output": output
     }))
 }
 
-fn extract_tool_result_text(block: &AnthropicContentBlock) -> String {
+fn tool_result_output_value(block: &AnthropicContentBlock) -> serde_json::Value {
     let Some(content) = &block.content else {
         // Some clients might encode tool_result text in `text`.
         if let Some(text) = block.text.as_deref() {
-            return text.to_string();
+            return serde_json::Value::String(text.to_string());
         }
-        return String::new();
+        return serde_json::Value::String(String::new());
     };
 
     match content {
-        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::String(s) => serde_json::Value::String(s.clone()),
         serde_json::Value::Array(items) => {
-            let mut out: Vec<String> = Vec::new();
+            let mut out: Vec<serde_json::Value> = Vec::new();
             for item in items {
-                if let Some(s) = item.get("text").and_then(|v| v.as_str())
-                    && !s.trim().is_empty()
-                {
-                    out.push(s.to_string());
+                let Some(obj) = item.as_object() else {
+                    let encoded = serde_json::to_string(item).unwrap_or_default();
+                    out.push(serde_json::json!({ "type": "input_text", "text": encoded }));
+                    continue;
+                };
+                let item_type = obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                match item_type {
+                    "text" => {
+                        if let Some(text) = obj.get("text").and_then(|v| v.as_str())
+                            && !text.trim().is_empty()
+                        {
+                            out.push(serde_json::json!({ "type": "input_text", "text": text }));
+                        }
+                    }
+                    "image" => {
+                        // Try to preserve multimodal tool outputs as Responses-compatible content items.
+                        let source = obj.get("source").and_then(|v| v.as_object());
+                        let source_type = source
+                            .and_then(|s| s.get("type"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        if source_type == "base64" {
+                            let media_type = source
+                                .and_then(|s| s.get("media_type"))
+                                .and_then(|v| v.as_str());
+                            let data = source.and_then(|s| s.get("data")).and_then(|v| v.as_str());
+                            if let (Some(media_type), Some(data)) = (media_type, data) {
+                                let url = format!("data:{media_type};base64,{data}");
+                                out.push(serde_json::json!({
+                                    "type": "input_image",
+                                    "image_url": url
+                                }));
+                            }
+                        }
+                    }
+                    _ => {
+                        let encoded = serde_json::to_string(item).unwrap_or_default();
+                        out.push(serde_json::json!({ "type": "input_text", "text": encoded }));
+                    }
                 }
             }
-            out.join("\n")
+            if out.is_empty() {
+                serde_json::Value::String(String::new())
+            } else {
+                serde_json::Value::Array(out)
+            }
         }
-        _ => String::new(),
+        _ => serde_json::Value::String(String::new()),
     }
 }
 
@@ -241,7 +281,6 @@ fn translate_tools(tools: &[AnthropicToolDefinition]) -> Result<Vec<serde_json::
             "type": "function",
             "name": t.name,
             "description": t.description,
-            "defer_loading": true,
             "parameters": parameters
         }));
     }
@@ -432,6 +471,14 @@ mod tests {
             item.get("call_id").and_then(|v| v.as_str()),
             Some("call_123")
         );
-        assert_eq!(item.get("output").and_then(|v| v.as_str()), Some("ok"));
+        let output = item.get("output").expect("output present");
+        assert_eq!(
+            output
+                .as_array()
+                .and_then(|arr| arr.first())
+                .and_then(|v| v.get("type"))
+                .and_then(|v| v.as_str()),
+            Some("input_text")
+        );
     }
 }

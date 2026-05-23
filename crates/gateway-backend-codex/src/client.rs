@@ -232,12 +232,6 @@ fn build_request_body(req: &CodexBackendRequest) -> serde_json::Value {
         ),
     );
 
-    if let Some(max_output_tokens) = req.max_output_tokens {
-        obj.insert(
-            "max_output_tokens".to_string(),
-            serde_json::Value::Number(max_output_tokens.into()),
-        );
-    }
     if let Some(temperature) = req.temperature
         && let Some(n) = serde_json::Number::from_f64(temperature)
     {

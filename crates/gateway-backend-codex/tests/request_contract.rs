@@ -62,7 +62,6 @@ async fn sends_required_headers_and_minimal_body() {
         store: false,
         stream: true,
         include: Vec::new(),
-        max_output_tokens: None,
         temperature: None,
         top_p: None,
         client_metadata: None,

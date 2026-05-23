@@ -355,7 +355,6 @@ fn build_backend_request(
         store: false,
         stream: true,
         include: translated.include,
-        max_output_tokens: translated.max_output_tokens,
         temperature: translated.temperature,
         top_p: translated.top_p,
         client_metadata: translated.client_metadata,
@@ -619,7 +618,9 @@ fn backend_sse_to_anthropic_events(
     request_id: Option<String>,
 ) -> futures_util::stream::BoxStream<'static, Result<Event, std::convert::Infallible>> {
     let backend_events = res.bytes_stream().eventsource();
-    let state = Arc::new(Mutex::new(crate::sse_bridge::StreamState::default()));
+    let state = Arc::new(Mutex::new(
+        crate::sse_bridge::StreamState::new_with_text_block0_started(),
+    ));
     let tool_calls = Arc::new(tool_calls);
     let request_id = Arc::new(request_id);
 

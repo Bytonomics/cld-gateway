@@ -29,8 +29,6 @@ pub struct CodexBackendRequest {
     pub stream: bool,
     /// Optional include fields.
     pub include: Vec<String>,
-    /// Optional max output token cap (best-effort; backend may ignore).
-    pub max_output_tokens: Option<u64>,
     /// Optional sampling temperature (best-effort; backend may ignore).
     pub temperature: Option<f64>,
     /// Optional nucleus sampling value (best-effort; backend may ignore).

@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use gateway_core::Secret;
+use std::collections::HashMap;
 
 #[derive(Clone)]
 pub struct CodexBackendRequest {
@@ -28,6 +29,14 @@ pub struct CodexBackendRequest {
     pub stream: bool,
     /// Optional include fields.
     pub include: Vec<String>,
+    /// Optional max output token cap (best-effort; backend may ignore).
+    pub max_output_tokens: Option<u64>,
+    /// Optional sampling temperature (best-effort; backend may ignore).
+    pub temperature: Option<f64>,
+    /// Optional nucleus sampling value (best-effort; backend may ignore).
+    pub top_p: Option<f64>,
+    /// Optional client metadata (Codex-compatible).
+    pub client_metadata: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone)]

@@ -186,19 +186,75 @@ fn truncate_error_body(body: &str) -> String {
 
 fn build_request_body(req: &CodexBackendRequest) -> serde_json::Value {
     // Body that matches Codex's "Responses-like" payload shape as closely as possible.
-    serde_json::json!({
-        "model": req.model,
-        "instructions": req.instructions,
-        "input": req.input,
-        "tools": req.tools,
-        "tool_choice": req.tool_choice,
-        "parallel_tool_calls": req.parallel_tool_calls,
-        "reasoning": req.reasoning,
-        "text": req.text,
-        // Backend contract: must be explicitly false.
-        "store": req.store,
-        // Backend returns SSE when stream=true.
-        "stream": req.stream,
-        "include": req.include,
-    })
+    let mut obj = serde_json::Map::new();
+    obj.insert(
+        "model".to_string(),
+        serde_json::Value::String(req.model.clone()),
+    );
+    obj.insert(
+        "instructions".to_string(),
+        serde_json::Value::String(req.instructions.clone()),
+    );
+    obj.insert(
+        "input".to_string(),
+        serde_json::Value::Array(req.input.clone()),
+    );
+    obj.insert(
+        "tools".to_string(),
+        serde_json::Value::Array(req.tools.clone()),
+    );
+    obj.insert(
+        "tool_choice".to_string(),
+        serde_json::Value::String(req.tool_choice.clone()),
+    );
+    obj.insert(
+        "parallel_tool_calls".to_string(),
+        serde_json::Value::Bool(req.parallel_tool_calls),
+    );
+    if let Some(reasoning) = req.reasoning.clone() {
+        obj.insert("reasoning".to_string(), reasoning);
+    }
+    if let Some(text) = req.text.clone() {
+        obj.insert("text".to_string(), text);
+    }
+    // Backend contract: must be explicitly false.
+    obj.insert("store".to_string(), serde_json::Value::Bool(req.store));
+    // Backend returns SSE when stream=true.
+    obj.insert("stream".to_string(), serde_json::Value::Bool(req.stream));
+    obj.insert(
+        "include".to_string(),
+        serde_json::Value::Array(
+            req.include
+                .iter()
+                .cloned()
+                .map(serde_json::Value::String)
+                .collect(),
+        ),
+    );
+
+    if let Some(max_output_tokens) = req.max_output_tokens {
+        obj.insert(
+            "max_output_tokens".to_string(),
+            serde_json::Value::Number(max_output_tokens.into()),
+        );
+    }
+    if let Some(temperature) = req.temperature
+        && let Some(n) = serde_json::Number::from_f64(temperature)
+    {
+        obj.insert("temperature".to_string(), serde_json::Value::Number(n));
+    }
+    if let Some(top_p) = req.top_p
+        && let Some(n) = serde_json::Number::from_f64(top_p)
+    {
+        obj.insert("top_p".to_string(), serde_json::Value::Number(n));
+    }
+    if let Some(meta) = req.client_metadata.as_ref() {
+        let mut m = serde_json::Map::new();
+        for (k, v) in meta {
+            m.insert(k.clone(), serde_json::Value::String(v.clone()));
+        }
+        obj.insert("client_metadata".to_string(), serde_json::Value::Object(m));
+    }
+
+    serde_json::Value::Object(obj)
 }

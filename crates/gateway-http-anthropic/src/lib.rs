@@ -23,6 +23,7 @@ use std::sync::{Arc, Mutex};
 use tracing::info;
 use uuid::Uuid;
 
+mod sse_bridge;
 mod translate;
 mod types;
 
@@ -227,9 +228,7 @@ async fn v1_messages(
 
     log_ignored_stop_sequences(&req.stop_sequences, request_id.as_ref());
     log_ignored_request_controls(&req, request_id.as_ref());
-    if let Err(message) = validate_tool_results(&state, &req) {
-        return bad_request(&message);
-    }
+    validate_tool_results(&state, &req);
 
     if req.stream {
         return stream_messages(state, request_id, req)
@@ -356,6 +355,10 @@ fn build_backend_request(
         store: false,
         stream: true,
         include: translated.include,
+        max_output_tokens: translated.max_output_tokens,
+        temperature: translated.temperature,
+        top_p: translated.top_p,
+        client_metadata: translated.client_metadata,
     }
 }
 
@@ -468,7 +471,7 @@ fn log_ignored_request_controls(
     }
 }
 
-fn validate_tool_results(state: &AppState, req: &AnthropicMessagesRequest) -> Result<(), String> {
+fn validate_tool_results(state: &AppState, req: &AnthropicMessagesRequest) {
     for msg in &req.messages {
         let crate::types::AnthropicContent::Blocks(blocks) = &msg.content else {
             continue;
@@ -485,13 +488,15 @@ fn validate_tool_results(state: &AppState, req: &AnthropicMessagesRequest) -> Re
                 .tool_call_exists(tool_use_id)
                 .unwrap_or(false);
             if !exists {
-                return Err(format!(
-                    "unknown tool_use_id: {tool_use_id} (no prior tool_use emitted by this gateway)"
-                ));
+                // This gateway is stateless from the client's perspective and may restart between
+                // tool calls. Do not reject the request; log and allow the backend to decide.
+                tracing::warn!(
+                    tool_use_id,
+                    "tool_result references unknown tool_use_id (gateway state missing); forwarding anyway"
+                );
             }
         }
     }
-    Ok(())
 }
 
 fn sse_error(
@@ -581,9 +586,14 @@ async fn stream_messages(
             .map(Ok::<Event, std::convert::Infallible>),
     );
 
+    let rid_str = request_id
+        .as_ref()
+        .map(|axum::extract::Extension(r)| r.0.clone());
+    let tool_calls = state.tool_calls.clone();
+
     let tail: futures_util::stream::BoxStream<'static, Result<Event, std::convert::Infallible>> =
         match backend_response {
-            Ok(res) => backend_sse_to_anthropic_events(res),
+            Ok(res) => backend_sse_to_anthropic_events(res, tool_calls, rid_str),
             Err(err) => {
                 let payload = serde_json::json!({
                     "type": "error",
@@ -603,144 +613,25 @@ async fn stream_messages(
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
-#[allow(clippy::too_many_lines)]
 fn backend_sse_to_anthropic_events(
     res: reqwest::Response,
+    tool_calls: ToolCallStore,
+    request_id: Option<String>,
 ) -> futures_util::stream::BoxStream<'static, Result<Event, std::convert::Infallible>> {
-    #[derive(Default)]
-    struct StreamState {
-        tool_block_started: bool,
-        tool_call_id: Option<String>,
-        tool_call_name: Option<String>,
-        completed: bool,
-    }
-
-    fn tool_block_start(st: &StreamState) -> Event {
-        let payload = serde_json::json!({
-            "type": "content_block_start",
-            "index": 1,
-            "content_block": {
-                "type": "tool_use",
-                "id": st.tool_call_id.clone().unwrap_or_default(),
-                "name": st.tool_call_name.clone().unwrap_or_default(),
-                "input": {}
-            }
-        })
-        .to_string();
-        Event::default().event("content_block_start").data(payload)
-    }
-
-    fn tool_args_delta(delta: &str) -> Event {
-        let payload = serde_json::json!({
-            "type": "content_block_delta",
-            "index": 1,
-            "delta": { "type": "input_json_delta", "partial_json": delta }
-        })
-        .to_string();
-        Event::default().event("content_block_delta").data(payload)
-    }
-
-    fn text_delta(text: &str) -> Event {
-        let payload = serde_json::json!({
-            "type": "content_block_delta",
-            "index": 0,
-            "delta": { "type": "text_delta", "text": text }
-        })
-        .to_string();
-        Event::default().event("content_block_delta").data(payload)
-    }
-
-    fn finalize_message(st: &mut StreamState) -> Vec<Event> {
-        st.completed = true;
-        let mut out = Vec::new();
-        out.push(
-            Event::default()
-                .event("content_block_stop")
-                .data(serde_json::json!({"type":"content_block_stop","index":0}).to_string()),
-        );
-        if st.tool_block_started {
-            out.push(
-                Event::default()
-                    .event("content_block_stop")
-                    .data(serde_json::json!({"type":"content_block_stop","index":1}).to_string()),
-            );
-            out.push(
-                Event::default().event("message_delta").data(
-                    serde_json::json!({
-                        "type":"message_delta",
-                        "delta":{"stop_reason":"tool_use","stop_sequence":null},
-                        "usage":{"output_tokens":0}
-                    })
-                    .to_string(),
-                ),
-            );
-        } else {
-            out.push(
-                Event::default().event("message_delta").data(
-                    serde_json::json!({
-                        "type":"message_delta",
-                        "delta":{"stop_reason":"end_turn","stop_sequence":null},
-                        "usage":{"output_tokens":0}
-                    })
-                    .to_string(),
-                ),
-            );
-        }
-        out.push(
-            Event::default()
-                .event("message_stop")
-                .data(serde_json::json!({"type":"message_stop"}).to_string()),
-        );
-        out
-    }
-
-    fn map_backend_event(st: &mut StreamState, event_name: &str, data: &str) -> Option<Vec<Event>> {
-        match event_name {
-            "response.output_text.delta" => {
-                let text = extract_stream_delta_text(data)?;
-                Some(vec![text_delta(&text)])
-            }
-            "response.output_item.added" | "response.output_item.done" => {
-                let v = serde_json::from_str::<serde_json::Value>(data).ok()?;
-                let item = v.get("item")?;
-                if item.get("type").and_then(|v| v.as_str()) != Some("function_call") {
-                    return None;
-                }
-                if st.tool_block_started {
-                    return None;
-                }
-                st.tool_block_started = true;
-                st.tool_call_id = item
-                    .get("call_id")
-                    .and_then(|s| s.as_str())
-                    .map(str::to_string);
-                st.tool_call_name = item
-                    .get("name")
-                    .and_then(|s| s.as_str())
-                    .map(str::to_string);
-                Some(vec![tool_block_start(st)])
-            }
-            "response.function_call_arguments.delta" => {
-                if !st.tool_block_started {
-                    return None;
-                }
-                let v = serde_json::from_str::<serde_json::Value>(data).ok()?;
-                let delta = v.get("delta").and_then(|v| v.as_str())?;
-                Some(vec![tool_args_delta(delta)])
-            }
-            "response.completed" => Some(finalize_message(st)),
-            _ => None,
-        }
-    }
-
     let backend_events = res.bytes_stream().eventsource();
-    let state = Arc::new(Mutex::new(StreamState::default()));
+    let state = Arc::new(Mutex::new(crate::sse_bridge::StreamState::default()));
+    let tool_calls = Arc::new(tool_calls);
+    let request_id = Arc::new(request_id);
 
     backend_events
         .filter_map({
             let state = Arc::clone(&state);
+            let tool_calls = Arc::clone(&tool_calls);
+            let request_id = Arc::clone(&request_id);
             move |item| {
                 let state = Arc::clone(&state);
+                let tool_calls = Arc::clone(&tool_calls);
+                let request_id = Arc::clone(&request_id);
                 async move {
                     let mut st = state.lock().unwrap();
                     if st.completed {
@@ -765,7 +656,14 @@ fn backend_sse_to_anthropic_events(
                         return None;
                     }
 
-                    map_backend_event(&mut st, evt.event.as_str(), data)
+                    crate::sse_bridge::map_backend_event(
+                        &mut st,
+                        evt.event.as_str(),
+                        data,
+                        extract_stream_delta_text,
+                        &tool_calls,
+                        request_id.as_ref().as_deref(),
+                    )
                 }
             }
         })

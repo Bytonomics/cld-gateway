@@ -5,6 +5,8 @@ use crate::types::{
     AnthropicSystemBlock, AnthropicToolDefinition,
 };
 
+use std::collections::HashMap;
+
 pub struct TranslateResult {
     pub instructions: String,
     pub input: Vec<serde_json::Value>,
@@ -14,14 +16,31 @@ pub struct TranslateResult {
     pub text: Option<serde_json::Value>,
     pub reasoning: Option<serde_json::Value>,
     pub include: Vec<String>,
+    pub max_output_tokens: Option<u64>,
+    pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
+    pub client_metadata: Option<HashMap<String, String>>,
 }
 
 pub fn translate_request(req: &AnthropicMessagesRequest) -> Result<TranslateResult, String> {
-    let instructions = extract_system_text(&req.system).unwrap_or_default();
+    let instructions = extract_system_text(&req.system)
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "You are a helpful assistant.".to_string());
     let input = translate_messages_to_backend_items(&req.messages)?;
     let tools = translate_tools(&req.tools)?;
     let tool_choice = translate_tool_choice(req.tool_choice.as_ref());
     let text = translate_output_config(req.output_config.as_ref());
+
+    let mut client_metadata: HashMap<String, String> = HashMap::new();
+    if let Some(top_k) = req.top_k {
+        client_metadata.insert("anthropic_top_k".to_string(), top_k.to_string());
+    }
+    if let Some(metadata) = req.metadata.as_ref() {
+        let encoded = serde_json::to_string(metadata)
+            .map_err(|e| format!("metadata must be JSON-serializable: {e}"))?;
+        client_metadata.insert("anthropic_metadata".to_string(), encoded);
+    }
+    let client_metadata = (!client_metadata.is_empty()).then_some(client_metadata);
 
     Ok(TranslateResult {
         instructions,
@@ -32,6 +51,10 @@ pub fn translate_request(req: &AnthropicMessagesRequest) -> Result<TranslateResu
         text,
         reasoning: None,
         include: Vec::new(),
+        max_output_tokens: req.max_tokens.map(u64::from),
+        temperature: req.temperature,
+        top_p: req.top_p,
+        client_metadata,
     })
 }
 
@@ -178,7 +201,9 @@ fn tool_result_item(block: &AnthropicContentBlock) -> Option<serde_json::Value> 
     Some(serde_json::json!({
         "type": "function_call_output",
         "call_id": call_id,
-        "output": { "content": output_text }
+        // Codex protocol wire format: `output` is either a plain string or an array of
+        // structured content items. Keep it as text for now.
+        "output": output_text
     }))
 }
 
@@ -301,4 +326,112 @@ fn translate_output_config(
             "name": "anthropic_output_config"
         }
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_req() -> AnthropicMessagesRequest {
+        AnthropicMessagesRequest {
+            model: "gpt-5.2".to_string(),
+            messages: Vec::new(),
+            system: Vec::new(),
+            stream: false,
+            stop_sequences: Vec::new(),
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            metadata: None,
+            tools: Vec::new(),
+            tool_choice: None,
+            thinking: None,
+            output_config: None,
+        }
+    }
+
+    #[test]
+    fn defaults_instructions_when_system_empty() {
+        let req = base_req();
+        let translated = translate_request(&req).expect("translate");
+        assert_eq!(translated.instructions, "You are a helpful assistant.");
+    }
+
+    #[test]
+    fn translates_base64_image_to_data_url_input_image() {
+        let mut req = base_req();
+        req.messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Blocks(vec![AnthropicContentBlock {
+                block_type: "image".to_string(),
+                text: None,
+                id: None,
+                name: None,
+                input: None,
+                tool_use_id: None,
+                content: None,
+                is_error: None,
+                source: Some(crate::types::AnthropicImageSource {
+                    source_type: "base64".to_string(),
+                    media_type: Some("image/png".to_string()),
+                    data: Some("AAA=".to_string()),
+                    extra: std::collections::BTreeMap::new(),
+                }),
+                extra: std::collections::BTreeMap::new(),
+            }]),
+        });
+
+        let translated = translate_request(&req).expect("translate");
+        let msg = translated
+            .input
+            .iter()
+            .find(|v| v.get("type").and_then(|t| t.as_str()) == Some("message"))
+            .expect("message item");
+        let content0 = msg
+            .get("content")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first())
+            .expect("content[0]");
+        assert_eq!(
+            content0.get("type").and_then(|v| v.as_str()),
+            Some("input_image")
+        );
+        assert_eq!(
+            content0.get("image_url").and_then(|v| v.as_str()),
+            Some("data:image/png;base64,AAA=")
+        );
+    }
+
+    #[test]
+    fn tool_result_output_is_wire_text_string() {
+        let mut req = base_req();
+        req.messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Blocks(vec![AnthropicContentBlock {
+                block_type: "tool_result".to_string(),
+                text: None,
+                id: None,
+                name: None,
+                input: None,
+                tool_use_id: Some("call_123".to_string()),
+                content: Some(serde_json::json!([{ "type": "text", "text": "ok" }])),
+                is_error: Some(false),
+                source: None,
+                extra: std::collections::BTreeMap::new(),
+            }]),
+        });
+
+        let translated = translate_request(&req).expect("translate");
+        let item = translated
+            .input
+            .iter()
+            .find(|v| v.get("type").and_then(|t| t.as_str()) == Some("function_call_output"))
+            .expect("function_call_output item");
+        assert_eq!(
+            item.get("call_id").and_then(|v| v.as_str()),
+            Some("call_123")
+        );
+        assert_eq!(item.get("output").and_then(|v| v.as_str()), Some("ok"));
+    }
 }

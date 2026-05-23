@@ -33,8 +33,6 @@ async fn sends_required_headers_and_minimal_body() {
             "tools": [],
             "tool_choice": "auto",
             "parallel_tool_calls": true,
-            "reasoning": null,
-            "text": null,
             "store": false,
             "stream": true,
             "include": []
@@ -64,6 +62,10 @@ async fn sends_required_headers_and_minimal_body() {
         store: false,
         stream: true,
         include: Vec::new(),
+        max_output_tokens: None,
+        temperature: None,
+        top_p: None,
+        client_metadata: None,
     };
 
     let res = client.send(&req).await.expect("send");

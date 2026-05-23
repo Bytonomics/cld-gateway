@@ -31,6 +31,8 @@ pub fn translate_request(req: &AnthropicMessagesRequest) -> Result<TranslateResu
     let text = translate_output_config(req.output_config.as_ref());
 
     let mut client_metadata: HashMap<String, String> = HashMap::new();
+    let reasoning =
+        translate_effort_to_backend_reasoning(req.output_config.as_ref(), &mut client_metadata);
     if let Some(max_tokens) = req.max_tokens {
         client_metadata.insert("anthropic_max_tokens".to_string(), max_tokens.to_string());
     }
@@ -51,12 +53,39 @@ pub fn translate_request(req: &AnthropicMessagesRequest) -> Result<TranslateResu
         tool_choice,
         parallel_tool_calls: true,
         text,
-        reasoning: None,
+        reasoning,
         include: Vec::new(),
         temperature: req.temperature,
         top_p: req.top_p,
         client_metadata,
     })
+}
+
+fn translate_effort_to_backend_reasoning(
+    output_config: Option<&crate::types::AnthropicOutputConfig>,
+    client_metadata: &mut HashMap<String, String>,
+) -> Option<serde_json::Value> {
+    let cfg = output_config?;
+    let effort = cfg.effort.as_deref()?;
+    let normalized = effort.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+
+    client_metadata.insert("anthropic_effort".to_string(), normalized.clone());
+
+    let mapped = match normalized.as_str() {
+        // 1:1 overlap (and best-effort pass-through for values known to be accepted by the backend).
+        "low" | "medium" | "high" | "none" | "minimal" => normalized,
+        // Claude Code "max"/"xhigh" are not guaranteed backend-accepted; map deterministically to avoid 400s.
+        "max" | "xhigh" => "high".to_string(),
+        _ => {
+            client_metadata.insert("anthropic_effort_unmapped".to_string(), normalized);
+            return None;
+        }
+    };
+
+    Some(serde_json::json!({ "effort": mapped }))
 }
 
 pub fn extract_system_text(system: &[AnthropicSystemBlock]) -> Option<String> {

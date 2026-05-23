@@ -118,7 +118,8 @@ Notes:
 | `tools[]` | `tools[]` | Tool schema → `{type:"function",name,description,defer_loading:true,parameters:<object-schema-subset>}` |
 | `tool_choice` | `tool_choice` | Best-effort mapping. Absent→`"auto"`. |
 | `output_config.format=json_schema` | `text.format=json_schema` | Best-effort: carry schema; set `strict:true`. |
-| `max_tokens` | `max_output_tokens` | Best-effort pass-through (backend may ignore). |
+| `output_config.effort` | `reasoning.effort` | Map `low/medium/high` 1:1. Map `max/xhigh` → `high`. Unknown → omit and record `client_metadata.anthropic_effort_unmapped`. |
+| `max_tokens` | `client_metadata.anthropic_max_tokens` | Backend rejects `max_output_tokens`; record intent as metadata. |
 | `temperature` | `temperature` | Best-effort pass-through (backend may ignore). |
 | `top_p` | `top_p` | Best-effort pass-through (backend may ignore). |
 | `top_k` | `client_metadata.anthropic_top_k` | No direct Codex field; record as metadata. |
@@ -152,7 +153,7 @@ Key event types we currently bridge:
 
 - `response.output_text.delta` → text deltas
 - `response.output_item.added` / `response.output_item.done` with `item.type=="function_call"` → tool call start
-- `response.function_call_arguments.delta` → tool argument JSON deltas
+- `response.function_call_arguments.delta` → tool argument JSON deltas (buffered server-side)
 - `response.completed` → message stop
 
 ### Streaming mapping rules
@@ -160,14 +161,15 @@ Key event types we currently bridge:
 | Codex backend SSE | Anthropic SSE |
 |---|---|
 | `response.output_text.delta` | `content_block_delta` (index `0`, `text_delta`) |
-| `response.output_item.*` (`function_call`) | `content_block_start` (index `1`, `tool_use`) |
-| `response.function_call_arguments.delta` | `content_block_delta` (index `1`, `input_json_delta`) |
+| `response.output_item.*` (`function_call`) | `content_block_start` (tool_use; unique index per call_id) |
+| `response.function_call_arguments.delta` | buffered server-side (not forwarded 1:1) |
 | `response.completed` | `content_block_stop` + `message_delta(stop_reason=tool_use/end_turn)` + `message_stop` |
 
 Validation performed:
 
-- We buffer all tool-arg deltas; on completion we require the concatenation to be **valid JSON** and a **JSON object**.
-  If not, we emit an `error` event (so we don’t silently produce an invalid `tool_use.input`).
+- We buffer all tool-arg deltas; on completion we parse + validate they form a **JSON object**, apply deterministic tool-arg
+  policies (e.g. drop `Read.pages` when empty or non-PDF), then emit a single sanitized `input_json_delta` to Claude Code.
+  If parsing/validation fails, we emit an `error` event (so we don’t silently produce an invalid `tool_use.input`).
 
 ## 5) Gaps / information loss (current)
 

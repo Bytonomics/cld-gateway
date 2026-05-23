@@ -1,11 +1,12 @@
 #![forbid(unsafe_code)]
 
-use crate::types::{CodexToolCall, CodexUnaryDecoded};
+use crate::types::{CodexTokenUsage, CodexToolCall, CodexUnaryDecoded};
 use bytes::Bytes;
 use eventsource_stream::EventStreamError;
 use eventsource_stream::Eventsource as _;
 use futures_util::Stream;
 use futures_util::StreamExt as _;
+use serde::Deserialize;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SseDecodeError {
@@ -39,6 +40,7 @@ where
     let mut event_stream = Box::pin(byte_stream.eventsource());
     let mut last_text: Option<String> = None;
     let mut last_tool_call: Option<CodexToolCall> = None;
+    let mut last_usage: Option<CodexTokenUsage> = None;
 
     while let Some(item) = event_stream.next().await {
         let event = item.map_err(|e: EventStreamError<E>| SseDecodeError::EventStream {
@@ -55,6 +57,11 @@ where
             continue;
         }
 
+        if event.event == "response.completed"
+            && let Some(usage) = extract_usage_from_completed_event(data)
+        {
+            last_usage = Some(usage);
+        }
         if let Some(tool_call) = extract_tool_call_from_data(&event.event, data) {
             last_tool_call = Some(tool_call);
         }
@@ -71,7 +78,57 @@ where
     Ok(CodexUnaryDecoded {
         final_text,
         backend_model: None,
+        token_usage: last_usage,
         tool_call: last_tool_call,
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct CompletedEnvelope {
+    response: Option<CompletedResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CompletedResponse {
+    usage: Option<CompletedUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CompletedUsage {
+    input_tokens: i64,
+    #[serde(default)]
+    input_tokens_details: Option<CompletedInputTokensDetails>,
+    output_tokens: i64,
+    #[serde(default)]
+    output_tokens_details: Option<CompletedOutputTokensDetails>,
+    total_tokens: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct CompletedInputTokensDetails {
+    cached_tokens: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct CompletedOutputTokensDetails {
+    reasoning_tokens: i64,
+}
+
+fn extract_usage_from_completed_event(data: &str) -> Option<CodexTokenUsage> {
+    let value = serde_json::from_str::<serde_json::Value>(data).ok()?;
+    // Observed shapes:
+    // - { "type":"response.completed", "response": { "usage": {..} } }
+    // - { "response": { "usage": {..} } } (variant)
+    let env: CompletedEnvelope = serde_json::from_value(value).ok()?;
+    let usage = env.response?.usage?;
+    Some(CodexTokenUsage {
+        input_tokens: usage.input_tokens,
+        cached_input_tokens: usage.input_tokens_details.map_or(0, |d| d.cached_tokens),
+        output_tokens: usage.output_tokens,
+        reasoning_output_tokens: usage
+            .output_tokens_details
+            .map_or(0, |d| d.reasoning_tokens),
+        total_tokens: usage.total_tokens,
     })
 }
 
@@ -150,7 +207,9 @@ fn extract_last_text_from_value(value: &serde_json::Value, last: &mut Option<Str
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_last_text_from_data, read_sse_to_completion};
+    use super::{
+        extract_last_text_from_data, extract_usage_from_completed_event, read_sse_to_completion,
+    };
     use bytes::Bytes;
     use futures_util::stream;
 
@@ -178,5 +237,16 @@ mod tests {
         let byte_stream = stream::iter(vec![Ok::<Bytes, std::io::Error>(Bytes::from(sse))]);
         let decoded = read_sse_to_completion(byte_stream).await.unwrap();
         assert_eq!(decoded.final_text, "second");
+    }
+
+    #[test]
+    fn usage_extracts_from_completed_event() {
+        let json = r#"{"type":"response.completed","response":{"id":"r1","usage":{"input_tokens":3,"input_tokens_details":{"cached_tokens":1},"output_tokens":5,"output_tokens_details":{"reasoning_tokens":2},"total_tokens":8}}}"#;
+        let usage = extract_usage_from_completed_event(json).expect("usage present");
+        assert_eq!(usage.input_tokens, 3);
+        assert_eq!(usage.cached_input_tokens, 1);
+        assert_eq!(usage.output_tokens, 5);
+        assert_eq!(usage.reasoning_output_tokens, 2);
+        assert_eq!(usage.total_tokens, 8);
     }
 }

@@ -24,6 +24,7 @@ use tracing::info;
 use uuid::Uuid;
 
 mod sse_bridge;
+mod tool_arg_policy;
 mod translate;
 mod types;
 
@@ -256,6 +257,11 @@ async fn v1_messages(
         Err(resp) => return resp,
     };
 
+    let usage = decoded.token_usage.map_or(
+        serde_json::json!({ "input_tokens": 0, "output_tokens": 0 }),
+        |u| serde_json::json!({ "input_tokens": u.input_tokens, "output_tokens": u.output_tokens }),
+    );
+
     let response = if let Some(tool_call) = decoded.tool_call {
         let _ = state.tool_calls.record_tool_call(
             &tool_call.call_id,
@@ -279,7 +285,7 @@ async fn v1_messages(
             }],
             "stop_reason": "tool_use",
             "stop_sequence": null,
-            "usage": { "input_tokens": 0, "output_tokens": 0 }
+            "usage": usage
         })
     } else {
         serde_json::json!({
@@ -290,7 +296,7 @@ async fn v1_messages(
         "content": [{ "type": "text", "text": decoded.final_text }],
         "stop_reason": "end_turn",
         "stop_sequence": null,
-        "usage": { "input_tokens": 0, "output_tokens": 0 }
+        "usage": usage
         })
     };
 
@@ -428,16 +434,11 @@ fn log_ignored_request_controls(
             tracing::warn!("ignoring Anthropic max_tokens (not forwarded yet)");
         }
     }
-    if req.temperature.is_some() || req.top_p.is_some() || req.top_k.is_some() {
+    if req.top_k.is_some() {
         if let Some(rid) = &rid {
-            tracing::warn!(
-                request_id = %rid,
-                "ignoring Anthropic sampling controls (temperature/top_p/top_k) (not forwarded yet)"
-            );
+            tracing::warn!(request_id = %rid, "ignoring Anthropic top_k (no backend equivalent)");
         } else {
-            tracing::warn!(
-                "ignoring Anthropic sampling controls (temperature/top_p/top_k) (not forwarded yet)"
-            );
+            tracing::warn!("ignoring Anthropic top_k (no backend equivalent)");
         }
     }
     if req.metadata.is_some() {
@@ -452,20 +453,6 @@ fn log_ignored_request_controls(
             tracing::warn!(request_id = %rid, "ignoring Anthropic thinking (not forwarded yet)");
         } else {
             tracing::warn!("ignoring Anthropic thinking (not forwarded yet)");
-        }
-    }
-
-    // `output_config` is partially supported (json_schema format), but other knobs may be ignored.
-    if let Some(cfg) = req.output_config.as_ref()
-        && cfg.effort.is_some()
-    {
-        if let Some(rid) = &rid {
-            tracing::warn!(
-                request_id = %rid,
-                "ignoring Anthropic output_config.effort (not forwarded yet)"
-            );
-        } else {
-            tracing::warn!("ignoring Anthropic output_config.effort (not forwarded yet)");
         }
     }
 }

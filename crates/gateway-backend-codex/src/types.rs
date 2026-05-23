@@ -47,7 +47,17 @@ pub struct CodexBackendResponse {
 pub struct CodexUnaryDecoded {
     pub final_text: String,
     pub backend_model: Option<String>,
+    pub token_usage: Option<CodexTokenUsage>,
     pub tool_call: Option<CodexToolCall>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CodexTokenUsage {
+    pub input_tokens: i64,
+    pub cached_input_tokens: i64,
+    pub output_tokens: i64,
+    pub reasoning_output_tokens: i64,
+    pub total_tokens: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

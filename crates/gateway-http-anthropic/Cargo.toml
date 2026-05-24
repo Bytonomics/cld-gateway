@@ -25,3 +25,5 @@ uuid.workspace = true
 tokio.workspace = true
 tower = { workspace = true, features = ["util"] }
 wiremock.workspace = true
+bytes.workspace = true
+url.workspace = true

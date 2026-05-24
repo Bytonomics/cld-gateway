@@ -1,0 +1,28 @@
+{
+  "model": "gpt-5.2",
+  "stream": false,
+  "system": [
+    { "type": "text", "text": "You are a helpful assistant." }
+  ],
+  "messages": [
+    { "role": "user", "content": "hi" }
+  ],
+  "tools": [
+    {
+      "name": "Read",
+      "description": "Read a file from disk",
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "file_path": { "type": "string" },
+          "offset": { "type": "integer" },
+          "limit": { "type": "integer" },
+          "pages": { "type": "string" }
+        },
+        "required": ["file_path"]
+      }
+    }
+  ],
+  "tool_choice": { "type": "auto" }
+}

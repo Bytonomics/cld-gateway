@@ -400,6 +400,11 @@ fn translate_output_config(
 mod tests {
     use super::*;
 
+    fn fixture(path: &str) -> String {
+        let full = format!("{}/tests/fixtures/{}", env!("CARGO_MANIFEST_DIR"), path);
+        std::fs::read_to_string(full).expect("read fixture")
+    }
+
     fn base_req() -> AnthropicMessagesRequest {
         AnthropicMessagesRequest {
             model: "gpt-5.2".to_string(),
@@ -508,6 +513,46 @@ mod tests {
                 .and_then(|v| v.get("type"))
                 .and_then(|v| v.as_str()),
             Some("input_text")
+        );
+    }
+
+    #[test]
+    fn tool_definitions_fixture_translates_to_backend_tools() {
+        let json = fixture("tools/tool_definitions.json");
+        let req: AnthropicMessagesRequest = serde_json::from_str(&json).expect("parse request");
+        let translated = translate_request(&req).expect("translate");
+
+        assert_eq!(translated.tools.len(), 1);
+        let tool = &translated.tools[0];
+        assert_eq!(tool.get("type").and_then(|v| v.as_str()), Some("function"));
+        assert_eq!(tool.get("name").and_then(|v| v.as_str()), Some("Read"));
+        let params = tool.get("parameters").expect("parameters");
+        assert_eq!(params.get("type").and_then(|v| v.as_str()), Some("object"));
+        assert_eq!(
+            params
+                .get("additionalProperties")
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn tool_result_rich_fixture_preserves_image_content_items() {
+        let json = fixture("tools/tool_result_rich.json");
+        let req: AnthropicMessagesRequest = serde_json::from_str(&json).expect("parse request");
+        let translated = translate_request(&req).expect("translate");
+        let item = translated
+            .input
+            .iter()
+            .find(|v| v.get("type").and_then(|t| t.as_str()) == Some("function_call_output"))
+            .expect("function_call_output item");
+
+        let output = item.get("output").expect("output present");
+        let arr = output.as_array().expect("output must be array");
+        assert!(
+            arr.iter()
+                .any(|v| v.get("type").and_then(|t| t.as_str()) == Some("input_image")),
+            "expected an input_image content item in tool_result output"
         );
     }
 }

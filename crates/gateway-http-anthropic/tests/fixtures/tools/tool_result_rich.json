@@ -1,0 +1,27 @@
+{
+  "model": "gpt-5.2",
+  "stream": false,
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "call_123",
+          "is_error": false,
+          "content": [
+            { "type": "text", "text": "ok" },
+            {
+              "type": "image",
+              "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": "AAA="
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

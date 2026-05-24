@@ -749,8 +749,11 @@ mod messages_tests {
         AnthropicContent, AnthropicContentBlock, AnthropicMessage, AnthropicMessagesRequest,
     };
     use axum::body::Body;
+    use axum::body::to_bytes;
     use axum::http::Request;
     use tower::ServiceExt as _;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn translation_accepts_string_and_blocks_text() {
@@ -827,6 +830,87 @@ mod messages_tests {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
         assert!(content_type.contains("text/event-stream"));
+    }
+
+    fn write_temp_auth_json() -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("gateway_auth_{}.json", uuid::Uuid::new_v4()));
+        let value = serde_json::json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "access_token": "tok_test",
+                "account_id": "acct_test"
+            }
+        });
+        std::fs::write(&path, value.to_string()).expect("write auth fixture");
+        path
+    }
+
+    #[tokio::test]
+    async fn v1_messages_unary_emits_tool_use_block_from_backend() {
+        if std::env::var("RUN_WIREMOCK").ok().as_deref() != Some("1") {
+            return;
+        }
+
+        let auth_path = write_temp_auth_json();
+
+        let mock = MockServer::start().await;
+        let sse = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/streaming/backend_stream_tool_call.sse"
+        ));
+        Mock::given(method("POST"))
+            .and(path("/backend-api/codex/responses"))
+            .and(header("authorization", "Bearer tok_test"))
+            .and(header("chatgpt-account-id", "acct_test"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(sse, "text/event-stream"))
+            .mount(&mock)
+            .await;
+
+        let base_url = url::Url::parse(&mock.uri()).expect("mock url");
+        let state = super::AppState {
+            backend: gateway_backend_codex::client::CodexBackendClient::default()
+                .with_base_url(&base_url),
+            ..super::AppState::default()
+        };
+
+        let app = super::router(state);
+        let req_body = serde_json::json!({
+            "model": "gpt-5.2",
+            "stream": false,
+            "messages": [{ "role": "user", "content": "call a tool" }]
+        });
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header(
+                        "x-gateway-test-auth-path",
+                        auth_path.to_string_lossy().to_string(),
+                    )
+                    .header("content-type", "application/json")
+                    .body(Body::from(req_body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(res.status().is_success());
+        let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            json.get("stop_reason").and_then(|v| v.as_str()),
+            Some("tool_use")
+        );
+        let block = json
+            .get("content")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first())
+            .expect("content[0]");
+        assert_eq!(block.get("type").and_then(|v| v.as_str()), Some("tool_use"));
+        assert_eq!(block.get("id").and_then(|v| v.as_str()), Some("call_1"));
+        assert_eq!(block.get("name").and_then(|v| v.as_str()), Some("Read"));
     }
 }
 

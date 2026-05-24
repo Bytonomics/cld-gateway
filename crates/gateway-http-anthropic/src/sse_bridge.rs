@@ -461,6 +461,15 @@ fn handle_completed(st: &mut StreamState, data: &str, request_id: Option<&str>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::to_bytes;
+    use axum::response::IntoResponse as _;
+    use axum::response::sse::Sse;
+    use bytes::Bytes;
+    use eventsource_stream::Eventsource as _;
+    use futures_util::StreamExt as _;
+    use futures_util::stream;
+    use std::convert::Infallible;
+    use uuid::Uuid;
 
     #[test]
     fn tool_args_validation_requires_object() {
@@ -484,5 +493,166 @@ mod tests {
         let json = r#"{"type":"response.completed","response":{"id":"r1","usage":{"input_tokens":7,"output_tokens":9}}}"#;
         let got = parse_completed_usage(json).expect("usage");
         assert_eq!(got.output_tokens, 9);
+    }
+
+    fn fixture(path: &str) -> String {
+        let full = format!("{}/tests/fixtures/{}", env!("CARGO_MANIFEST_DIR"), path);
+        std::fs::read_to_string(full).expect("read fixture")
+    }
+
+    fn parse_expected_jsonl(path: &str) -> Vec<(String, serde_json::Value)> {
+        let text = fixture(path);
+        text.lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|line| {
+                let v: serde_json::Value = serde_json::from_str(line).expect("jsonl line");
+                let event = v
+                    .get("event")
+                    .and_then(|v| v.as_str())
+                    .expect("event")
+                    .to_string();
+                let data = v.get("data").cloned().expect("data");
+                (event, data)
+            })
+            .collect()
+    }
+
+    fn parse_sse_frames(body: &str) -> Vec<(String, serde_json::Value)> {
+        body.split("\n\n")
+            .filter_map(|frame| {
+                let frame = frame.trim();
+                if frame.is_empty() {
+                    return None;
+                }
+                let mut event: Option<String> = None;
+                let mut data_lines: Vec<&str> = Vec::new();
+                for line in frame.lines() {
+                    if let Some(rest) = line.strip_prefix("event:") {
+                        event = Some(rest.trim().to_string());
+                    } else if let Some(rest) = line.strip_prefix("data:") {
+                        data_lines.push(rest.trim());
+                    }
+                }
+                let event = event?;
+                let data_str = data_lines.join("\n");
+                let data: serde_json::Value =
+                    serde_json::from_str(&data_str).expect("event data json");
+                Some((event, data))
+            })
+            .collect()
+    }
+
+    fn normalize_msg_id(
+        mut events: Vec<(String, serde_json::Value)>,
+    ) -> Vec<(String, serde_json::Value)> {
+        for (ev, data) in &mut events {
+            if ev == "message_start"
+                && let Some(msg) = data.get_mut("message")
+                && let Some(obj) = msg.as_object_mut()
+            {
+                obj.insert(
+                    "id".to_string(),
+                    serde_json::Value::String("msg_TEST".to_string()),
+                );
+            }
+        }
+        events
+    }
+
+    fn extract_delta_text_simple(data: &str) -> Option<String> {
+        let v = serde_json::from_str::<serde_json::Value>(data).ok()?;
+        v.get("delta").and_then(|v| v.as_str()).map(str::to_string)
+    }
+
+    fn start_events(msg_id: &str, model: &str) -> Vec<Event> {
+        vec![
+            Event::default().event("message_start").data(
+                serde_json::json!({
+                    "type": "message_start",
+                    "message": {
+                        "id": msg_id,
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [],
+                        "model": model,
+                        "stop_reason": null,
+                        "stop_sequence": null,
+                        "usage": { "input_tokens": 0, "output_tokens": 0 }
+                    }
+                })
+                .to_string(),
+            ),
+            Event::default().event("content_block_start").data(
+                serde_json::json!({
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": { "type": "text", "text": "" }
+                })
+                .to_string(),
+            ),
+        ]
+    }
+
+    async fn run_bridge_and_capture(
+        backend_sse_fixture: &str,
+        model: &str,
+        request_id: Option<&str>,
+    ) -> Vec<(String, serde_json::Value)> {
+        let backend_sse_fixture = format!("{backend_sse_fixture}\n\n");
+        let byte_stream = stream::iter(vec![Ok::<Bytes, std::io::Error>(Bytes::from(
+            backend_sse_fixture,
+        ))]);
+        let mut backend = Box::pin(byte_stream.eventsource());
+
+        let mut state = StreamState::new_with_text_block0_started();
+        let tool_calls_path =
+            std::env::temp_dir().join(format!("gateway_tool_calls_{}.sqlite", Uuid::new_v4()));
+        let tool_calls = ToolCallStore::new(&tool_calls_path);
+
+        let mut events = start_events("msg_TEST", model);
+
+        while let Some(next) = backend.next().await {
+            let evt = next.expect("sse parse ok");
+            let data = evt.data.trim();
+            if data.is_empty() || data == "[DONE]" {
+                continue;
+            }
+            if let Some(mut mapped) = map_backend_event(
+                &mut state,
+                evt.event.as_str(),
+                data,
+                extract_delta_text_simple,
+                &tool_calls,
+                request_id,
+            ) {
+                events.append(&mut mapped);
+            }
+        }
+
+        let sse = Sse::new(stream::iter(
+            events.into_iter().map(Ok::<Event, Infallible>),
+        ));
+        let res = sse.into_response();
+        let body = to_bytes(res.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let text = std::str::from_utf8(&body).expect("utf8");
+        normalize_msg_id(parse_sse_frames(text))
+    }
+
+    #[tokio::test]
+    async fn streaming_bridge_matches_text_only_fixture() {
+        let backend = fixture("streaming/backend_stream_text_only.sse");
+        let got = run_bridge_and_capture(&backend, "gpt-5.2", None).await;
+        let expected = parse_expected_jsonl("streaming/expected_anthropic_text_only.jsonl");
+        assert_eq!(got, expected);
+    }
+
+    #[tokio::test]
+    async fn streaming_bridge_matches_tool_call_fixture_and_sanitizes_args() {
+        let backend = fixture("streaming/backend_stream_tool_call.sse");
+        let got = run_bridge_and_capture(&backend, "gpt-5.2", Some("rid_TEST")).await;
+        let expected = parse_expected_jsonl("streaming/expected_anthropic_tool_call.jsonl");
+        assert_eq!(got, expected);
     }
 }

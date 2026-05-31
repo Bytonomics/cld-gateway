@@ -40,20 +40,53 @@ pub async fn refresh_access_token(
         .form(&payload)
         .send()
         .await
-        .map_err(|_| CodexAuthError::RefreshFailed)?;
+        .map_err(|source| CodexAuthError::RefreshTransportFailed {
+            message: source.to_string(),
+        })?;
 
-    if !res.status().is_success() {
-        return Err(CodexAuthError::RefreshFailed);
+    let status = res.status();
+    let body = res
+        .text()
+        .await
+        .map_err(|source| CodexAuthError::RefreshUnexpectedResponse {
+            body: source.to_string(),
+        })?;
+
+    if !status.is_success() {
+        if status.as_u16() == 401 {
+            return Err(CodexAuthError::RefreshUnauthorized {
+                code: refresh_error_code(&body),
+                body,
+            });
+        }
+        return Err(CodexAuthError::RefreshFailed {
+            status: status.as_u16(),
+            body,
+        });
     }
 
-    let parsed: RefreshResponse = res
-        .json()
-        .await
-        .map_err(|_| CodexAuthError::RefreshUnexpectedResponse)?;
+    let parsed: RefreshResponse = serde_json::from_str(&body)
+        .map_err(|_| CodexAuthError::RefreshUnexpectedResponse { body: body.clone() })?;
 
     if parsed.access_token.is_none() {
-        return Err(CodexAuthError::RefreshUnexpectedResponse);
+        return Err(CodexAuthError::RefreshUnexpectedResponse { body });
     }
 
     Ok(parsed)
+}
+
+fn refresh_error_code(body: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(body).ok()?;
+    let error = value.get("error")?;
+    match error {
+        serde_json::Value::Object(map) => map
+            .get("code")
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string),
+        serde_json::Value::String(code) => Some(code.clone()),
+        _ => value
+            .get("code")
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string),
+    }
 }

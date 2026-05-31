@@ -20,6 +20,7 @@ tempfile.workspace = true
 thiserror.workspace = true
 tiny_http.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 url.workspace = true
 urlencoding.workspace = true
 webbrowser.workspace = true

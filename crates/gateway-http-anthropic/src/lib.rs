@@ -19,9 +19,13 @@ use gateway_core::RequestId;
 use gateway_core::Secret;
 use gateway_core::model_map::resolve_model;
 use gateway_core::model_map::{ModelMap, ModelResolution, default_model_map_path, load_model_map};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tracing::info;
 use uuid::Uuid;
+
+#[cfg(test)]
+use std::path::PathBuf;
 
 mod sse_bridge;
 mod tool_arg_policy;
@@ -39,6 +43,8 @@ pub struct AppState {
     openai_models_url: String,
     openai_api_key: Option<Secret<String>>,
     tool_calls: ToolCallStore,
+    #[cfg(test)]
+    auth_json_path: Option<PathBuf>,
 }
 
 impl AppState {
@@ -71,6 +77,19 @@ impl AppState {
     fn with_openai_api_key(mut self, key: &str) -> Self {
         self.openai_api_key = Some(Secret::new(key.to_string()));
         self
+    }
+}
+
+fn auth_path_override(state: &AppState) -> Option<&Path> {
+    #[cfg(test)]
+    {
+        state.auth_json_path.as_deref()
+    }
+
+    #[cfg(not(test))]
+    {
+        let _ = state;
+        None
     }
 }
 
@@ -247,9 +266,9 @@ async fn v1_messages(
         Err(err) => return bad_request(&err),
     };
 
-    let creds = match load_codex_credentials() {
+    let creds = match load_codex_credentials(auth_path_override(&state)) {
         Ok(c) => c,
-        Err(resp) => return *resp,
+        Err(err) => return bad_request(&format!("auth_error: {err}")),
     };
     let backend_req = build_backend_request(&resolution, translated, creds);
     let decoded = match run_backend_unary(&state, backend_req).await {
@@ -327,19 +346,14 @@ fn resolve_and_log_model(
     resolution
 }
 
-fn load_codex_credentials()
--> Result<gateway_auth_codex::CodexCredentials, Box<axum::response::Response>> {
-    gateway_auth_codex::load_credentials_default_path().map_err(|err| {
-        Box::new(
-            (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": { "type": "auth_error", "message": format!("{err}") }
-                })),
-            )
-                .into_response(),
-        )
-    })
+fn load_codex_credentials(
+    auth_path: Option<&Path>,
+) -> Result<gateway_auth_codex::CodexCredentials, String> {
+    let result = match auth_path {
+        Some(path) => gateway_auth_codex::load_credentials(path),
+        None => gateway_auth_codex::load_credentials_default_path(),
+    };
+    result.map_err(|err| format!("{err}"))
 }
 
 fn build_backend_request(
@@ -546,9 +560,9 @@ async fn stream_messages(
         Ok(t) => t,
         Err(err) => return sse_error("invalid_request_error", &err),
     };
-    let creds = match gateway_auth_codex::load_credentials_default_path() {
+    let creds = match load_codex_credentials(auth_path_override(&state)) {
         Ok(c) => c,
-        Err(err) => return sse_error("auth_error", &format!("{err}")),
+        Err(err) => return sse_error("auth_error", &format!("auth_error: {err}")),
     };
     let request_to_backend = build_backend_request(&resolution, translated, creds);
 
@@ -755,6 +769,70 @@ mod messages_tests {
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    fn fixture(path: &str) -> String {
+        let full = format!("{}/tests/fixtures/{}", env!("CARGO_MANIFEST_DIR"), path);
+        std::fs::read_to_string(full).expect("read fixture")
+    }
+
+    fn parse_sse_frames(body: &str) -> Vec<(String, serde_json::Value)> {
+        body.split("\n\n")
+            .filter_map(|frame| {
+                let frame = frame.trim();
+                if frame.is_empty() {
+                    return None;
+                }
+                let mut event: Option<String> = None;
+                let mut data_lines: Vec<&str> = Vec::new();
+                for line in frame.lines() {
+                    if let Some(rest) = line.strip_prefix("event:") {
+                        event = Some(rest.trim().to_string());
+                    } else if let Some(rest) = line.strip_prefix("data:") {
+                        data_lines.push(rest.trim());
+                    }
+                }
+                let event = event?;
+                let data_str = data_lines.join("\n");
+                let data: serde_json::Value =
+                    serde_json::from_str(&data_str).expect("event data json");
+                Some((event, data))
+            })
+            .collect()
+    }
+
+    fn normalize_msg_id(
+        mut events: Vec<(String, serde_json::Value)>,
+    ) -> Vec<(String, serde_json::Value)> {
+        for (ev, data) in &mut events {
+            if ev == "message_start"
+                && let Some(msg) = data.get_mut("message")
+                && let Some(obj) = msg.as_object_mut()
+            {
+                obj.insert(
+                    "id".to_string(),
+                    serde_json::Value::String("msg_TEST".to_string()),
+                );
+            }
+        }
+        events
+    }
+
+    fn parse_expected_jsonl(path: &str) -> Vec<(String, serde_json::Value)> {
+        let text = fixture(path);
+        text.lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|line| {
+                let v: serde_json::Value = serde_json::from_str(line).expect("jsonl line");
+                let event = v
+                    .get("event")
+                    .and_then(|v| v.as_str())
+                    .expect("event")
+                    .to_string();
+                let data = v.get("data").cloned().expect("data");
+                (event, data)
+            })
+            .collect()
+    }
+
     #[test]
     fn translation_accepts_string_and_blocks_text() {
         let req = AnthropicMessagesRequest {
@@ -804,7 +882,30 @@ mod messages_tests {
 
     #[tokio::test]
     async fn v1_messages_supports_stream_true() {
-        let app = super::router(super::AppState::default());
+        if std::env::var("RUN_WIREMOCK").ok().as_deref() != Some("1") {
+            return;
+        }
+
+        let auth_path = write_temp_auth_json();
+        let mock = MockServer::start().await;
+        let backend = format!("{}\n\n", fixture("streaming/backend_stream_text_only.sse"));
+        Mock::given(method("POST"))
+            .and(path("/backend-api/codex/responses"))
+            .and(header("authorization", "Bearer tok_test"))
+            .and(header("chatgpt-account-id", "acct_test"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(backend, "text/event-stream"))
+            .mount(&mock)
+            .await;
+
+        let base_url = url::Url::parse(&mock.uri()).expect("mock url");
+        let state = super::AppState {
+            backend: gateway_backend_codex::client::CodexBackendClient::default()
+                .with_base_url(&base_url),
+            auth_json_path: Some(auth_path),
+            ..super::AppState::default()
+        };
+
+        let app = super::router(state);
         let req_body = serde_json::json!({
             "model": "gpt-5.2",
             "stream": true,
@@ -830,6 +931,12 @@ mod messages_tests {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
         assert!(content_type.contains("text/event-stream"));
+
+        let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let text = std::str::from_utf8(&body).unwrap();
+        let got = normalize_msg_id(parse_sse_frames(text));
+        let expected = parse_expected_jsonl("streaming/expected_anthropic_text_only.jsonl");
+        assert_eq!(got, expected);
     }
 
     fn write_temp_auth_json() -> std::path::PathBuf {
@@ -870,6 +977,7 @@ mod messages_tests {
         let state = super::AppState {
             backend: gateway_backend_codex::client::CodexBackendClient::default()
                 .with_base_url(&base_url),
+            auth_json_path: Some(auth_path),
             ..super::AppState::default()
         };
 
@@ -885,10 +993,6 @@ mod messages_tests {
                 Request::builder()
                     .method("POST")
                     .uri("/v1/messages")
-                    .header(
-                        "x-gateway-test-auth-path",
-                        auth_path.to_string_lossy().to_string(),
-                    )
                     .header("content-type", "application/json")
                     .body(Body::from(req_body.to_string()))
                     .unwrap(),

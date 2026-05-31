@@ -14,10 +14,11 @@ pub fn apply_refreshed_tokens(
         .and_then(serde_json::Value::as_object_mut)
         .ok_or(CodexAuthError::MissingField("tokens"))?;
 
-    let access = refreshed
-        .access_token
-        .as_ref()
-        .ok_or(CodexAuthError::RefreshUnexpectedResponse)?;
+    let access = refreshed.access_token.as_ref().ok_or_else(|| {
+        CodexAuthError::RefreshUnexpectedResponse {
+            body: "missing access_token".to_string(),
+        }
+    })?;
     tokens.insert(
         "access_token".to_string(),
         serde_json::Value::String(access.clone()),

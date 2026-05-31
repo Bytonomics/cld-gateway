@@ -8,8 +8,17 @@ use url::Url;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BackendError {
-    #[error("request failed")]
-    RequestFailed,
+    #[error("request failed during {stage}: {source}")]
+    RequestFailed {
+        stage: &'static str,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("authentication failed during {stage}: {message}")]
+    AuthFailed {
+        stage: &'static str,
+        message: String,
+    },
     #[error("unexpected response status {0}")]
     UnexpectedStatus(u16),
     #[error("unexpected response status {status}: {body}")]
@@ -49,7 +58,13 @@ impl CodexBackendClient {
     ) -> Result<CodexBackendResponse, BackendError> {
         let res = self.send_streaming(req).await?;
         let status = res.status().as_u16();
-        let body_text = res.text().await.map_err(|_| BackendError::RequestFailed)?;
+        let body_text = res
+            .text()
+            .await
+            .map_err(|source| BackendError::RequestFailed {
+                stage: "read response body",
+                source,
+            })?;
 
         Ok(CodexBackendResponse {
             status,
@@ -90,7 +105,10 @@ impl CodexBackendClient {
             .json(&body)
             .send()
             .await
-            .map_err(|_| BackendError::RequestFailed)?;
+            .map_err(|source| BackendError::RequestFailed {
+                stage: "send request",
+                source,
+            })?;
 
         let status = res.status().as_u16();
         if status >= 300 {
@@ -125,14 +143,27 @@ impl CodexBackendClient {
                 BackendError::UnexpectedStatus(401)
                 | BackendError::UnexpectedStatusWithBody { status: 401, .. },
             ) => {
-                let refreshed = auth
-                    .refresh_and_persist_default_path()
-                    .await
-                    .map_err(|_| BackendError::RequestFailed)?;
+                let refreshed = match auth.refresh_and_persist_default_path().await {
+                    Ok(snapshot) => snapshot,
+                    Err(err) => {
+                        if err.is_permanent_refresh_failure() {
+                            let _ = gateway_auth_codex::logout_with_revoke_default_path().await;
+                        }
+                        return Err(BackendError::AuthFailed {
+                            stage: "refresh auth",
+                            message: err.to_string(),
+                        });
+                    }
+                };
 
                 // Re-load the access token after refresh.
-                req.access_token = gateway_auth_codex::load_access_token_default_path()
-                    .map_err(|_| BackendError::RequestFailed)?;
+                req.access_token =
+                    gateway_auth_codex::load_access_token_default_path().map_err(|err| {
+                        BackendError::AuthFailed {
+                            stage: "reload access token",
+                            message: err.to_string(),
+                        }
+                    })?;
                 req.account_id = refreshed.account_id;
 
                 self.send(&req).await
@@ -157,13 +188,26 @@ impl CodexBackendClient {
                 BackendError::UnexpectedStatus(401)
                 | BackendError::UnexpectedStatusWithBody { status: 401, .. },
             ) => {
-                let refreshed = auth
-                    .refresh_and_persist_default_path()
-                    .await
-                    .map_err(|_| BackendError::RequestFailed)?;
+                let refreshed = match auth.refresh_and_persist_default_path().await {
+                    Ok(snapshot) => snapshot,
+                    Err(err) => {
+                        if err.is_permanent_refresh_failure() {
+                            let _ = gateway_auth_codex::logout_with_revoke_default_path().await;
+                        }
+                        return Err(BackendError::AuthFailed {
+                            stage: "refresh auth",
+                            message: err.to_string(),
+                        });
+                    }
+                };
 
-                req.access_token = gateway_auth_codex::load_access_token_default_path()
-                    .map_err(|_| BackendError::RequestFailed)?;
+                req.access_token =
+                    gateway_auth_codex::load_access_token_default_path().map_err(|err| {
+                        BackendError::AuthFailed {
+                            stage: "reload access token",
+                            message: err.to_string(),
+                        }
+                    })?;
                 req.account_id = refreshed.account_id;
 
                 self.send_streaming(&req).await

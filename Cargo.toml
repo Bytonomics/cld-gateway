@@ -46,7 +46,7 @@ pedantic = "deny"
 # - macros: enables #[tokio::main] and #[tokio::test]
 # - rt-multi-thread: multithreaded runtime (typical for servers)
 # - signal: OS signal handling (useful for graceful shutdown later)
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync"] }
 
 # Axum is the web framework (built on hyper/tower).
 # Feature:

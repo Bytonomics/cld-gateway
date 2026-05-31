@@ -11,10 +11,12 @@ pub mod login;
 pub mod oauth;
 pub mod paths;
 mod persist;
+mod revoke;
 
 use gateway_core::Secret;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 use url::Url;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,6 +25,36 @@ pub struct CodexAuthSnapshot {
     pub has_access_token: bool,
     pub has_refresh_token: bool,
     pub expires_at_unix_seconds: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GatewayLoginMethod {
+    Chatgpt,
+    ApiKey,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GatewayAuthStatus {
+    pub login_method: GatewayLoginMethod,
+    pub account_id: Option<String>,
+    pub has_access_token: bool,
+    pub has_refresh_token: bool,
+    pub has_openai_api_key: bool,
+}
+
+impl GatewayAuthStatus {
+    #[must_use]
+    pub fn ready_for_messages(&self) -> bool {
+        matches!(self.login_method, GatewayLoginMethod::Chatgpt)
+            && self.has_access_token
+            && self.has_refresh_token
+            && self.account_id.is_some()
+    }
+
+    #[must_use]
+    pub fn ready_for_models(&self) -> bool {
+        self.has_openai_api_key || self.ready_for_messages()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -52,11 +84,17 @@ pub enum CodexAuthError {
     #[error("failed to parse JWT claims JSON")]
     JwtClaimsJson,
 
-    #[error("token refresh failed")]
-    RefreshFailed,
+    #[error("token refresh transport failed: {message}")]
+    RefreshTransportFailed { message: String },
 
-    #[error("token endpoint returned unexpected response")]
-    RefreshUnexpectedResponse,
+    #[error("token refresh failed with status {status}: {body}")]
+    RefreshFailed { status: u16, body: String },
+
+    #[error("token refresh rejected with code {code:?}: {body}")]
+    RefreshUnauthorized { code: Option<String>, body: String },
+
+    #[error("token endpoint returned unexpected response: {body}")]
+    RefreshUnexpectedResponse { body: String },
 
     #[error("no gateway auth found at {path}")]
     AuthNotFound { path: PathBuf },
@@ -74,18 +112,78 @@ pub enum CodexAuthError {
     LoginTokenExchangeFailed(u16),
 }
 
-fn load_auth_json_default_path() -> Result<serde_json::Value, CodexAuthError> {
-    let path = paths::default_auth_json_path();
-    let bytes = match std::fs::read(&path) {
+impl CodexAuthError {
+    #[must_use]
+    pub fn is_permanent_refresh_failure(&self) -> bool {
+        matches!(self, Self::RefreshUnauthorized { .. })
+    }
+}
+
+pub(crate) fn load_auth_json(path: &Path) -> Result<auth_json::AuthJson, CodexAuthError> {
+    let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            return Err(CodexAuthError::AuthNotFound { path });
+            return Err(CodexAuthError::AuthNotFound {
+                path: path.to_path_buf(),
+            });
         }
         Err(err) => {
-            return Err(CodexAuthError::IoWithPath { path, source: err });
+            return Err(CodexAuthError::IoWithPath {
+                path: path.to_path_buf(),
+                source: err,
+            });
         }
     };
-    Ok(serde_json::from_slice::<serde_json::Value>(&bytes)?)
+    Ok(serde_json::from_slice::<auth_json::AuthJson>(&bytes)?)
+}
+
+pub(crate) fn load_auth_json_default_path() -> Result<auth_json::AuthJson, CodexAuthError> {
+    load_auth_json(&paths::default_auth_json_path())
+}
+
+fn auth_status_from_parsed(auth: &auth_json::AuthJson) -> GatewayAuthStatus {
+    let has_openai_api_key = auth.openai_api_key.is_some();
+    let login_method = if has_openai_api_key {
+        GatewayLoginMethod::ApiKey
+    } else {
+        GatewayLoginMethod::Chatgpt
+    };
+    let tokens = auth.tokens.as_ref();
+    let has_access_token = tokens
+        .and_then(|tokens| tokens.access_token.as_ref())
+        .is_some();
+    let has_refresh_token = tokens
+        .and_then(|tokens| tokens.refresh_token.as_ref())
+        .is_some();
+    let account_id = tokens
+        .and_then(|tokens| tokens.account_id.clone())
+        .or_else(|| {
+            tokens
+                .and_then(|tokens| tokens.id_token.as_deref())
+                .and_then(jwt::extract_chatgpt_account_id_unverified)
+        });
+
+    GatewayAuthStatus {
+        login_method,
+        account_id,
+        has_access_token,
+        has_refresh_token,
+        has_openai_api_key,
+    }
+}
+
+/// Loads gateway auth status from the default auth path.
+///
+/// # Errors
+///
+/// Returns `AuthNotFound` if auth is missing, or parse/io errors otherwise.
+pub fn load_gateway_auth_status_default_path() -> Result<Option<GatewayAuthStatus>, CodexAuthError>
+{
+    match load_auth_json_default_path() {
+        Ok(auth) => Ok(Some(auth_status_from_parsed(&auth))),
+        Err(CodexAuthError::AuthNotFound { .. }) => Ok(None),
+        Err(err) => Err(err),
+    }
 }
 
 /// Loads Codex auth from the provided `auth.json` path and returns a safe snapshot.
@@ -144,8 +242,7 @@ fn load_codex_auth_from_parsed(
 ///
 /// Returns an error if loading/parsing fails or required fields are missing.
 pub fn load_codex_auth_default_path() -> Result<CodexAuthSnapshot, CodexAuthError> {
-    let value = load_auth_json_default_path()?;
-    let auth: auth_json::AuthJson = serde_json::from_value(value)?;
+    let auth = load_auth_json_default_path()?;
     load_codex_auth_from_parsed(auth)
 }
 
@@ -166,9 +263,9 @@ pub fn load_access_token_default_path() -> Result<Secret<String>, CodexAuthError
 ///
 /// Returns an error if auth.json cannot be read or parsed.
 pub fn load_openai_api_key_default_path() -> Result<Option<Secret<String>>, CodexAuthError> {
-    let value = load_auth_json_default_path()?;
-    let auth: auth_json::AuthJson = serde_json::from_value(value)?;
-    Ok(auth.openai_api_key.map(Secret::new))
+    Ok(load_auth_json_default_path()?
+        .openai_api_key
+        .map(Secret::new))
 }
 
 /// Persists `OPENAI_API_KEY` into the gateway auth.json.
@@ -191,6 +288,24 @@ pub fn write_openai_api_key_default_path(api_key: &str) -> Result<(), CodexAuthE
     Ok(())
 }
 
+/// Removes the default auth file without revoking tokens.
+///
+/// # Errors
+///
+/// Returns an error if removing the file fails for reasons other than it not existing.
+pub fn logout_default_path() -> Result<bool, CodexAuthError> {
+    revoke::logout(&paths::default_auth_json_path())
+}
+
+/// Best-effort revocation of the current default auth file, then removal of the file.
+///
+/// # Errors
+///
+/// Returns an error if the file removal fails for reasons other than not existing.
+pub async fn logout_with_revoke_default_path() -> Result<bool, CodexAuthError> {
+    revoke::logout_with_revoke(&paths::default_auth_json_path()).await
+}
+
 #[derive(Clone)]
 pub struct CodexCredentials {
     pub access_token: Secret<String>,
@@ -203,8 +318,20 @@ pub struct CodexCredentials {
 ///
 /// Returns an error if loading/parsing fails or required fields are missing.
 pub fn load_credentials_default_path() -> Result<CodexCredentials, CodexAuthError> {
-    let value = load_auth_json_default_path()?;
-    let auth: auth_json::AuthJson = serde_json::from_value(value)?;
+    load_credentials(&paths::default_auth_json_path())
+}
+
+/// Loads access token + account id from `path` in one IO/parse pass.
+///
+/// # Errors
+///
+/// Returns an error if loading/parsing fails or required fields are missing.
+pub fn load_credentials(path: &Path) -> Result<CodexCredentials, CodexAuthError> {
+    let bytes = std::fs::read(path).map_err(|e| CodexAuthError::IoWithPath {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+    let auth: auth_json::AuthJson = serde_json::from_slice(&bytes)?;
     let tokens = auth.tokens.ok_or(CodexAuthError::MissingField("tokens"))?;
 
     let access_token = tokens
@@ -232,6 +359,28 @@ pub struct CodexAuthManager {
     token_url: String,
     client_id: String,
     http: reqwest::Client,
+    state: Arc<CodexAuthManagerState>,
+}
+
+struct CodexAuthManagerState {
+    refresh_lock: tokio::sync::Mutex<()>,
+    permanent_refresh_failure: tokio::sync::Mutex<Option<PermanentRefreshFailure>>,
+}
+
+#[derive(Debug, Clone)]
+struct PermanentRefreshFailure {
+    auth_fingerprint: String,
+    code: Option<String>,
+    body: String,
+}
+
+impl PermanentRefreshFailure {
+    fn error(&self) -> CodexAuthError {
+        CodexAuthError::RefreshUnauthorized {
+            code: self.code.clone(),
+            body: self.body.clone(),
+        }
+    }
 }
 
 impl Default for CodexAuthManager {
@@ -241,6 +390,10 @@ impl Default for CodexAuthManager {
             token_url: "https://auth.openai.com/oauth/token".to_string(),
             client_id: "app_EMoamEEZ73f0CkXaXp7hrann".to_string(),
             http: reqwest::Client::new(),
+            state: Arc::new(CodexAuthManagerState {
+                refresh_lock: tokio::sync::Mutex::new(()),
+                permanent_refresh_failure: tokio::sync::Mutex::new(None),
+            }),
         }
     }
 }
@@ -273,29 +426,86 @@ impl CodexAuthManager {
         &self,
         path: &Path,
     ) -> Result<CodexAuthSnapshot, CodexAuthError> {
-        let bytes = std::fs::read(path)?;
-        let mut auth_value: serde_json::Value = serde_json::from_slice(&bytes)?;
+        let _guard = self.state.refresh_lock.lock().await;
+        let auth_before = load_auth_json(path)?;
+        let auth_before_fingerprint = serde_json::to_string(&auth_before)?;
+
+        if let Some(cached) = self
+            .cached_permanent_failure(&auth_before_fingerprint)
+            .await
+        {
+            return Err(cached.error());
+        }
+
+        let auth_after = load_auth_json(path)?;
+        let auth_after_fingerprint = serde_json::to_string(&auth_after)?;
+        if auth_after_fingerprint != auth_before_fingerprint {
+            self.clear_cached_permanent_failure_if_changed(&auth_after_fingerprint)
+                .await;
+            return load_codex_auth(path);
+        }
+
+        let mut auth_value: serde_json::Value = serde_json::to_value(&auth_after)?;
 
         let refresh_token = auth_value
             .pointer("/tokens/refresh_token")
             .and_then(|v| v.as_str())
             .ok_or(CodexAuthError::MissingField("tokens.refresh_token"))?;
 
-        let refreshed = oauth::refresh_access_token(
+        let refreshed = match oauth::refresh_access_token(
             &self.http,
             &self.token_url,
             &self.client_id,
             refresh_token,
         )
-        .await?;
+        .await
+        {
+            Ok(refreshed) => refreshed,
+            Err(err) => {
+                if let CodexAuthError::RefreshUnauthorized { code, body } = &err {
+                    let mut guard = self.state.permanent_refresh_failure.lock().await;
+                    *guard = Some(PermanentRefreshFailure {
+                        auth_fingerprint: auth_after_fingerprint,
+                        code: code.clone(),
+                        body: body.clone(),
+                    });
+                }
+                return Err(err);
+            }
+        };
 
         persist::apply_refreshed_tokens(&mut auth_value, &refreshed)?;
         persist::atomic_write_json(path, &auth_value)?;
+        self.clear_cached_permanent_failure_if_changed(&serde_json::to_string(&auth_after)?)
+            .await;
 
         load_codex_auth(path)
     }
 
     // (helper removed) keyring persistence is deferred.
+}
+
+impl CodexAuthManager {
+    async fn cached_permanent_failure(
+        &self,
+        auth_fingerprint: &str,
+    ) -> Option<PermanentRefreshFailure> {
+        let guard = self.state.permanent_refresh_failure.lock().await;
+        guard
+            .as_ref()
+            .filter(|failure| failure.auth_fingerprint == auth_fingerprint)
+            .cloned()
+    }
+
+    async fn clear_cached_permanent_failure_if_changed(&self, auth_fingerprint: &str) {
+        let mut guard = self.state.permanent_refresh_failure.lock().await;
+        if guard
+            .as_ref()
+            .is_some_and(|failure| failure.auth_fingerprint != auth_fingerprint)
+        {
+            *guard = None;
+        }
+    }
 }
 
 #[must_use]

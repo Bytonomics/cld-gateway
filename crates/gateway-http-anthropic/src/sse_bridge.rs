@@ -1,6 +1,10 @@
 #![forbid(unsafe_code)]
 
 use axum::response::sse::Event;
+use gateway_backend_codex::tool_calls::{
+    normalize_json_object_string, parse_output_item_tool_call,
+};
+use gateway_backend_codex::types::{CodexToolCall, CodexToolCallKind};
 use gateway_state::ToolCallStore;
 use std::collections::HashMap;
 
@@ -33,6 +37,7 @@ pub(crate) struct StreamState {
     // Tool routing
     tool_blocks_by_call_id: HashMap<String, u32>,
     tool_name_by_call_id: HashMap<String, String>,
+    tool_kind_by_call_id: HashMap<String, CodexToolCallKind>,
     tool_args_buf_by_call_id: HashMap<String, String>,
     last_tool_call_id: Option<String>,
 
@@ -55,6 +60,7 @@ impl StreamState {
             active_thinking_index: None,
             tool_blocks_by_call_id: HashMap::new(),
             tool_name_by_call_id: HashMap::new(),
+            tool_kind_by_call_id: HashMap::new(),
             tool_args_buf_by_call_id: HashMap::new(),
             last_tool_call_id: None,
             completed_usage: None,
@@ -200,6 +206,7 @@ fn validate_tool_args_json_object(buf: &str) -> Result<(), String> {
 
 fn parse_tool_args_object(buf: &str) -> Result<serde_json::Map<String, serde_json::Value>, String> {
     let trimmed = buf.trim();
+    validate_tool_args_json_object(trimmed)?;
     if trimmed.is_empty() {
         return Ok(serde_json::Map::new());
     }
@@ -270,7 +277,7 @@ pub(crate) fn map_backend_event(
             handle_output_text_delta(st, data, extract_stream_delta_text)
         }
         "response.output_item.added" | "response.output_item.done" => {
-            handle_output_item(st, data, tool_calls, request_id)
+            handle_output_item(st, event_name, data, tool_calls, request_id)
         }
         "response.function_call_arguments.delta" | "response.custom_tool_call_input.delta" => {
             handle_tool_arg_delta(st, data)
@@ -295,37 +302,54 @@ fn handle_output_text_delta(
 
 fn handle_output_item(
     st: &mut StreamState,
+    event_name: &str,
     data: &str,
     tool_calls: &ToolCallStore,
     request_id: Option<&str>,
 ) -> Option<Vec<Event>> {
+    if let Some(tool_call) = parse_output_item_tool_call(event_name, data) {
+        return handle_tool_call_item(
+            st,
+            tool_call,
+            event_name == "response.output_item.done",
+            tool_calls,
+            request_id,
+        );
+    }
+
     let v = serde_json::from_str::<serde_json::Value>(data).ok()?;
     let item = v.get("item")?;
     match item.get("type").and_then(|v| v.as_str()) {
-        Some("function_call") => handle_function_call_item(st, item, tool_calls, request_id),
         Some("message") => handle_message_item(st, item),
         _ => None,
     }
 }
 
-fn handle_function_call_item(
+fn handle_tool_call_item(
     st: &mut StreamState,
-    item: &serde_json::Value,
+    tool_call: CodexToolCall,
+    final_item: bool,
     tool_calls: &ToolCallStore,
     request_id: Option<&str>,
 ) -> Option<Vec<Event>> {
-    let call_id = item.get("call_id").and_then(|s| s.as_str())?;
-    let name = item.get("name").and_then(|s| s.as_str()).unwrap_or("");
+    let call_id = tool_call.call_id;
+    let name = tool_call.name;
+    let kind = tool_call.kind;
 
-    let (tool_index, is_new) = st.ensure_tool_block(call_id);
-    st.last_tool_call_id = Some(call_id.to_string());
+    let (tool_index, is_new) = st.ensure_tool_block(&call_id);
+    st.last_tool_call_id = Some(call_id.clone());
     st.tool_name_by_call_id
-        .insert(call_id.to_string(), name.to_string());
+        .insert(call_id.clone(), name.clone());
+    st.tool_kind_by_call_id.insert(call_id.clone(), kind);
+    if final_item {
+        st.tool_args_buf_by_call_id
+            .insert(call_id.clone(), tool_call.arguments);
+    }
 
     if is_new {
-        let _ = tool_calls.record_tool_call(call_id, name, request_id);
+        let _ = tool_calls.record_tool_call(&call_id, &name, kind.as_str(), request_id);
         Some(vec![content_block_start_tool_use(
-            tool_index, call_id, name,
+            tool_index, &call_id, &name,
         )])
     } else {
         None
@@ -411,12 +435,6 @@ fn parse_completed_usage(data: &str) -> Option<BackendTokenUsage> {
 fn handle_completed(st: &mut StreamState, data: &str, request_id: Option<&str>) -> Vec<Event> {
     st.completed_usage = parse_completed_usage(data);
 
-    for buf in st.tool_args_buf_by_call_id.values() {
-        if let Err(err) = validate_tool_args_json_object(buf) {
-            return error_event(&err);
-        }
-    }
-
     let mut tool_calls_by_index: Vec<(&String, u32)> = st
         .tool_blocks_by_call_id
         .iter()
@@ -430,7 +448,12 @@ fn handle_completed(st: &mut StreamState, data: &str, request_id: Option<&str>) 
             .tool_args_buf_by_call_id
             .get(call_id)
             .map_or("", String::as_str);
-        let mut obj = match parse_tool_args_object(buf) {
+        let kind = st
+            .tool_kind_by_call_id
+            .get(call_id)
+            .copied()
+            .unwrap_or(CodexToolCallKind::Function);
+        let mut obj = match parse_tool_args_object_for_kind(kind, buf) {
             Ok(v) => v,
             Err(err) => return error_event(&err),
         };
@@ -456,6 +479,26 @@ fn handle_completed(st: &mut StreamState, data: &str, request_id: Option<&str>) 
 
     out.extend(finalize_message(st));
     out
+}
+
+fn parse_tool_args_object_for_kind(
+    kind: CodexToolCallKind,
+    buf: &str,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    if kind != CodexToolCallKind::Custom {
+        return parse_tool_args_object(buf);
+    }
+
+    let trimmed = buf.trim();
+    if trimmed.is_empty() {
+        return Ok(serde_json::Map::new());
+    }
+    if let Ok(obj) = parse_tool_args_object(trimmed) {
+        return Ok(obj);
+    }
+
+    let normalized = normalize_json_object_string(trimmed, "input");
+    parse_tool_args_object(&normalized)
 }
 
 #[cfg(test)]
@@ -653,6 +696,30 @@ mod tests {
         let backend = fixture("streaming/backend_stream_tool_call.sse");
         let got = run_bridge_and_capture(&backend, "gpt-5.2", Some("rid_TEST")).await;
         let expected = parse_expected_jsonl("streaming/expected_anthropic_tool_call.jsonl");
+        assert_eq!(got, expected);
+    }
+
+    #[tokio::test]
+    async fn streaming_bridge_matches_custom_tool_call_fixture() {
+        let backend = fixture("streaming/backend_stream_custom_tool_call.sse");
+        let got = run_bridge_and_capture(&backend, "gpt-5.2", Some("rid_TEST")).await;
+        let expected = parse_expected_jsonl("streaming/expected_anthropic_custom_tool_call.jsonl");
+        assert_eq!(got, expected);
+    }
+
+    #[tokio::test]
+    async fn streaming_bridge_matches_tool_search_call_fixture() {
+        let backend = fixture("streaming/backend_stream_tool_search_call.sse");
+        let got = run_bridge_and_capture(&backend, "gpt-5.2", Some("rid_TEST")).await;
+        let expected = parse_expected_jsonl("streaming/expected_anthropic_tool_search_call.jsonl");
+        assert_eq!(got, expected);
+    }
+
+    #[tokio::test]
+    async fn streaming_bridge_matches_local_shell_call_fixture() {
+        let backend = fixture("streaming/backend_stream_local_shell_call.sse");
+        let got = run_bridge_and_capture(&backend, "gpt-5.2", Some("rid_TEST")).await;
+        let expected = parse_expected_jsonl("streaming/expected_anthropic_local_shell_call.jsonl");
         assert_eq!(got, expected);
     }
 }

@@ -276,16 +276,6 @@ fn build_request_body(req: &CodexBackendRequest) -> serde_json::Value {
         ),
     );
 
-    if let Some(temperature) = req.temperature
-        && let Some(n) = serde_json::Number::from_f64(temperature)
-    {
-        obj.insert("temperature".to_string(), serde_json::Value::Number(n));
-    }
-    if let Some(top_p) = req.top_p
-        && let Some(n) = serde_json::Number::from_f64(top_p)
-    {
-        obj.insert("top_p".to_string(), serde_json::Value::Number(n));
-    }
     if let Some(meta) = req.client_metadata.as_ref() {
         let mut m = serde_json::Map::new();
         for (k, v) in meta {

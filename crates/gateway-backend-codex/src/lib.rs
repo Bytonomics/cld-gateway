@@ -7,6 +7,7 @@
 
 pub mod client;
 pub mod sse_unary;
+pub mod tool_calls;
 pub mod types;
 
 #[must_use]

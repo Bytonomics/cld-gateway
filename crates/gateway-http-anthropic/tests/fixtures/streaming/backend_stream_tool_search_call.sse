@@ -1,0 +1,5 @@
+event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"type":"tool_search_call","call_id":"call_search","execution":"client","arguments":{"query":"Read"}}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_search","usage":{"input_tokens":7,"output_tokens":0}}}

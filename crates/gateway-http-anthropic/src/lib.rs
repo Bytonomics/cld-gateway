@@ -15,10 +15,11 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
 use eventsource_stream::Eventsource as _;
 use futures_util::StreamExt as _;
+use gateway_backend_codex::types::{CodexToolCall, CodexToolCallKind};
 use gateway_core::RequestId;
 use gateway_core::Secret;
+use gateway_core::model_map::ModelResolution;
 use gateway_core::model_map::resolve_model;
-use gateway_core::model_map::{ModelMap, ModelResolution, default_model_map_path, load_model_map};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tracing::info;
@@ -32,7 +33,7 @@ mod tool_arg_policy;
 mod translate;
 mod types;
 
-use crate::translate::translate_request;
+use crate::translate::{ToolTranslationContext, translate_request_with_context};
 use crate::types::AnthropicMessagesRequest;
 use gateway_state::ToolCallStore;
 
@@ -261,7 +262,8 @@ async fn v1_messages(
         request_id.as_ref(),
         "resolved model for /v1/messages",
     );
-    let translated = match translate_request(&req) {
+    let tool_context = build_tool_translation_context(&state, &req);
+    let translated = match translate_request_with_context(&req, &tool_context) {
         Ok(t) => t,
         Err(err) => return bad_request(&err),
     };
@@ -281,32 +283,7 @@ async fn v1_messages(
         |u| serde_json::json!({ "input_tokens": u.input_tokens, "output_tokens": u.output_tokens }),
     );
 
-    let response = if let Some(tool_call) = decoded.tool_call {
-        let _ = state.tool_calls.record_tool_call(
-            &tool_call.call_id,
-            &tool_call.name,
-            request_id
-                .as_ref()
-                .map(|axum::extract::Extension(r)| r.0.as_str()),
-        );
-        let input_value: serde_json::Value =
-            serde_json::from_str(&tool_call.arguments).unwrap_or(serde_json::json!({}));
-        serde_json::json!({
-            "id": format!("msg_{}", Uuid::new_v4()),
-            "type": "message",
-            "role": "assistant",
-            "model": req.model,
-            "content": [{
-                "type": "tool_use",
-                "id": tool_call.call_id,
-                "name": tool_call.name,
-                "input": input_value
-            }],
-            "stop_reason": "tool_use",
-            "stop_sequence": null,
-            "usage": usage
-        })
-    } else {
+    let response = if decoded.tool_calls.is_empty() {
         serde_json::json!({
         "id": format!("msg_{}", Uuid::new_v4()),
         "type": "message",
@@ -317,6 +294,33 @@ async fn v1_messages(
         "stop_sequence": null,
         "usage": usage
         })
+    } else {
+        let request_id_str = request_id
+            .as_ref()
+            .map(|axum::extract::Extension(r)| r.0.as_str());
+        let mut content = Vec::new();
+        if !decoded.final_text.is_empty() {
+            content.push(serde_json::json!({ "type": "text", "text": decoded.final_text }));
+        }
+        for tool_call in &decoded.tool_calls {
+            let _ = state.tool_calls.record_tool_call(
+                &tool_call.call_id,
+                &tool_call.name,
+                tool_call.kind.as_str(),
+                request_id_str,
+            );
+            content.push(tool_call_content_block(tool_call));
+        }
+        serde_json::json!({
+            "id": format!("msg_{}", Uuid::new_v4()),
+            "type": "message",
+            "role": "assistant",
+            "model": req.model,
+            "content": content,
+            "stop_reason": "tool_use",
+            "stop_sequence": null,
+            "usage": usage
+        })
     };
 
     let mut http_res = Json(response).into_response();
@@ -324,16 +328,23 @@ async fn v1_messages(
     http_res
 }
 
+fn tool_call_content_block(tool_call: &CodexToolCall) -> serde_json::Value {
+    let input_value: serde_json::Value =
+        serde_json::from_str(&tool_call.arguments).unwrap_or_else(|_| serde_json::json!({}));
+    serde_json::json!({
+        "type": "tool_use",
+        "id": tool_call.call_id,
+        "name": tool_call.name,
+        "input": input_value
+    })
+}
+
 fn resolve_and_log_model(
     model: &str,
     request_id: Option<&axum::extract::Extension<RequestId>>,
     msg: &str,
 ) -> ModelResolution {
-    let map = load_model_map(&default_model_map_path()).unwrap_or(ModelMap {
-        default_backend_model: "gpt-5.2".to_string(),
-        aliases: std::collections::BTreeMap::new(),
-    });
-    let resolution = resolve_model(&map, model);
+    let resolution = resolve_model(model);
     if let Some(axum::extract::Extension(rid)) = request_id {
         info!(
             request_id = %rid.0,
@@ -375,8 +386,6 @@ fn build_backend_request(
         store: false,
         stream: true,
         include: translated.include,
-        temperature: translated.temperature,
-        top_p: translated.top_p,
         client_metadata: translated.client_metadata,
     }
 }
@@ -499,6 +508,38 @@ fn validate_tool_results(state: &AppState, req: &AnthropicMessagesRequest) {
     }
 }
 
+fn build_tool_translation_context(
+    state: &AppState,
+    req: &AnthropicMessagesRequest,
+) -> ToolTranslationContext {
+    let mut tool_kinds = std::collections::HashMap::new();
+    for msg in &req.messages {
+        let crate::types::AnthropicContent::Blocks(blocks) = &msg.content else {
+            continue;
+        };
+        for block in blocks {
+            let call_id = match block.block_type.as_str() {
+                "tool_use" => block.id.as_deref(),
+                "tool_result" => block.tool_use_id.as_deref(),
+                _ => None,
+            };
+            let Some(call_id) = call_id else {
+                continue;
+            };
+            if tool_kinds.contains_key(call_id) {
+                continue;
+            }
+            let stored = state.tool_calls.get_tool_call(call_id).ok().flatten();
+            if let Some(stored) = stored
+                && let Ok(kind) = stored.tool_kind.parse::<CodexToolCallKind>()
+            {
+                tool_kinds.insert(call_id.to_string(), kind);
+            }
+        }
+    }
+    ToolTranslationContext::new(tool_kinds)
+}
+
 fn sse_error(
     message_type: &str,
     message: &str,
@@ -556,7 +597,8 @@ async fn stream_messages(
         request_id.as_ref(),
         "resolved model for /v1/messages (streaming)",
     );
-    let translated = match translate_request(&req) {
+    let tool_context = build_tool_translation_context(&state, &req);
+    let translated = match translate_request_with_context(&req, &tool_context) {
         Ok(t) => t,
         Err(err) => return sse_error("invalid_request_error", &err),
     };
@@ -758,13 +800,19 @@ fn bad_request(message: &str) -> axum::response::Response {
 
 #[cfg(test)]
 mod messages_tests {
-    use super::translate::translate_request;
+    use super::build_tool_translation_context;
+    use super::tool_call_content_block;
+    use super::translate::{
+        ToolTranslationContext, TranslateResult, translate_request_with_context,
+    };
     use super::types::{
         AnthropicContent, AnthropicContentBlock, AnthropicMessage, AnthropicMessagesRequest,
     };
     use axum::body::Body;
     use axum::body::to_bytes;
     use axum::http::Request;
+    use gateway_backend_codex::types::{CodexToolCall, CodexToolCallKind};
+    use gateway_state::ToolCallStore;
     use tower::ServiceExt as _;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -772,6 +820,10 @@ mod messages_tests {
     fn fixture(path: &str) -> String {
         let full = format!("{}/tests/fixtures/{}", env!("CARGO_MANIFEST_DIR"), path);
         std::fs::read_to_string(full).expect("read fixture")
+    }
+
+    fn translate_request(req: &AnthropicMessagesRequest) -> Result<TranslateResult, String> {
+        translate_request_with_context(req, &ToolTranslationContext::default())
     }
 
     fn parse_sse_frames(body: &str) -> Vec<(String, serde_json::Value)> {
@@ -878,6 +930,143 @@ mod messages_tests {
 
         let translated = translate_request(&req).unwrap();
         assert!(!translated.input.is_empty());
+    }
+
+    #[test]
+    fn unary_tool_call_content_block_supports_custom_input() {
+        let block = tool_call_content_block(&CodexToolCall {
+            call_id: "call_custom".to_string(),
+            name: "apply_patch".to_string(),
+            arguments: serde_json::json!({"input":"*** Begin Patch\n*** End Patch\n"}).to_string(),
+            kind: CodexToolCallKind::Custom,
+        });
+
+        assert_eq!(block.get("type").and_then(|v| v.as_str()), Some("tool_use"));
+        assert_eq!(
+            block
+                .get("input")
+                .and_then(|v| v.get("input"))
+                .and_then(|v| v.as_str()),
+            Some("*** Begin Patch\n*** End Patch\n")
+        );
+    }
+
+    #[test]
+    fn unary_tool_call_content_block_supports_tool_search_input() {
+        let block = tool_call_content_block(&CodexToolCall {
+            call_id: "call_search".to_string(),
+            name: "tool_search".to_string(),
+            arguments: serde_json::json!({"query":"Read"}).to_string(),
+            kind: CodexToolCallKind::ToolSearch,
+        });
+
+        assert_eq!(
+            block.get("name").and_then(|v| v.as_str()),
+            Some("tool_search")
+        );
+        assert_eq!(
+            block
+                .get("input")
+                .and_then(|v| v.get("query"))
+                .and_then(|v| v.as_str()),
+            Some("Read")
+        );
+    }
+
+    #[test]
+    fn unary_tool_call_content_block_supports_local_shell_input() {
+        let block = tool_call_content_block(&CodexToolCall {
+            call_id: "call_shell".to_string(),
+            name: "local_shell".to_string(),
+            arguments: serde_json::json!({
+                "status": "completed",
+                "action": { "type": "exec", "command": ["echo", "hi"] }
+            })
+            .to_string(),
+            kind: CodexToolCallKind::LocalShell,
+        });
+
+        assert_eq!(
+            block
+                .get("input")
+                .and_then(|v| v.get("status"))
+                .and_then(|v| v.as_str()),
+            Some("completed")
+        );
+        assert_eq!(
+            block
+                .get("input")
+                .and_then(|v| v.get("action"))
+                .and_then(|v| v.get("command"))
+                .and_then(|v| v.as_array())
+                .and_then(|v| v.get(1))
+                .and_then(|v| v.as_str()),
+            Some("hi")
+        );
+    }
+
+    #[test]
+    fn translation_context_uses_stored_tool_kind_without_translator_io() {
+        let tool_calls_path = std::env::temp_dir().join(format!(
+            "gateway_tool_context_{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let tool_calls = ToolCallStore::new(&tool_calls_path);
+        tool_calls
+            .record_tool_call(
+                "call_custom",
+                "apply_patch",
+                "custom_tool_call",
+                Some("rid_1"),
+            )
+            .expect("record");
+        let state = super::AppState {
+            tool_calls,
+            ..super::AppState::default()
+        };
+
+        let mut req = AnthropicMessagesRequest {
+            model: "gpt-5.2".to_string(),
+            messages: Vec::new(),
+            system: Vec::new(),
+            stream: false,
+            stop_sequences: Vec::new(),
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            metadata: None,
+            tools: Vec::new(),
+            tool_choice: None,
+            thinking: None,
+            output_config: None,
+        };
+        req.messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Blocks(vec![AnthropicContentBlock {
+                block_type: "tool_result".to_string(),
+                text: None,
+                id: None,
+                name: None,
+                input: None,
+                tool_use_id: Some("call_custom".to_string()),
+                content: Some(serde_json::json!("ok")),
+                is_error: Some(false),
+                source: None,
+                extra: std::collections::BTreeMap::new(),
+            }]),
+        });
+
+        let context = build_tool_translation_context(&state, &req);
+        let translated = translate_request_with_context(&req, &context).expect("translate");
+        assert_eq!(
+            translated
+                .input
+                .first()
+                .and_then(|v| v.get("type"))
+                .and_then(|v| v.as_str()),
+            Some("custom_tool_call_output")
+        );
     }
 
     #[tokio::test]

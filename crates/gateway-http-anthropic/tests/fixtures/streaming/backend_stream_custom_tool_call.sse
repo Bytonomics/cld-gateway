@@ -1,0 +1,14 @@
+event: response.output_item.added
+data: {"type":"response.output_item.added","item":{"type":"custom_tool_call","call_id":"call_custom","name":"apply_patch","input":"","status":"in_progress"}}
+
+event: response.custom_tool_call_input.delta
+data: {"type":"response.custom_tool_call_input.delta","call_id":"call_custom","delta":"*** Begin Patch\n"}
+
+event: response.custom_tool_call_input.delta
+data: {"type":"response.custom_tool_call_input.delta","call_id":"call_custom","delta":"*** End Patch\n"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"type":"custom_tool_call","call_id":"call_custom","name":"apply_patch","input":"*** Begin Patch\n*** End Patch\n"}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_custom","usage":{"input_tokens":11,"output_tokens":0}}}

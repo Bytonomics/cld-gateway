@@ -5,6 +5,7 @@ use crate::types::{
     AnthropicSystemBlock, AnthropicToolDefinition,
 };
 
+use gateway_backend_codex::types::CodexToolCallKind;
 use std::collections::HashMap;
 
 pub struct TranslateResult {
@@ -16,16 +17,38 @@ pub struct TranslateResult {
     pub text: Option<serde_json::Value>,
     pub reasoning: Option<serde_json::Value>,
     pub include: Vec<String>,
-    pub temperature: Option<f64>,
-    pub top_p: Option<f64>,
     pub client_metadata: Option<HashMap<String, String>>,
 }
 
-pub fn translate_request(req: &AnthropicMessagesRequest) -> Result<TranslateResult, String> {
+#[derive(Debug, Clone, Default)]
+pub struct ToolTranslationContext {
+    tool_kinds_by_call_id: HashMap<String, CodexToolCallKind>,
+}
+
+impl ToolTranslationContext {
+    #[must_use]
+    pub fn new(tool_kinds_by_call_id: HashMap<String, CodexToolCallKind>) -> Self {
+        Self {
+            tool_kinds_by_call_id,
+        }
+    }
+
+    fn kind_for_call(&self, call_id: &str) -> CodexToolCallKind {
+        self.tool_kinds_by_call_id
+            .get(call_id)
+            .copied()
+            .unwrap_or(CodexToolCallKind::Function)
+    }
+}
+
+pub fn translate_request_with_context(
+    req: &AnthropicMessagesRequest,
+    tool_context: &ToolTranslationContext,
+) -> Result<TranslateResult, String> {
     let instructions = extract_system_text(&req.system)
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "You are a helpful assistant.".to_string());
-    let input = translate_messages_to_backend_items(&req.messages)?;
+    let input = translate_messages_to_backend_items(&req.messages, tool_context)?;
     let tools = translate_tools(&req.tools)?;
     let tool_choice = translate_tool_choice(req.tool_choice.as_ref());
     let text = translate_output_config(req.output_config.as_ref());
@@ -38,6 +61,12 @@ pub fn translate_request(req: &AnthropicMessagesRequest) -> Result<TranslateResu
     }
     if let Some(top_k) = req.top_k {
         client_metadata.insert("anthropic_top_k".to_string(), top_k.to_string());
+    }
+    if let Some(temperature) = req.temperature {
+        client_metadata.insert("anthropic_temperature".to_string(), temperature.to_string());
+    }
+    if let Some(top_p) = req.top_p {
+        client_metadata.insert("anthropic_top_p".to_string(), top_p.to_string());
     }
     if let Some(metadata) = req.metadata.as_ref() {
         let encoded = serde_json::to_string(metadata)
@@ -55,8 +84,6 @@ pub fn translate_request(req: &AnthropicMessagesRequest) -> Result<TranslateResu
         text,
         reasoning,
         include: Vec::new(),
-        temperature: req.temperature,
-        top_p: req.top_p,
         client_metadata,
     })
 }
@@ -113,6 +140,7 @@ pub fn extract_system_text(system: &[AnthropicSystemBlock]) -> Option<String> {
 
 fn translate_messages_to_backend_items(
     messages: &[AnthropicMessage],
+    tool_context: &ToolTranslationContext,
 ) -> Result<Vec<serde_json::Value>, String> {
     let mut items: Vec<serde_json::Value> = Vec::new();
     for msg in messages {
@@ -150,13 +178,13 @@ fn translate_messages_to_backend_items(
                         }
                         "tool_result" => {
                             // tool_result is a separate ResponseItem in Codex protocol.
-                            if let Some(item) = tool_result_item(b) {
+                            if let Some(item) = tool_result_item(b, tool_context) {
                                 items.push(item);
                             }
                         }
                         "tool_use" => {
                             // If the client sends a tool_use (e.g., replay/history), preserve it.
-                            if let Some(item) = tool_use_item(b)? {
+                            if let Some(item) = tool_use_item(b, tool_context)? {
                                 items.push(item);
                             }
                         }
@@ -202,7 +230,10 @@ fn image_content_item(block: &AnthropicContentBlock) -> Option<serde_json::Value
     Some(serde_json::json!({ "type": "input_image", "image_url": url }))
 }
 
-fn tool_use_item(block: &AnthropicContentBlock) -> Result<Option<serde_json::Value>, String> {
+fn tool_use_item(
+    block: &AnthropicContentBlock,
+    tool_context: &ToolTranslationContext,
+) -> Result<Option<serde_json::Value>, String> {
     let Some(call_id) = block.id.as_deref() else {
         return Ok(None);
     };
@@ -216,25 +247,94 @@ fn tool_use_item(block: &AnthropicContentBlock) -> Result<Option<serde_json::Val
     let arguments = serde_json::to_string(&input)
         .map_err(|e| format!("tool_use.input must be JSON-serializable: {e}"))?;
 
-    Ok(Some(serde_json::json!({
-        "type": "function_call",
-        "name": name,
-        "arguments": arguments,
-        "call_id": call_id
-    })))
+    let item = match tool_context.kind_for_call(call_id) {
+        CodexToolCallKind::Function => serde_json::json!({
+            "type": "function_call",
+            "name": name,
+            "arguments": arguments,
+            "call_id": call_id
+        }),
+        CodexToolCallKind::Custom => serde_json::json!({
+            "type": "custom_tool_call",
+            "name": name,
+            "input": custom_tool_input_text(&input),
+            "call_id": call_id
+        }),
+        CodexToolCallKind::ToolSearch => serde_json::json!({
+            "type": "tool_search_call",
+            "call_id": call_id,
+            "execution": "client",
+            "arguments": input
+        }),
+        CodexToolCallKind::LocalShell => serde_json::json!({
+            "type": "local_shell_call",
+            "call_id": call_id,
+            "status": input
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("completed"),
+            "action": input
+                .get("action")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}))
+        }),
+    };
+
+    Ok(Some(item))
 }
 
-fn tool_result_item(block: &AnthropicContentBlock) -> Option<serde_json::Value> {
+fn custom_tool_input_text(input: &serde_json::Value) -> String {
+    input
+        .get("input")
+        .and_then(serde_json::Value::as_str)
+        .map_or_else(
+            || serde_json::to_string(input).unwrap_or_default(),
+            str::to_string,
+        )
+}
+
+fn tool_result_item(
+    block: &AnthropicContentBlock,
+    tool_context: &ToolTranslationContext,
+) -> Option<serde_json::Value> {
     let call_id = block.tool_use_id.as_deref()?;
     let _is_error = block.is_error.unwrap_or(false);
+    let kind = tool_context.kind_for_call(call_id);
+    if kind == CodexToolCallKind::ToolSearch {
+        return Some(tool_search_output_item(call_id, block));
+    }
+
     let output = tool_result_output_value(block);
     Some(serde_json::json!({
-        "type": "function_call_output",
+        "type": kind.output_type(),
         "call_id": call_id,
         // Codex protocol wire format: `output` is either a plain string or an array of
         // structured content items ("content_items").
         "output": output
     }))
+}
+
+fn tool_search_output_item(call_id: &str, block: &AnthropicContentBlock) -> serde_json::Value {
+    serde_json::json!({
+        "type": CodexToolCallKind::ToolSearch.output_type(),
+        "call_id": call_id,
+        "status": "completed",
+        "execution": "client",
+        "tools": tool_search_tools(block)
+    })
+}
+
+fn tool_search_tools(block: &AnthropicContentBlock) -> serde_json::Value {
+    let Some(content) = block.content.as_ref() else {
+        return serde_json::json!([]);
+    };
+    if let Some(tools) = content.get("tools").and_then(serde_json::Value::as_array) {
+        return serde_json::Value::Array(tools.clone());
+    }
+    if let Some(array) = content.as_array() {
+        return serde_json::Value::Array(array.clone());
+    }
+    serde_json::json!([])
 }
 
 fn tool_result_output_value(block: &AnthropicContentBlock) -> serde_json::Value {
@@ -399,6 +499,7 @@ fn translate_output_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gateway_backend_codex::types::CodexToolCallKind;
 
     fn fixture(path: &str) -> String {
         let full = format!("{}/tests/fixtures/{}", env!("CARGO_MANIFEST_DIR"), path);
@@ -422,6 +523,14 @@ mod tests {
             thinking: None,
             output_config: None,
         }
+    }
+
+    fn context_with(call_id: &str, kind: CodexToolCallKind) -> ToolTranslationContext {
+        ToolTranslationContext::new(HashMap::from([(call_id.to_string(), kind)]))
+    }
+
+    fn translate_request(req: &AnthropicMessagesRequest) -> Result<TranslateResult, String> {
+        translate_request_with_context(req, &ToolTranslationContext::default())
     }
 
     #[test]
@@ -553,6 +662,140 @@ mod tests {
             arr.iter()
                 .any(|v| v.get("type").and_then(|t| t.as_str()) == Some("input_image")),
             "expected an input_image content item in tool_result output"
+        );
+    }
+
+    #[test]
+    fn tool_result_uses_custom_output_type_from_context() {
+        let mut req = base_req();
+        req.messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Blocks(vec![AnthropicContentBlock {
+                block_type: "tool_result".to_string(),
+                text: None,
+                id: None,
+                name: None,
+                input: None,
+                tool_use_id: Some("call_custom".to_string()),
+                content: Some(serde_json::json!("ok")),
+                is_error: Some(false),
+                source: None,
+                extra: std::collections::BTreeMap::new(),
+            }]),
+        });
+
+        let translated = translate_request_with_context(
+            &req,
+            &context_with("call_custom", CodexToolCallKind::Custom),
+        )
+        .expect("translate");
+        let item = translated.input.first().expect("output item");
+        assert_eq!(
+            item.get("type").and_then(|v| v.as_str()),
+            Some("custom_tool_call_output")
+        );
+    }
+
+    #[test]
+    fn tool_result_uses_tool_search_output_type_from_context() {
+        let mut req = base_req();
+        req.messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Blocks(vec![AnthropicContentBlock {
+                block_type: "tool_result".to_string(),
+                text: None,
+                id: None,
+                name: None,
+                input: None,
+                tool_use_id: Some("call_search".to_string()),
+                content: Some(
+                    serde_json::json!({ "tools": [{ "type": "function", "name": "Read" }] }),
+                ),
+                is_error: Some(false),
+                source: None,
+                extra: std::collections::BTreeMap::new(),
+            }]),
+        });
+
+        let translated = translate_request_with_context(
+            &req,
+            &context_with("call_search", CodexToolCallKind::ToolSearch),
+        )
+        .expect("translate");
+        let item = translated.input.first().expect("output item");
+        assert_eq!(
+            item.get("type").and_then(|v| v.as_str()),
+            Some("tool_search_output")
+        );
+        assert_eq!(
+            item.get("tools").and_then(|v| v.as_array()).map(Vec::len),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn tool_result_uses_function_output_for_local_shell_context() {
+        let mut req = base_req();
+        req.messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Blocks(vec![AnthropicContentBlock {
+                block_type: "tool_result".to_string(),
+                text: None,
+                id: None,
+                name: None,
+                input: None,
+                tool_use_id: Some("call_shell".to_string()),
+                content: Some(serde_json::json!("ok")),
+                is_error: Some(false),
+                source: None,
+                extra: std::collections::BTreeMap::new(),
+            }]),
+        });
+
+        let translated = translate_request_with_context(
+            &req,
+            &context_with("call_shell", CodexToolCallKind::LocalShell),
+        )
+        .expect("translate");
+        let item = translated.input.first().expect("output item");
+        assert_eq!(
+            item.get("type").and_then(|v| v.as_str()),
+            Some("function_call_output")
+        );
+    }
+
+    #[test]
+    fn replayed_custom_tool_use_uses_custom_call_type_from_context() {
+        let mut req = base_req();
+        req.messages.push(AnthropicMessage {
+            role: "assistant".to_string(),
+            content: AnthropicContent::Blocks(vec![AnthropicContentBlock {
+                block_type: "tool_use".to_string(),
+                text: None,
+                id: Some("call_custom".to_string()),
+                name: Some("apply_patch".to_string()),
+                input: Some(serde_json::json!({ "input": "*** Begin Patch\n*** End Patch\n" })),
+                tool_use_id: None,
+                content: None,
+                is_error: None,
+                source: None,
+                extra: std::collections::BTreeMap::new(),
+            }]),
+        });
+
+        let translated = translate_request_with_context(
+            &req,
+            &context_with("call_custom", CodexToolCallKind::Custom),
+        )
+        .expect("translate");
+        let item = translated.input.first().expect("tool use item");
+        assert_eq!(
+            item.get("type").and_then(|v| v.as_str()),
+            Some("custom_tool_call")
+        );
+        assert_eq!(
+            item.get("input").and_then(|v| v.as_str()),
+            Some("*** Begin Patch\n*** End Patch\n")
         );
     }
 }

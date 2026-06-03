@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+use crate::tool_calls::parse_output_item_tool_call;
 use crate::types::{CodexTokenUsage, CodexToolCall, CodexUnaryDecoded};
 use bytes::Bytes;
 use eventsource_stream::EventStreamError;
@@ -39,7 +40,7 @@ where
 {
     let mut event_stream = Box::pin(byte_stream.eventsource());
     let mut last_text: Option<String> = None;
-    let mut last_tool_call: Option<CodexToolCall> = None;
+    let mut tool_calls: Vec<CodexToolCall> = Vec::new();
     let mut last_usage: Option<CodexTokenUsage> = None;
 
     while let Some(item) = event_stream.next().await {
@@ -62,16 +63,18 @@ where
         {
             last_usage = Some(usage);
         }
-        if let Some(tool_call) = extract_tool_call_from_data(&event.event, data) {
-            last_tool_call = Some(tool_call);
+        if let Some(tool_call) = parse_output_item_tool_call(&event.event, data) {
+            upsert_tool_call(&mut tool_calls, tool_call);
         }
-        if let Some(text) = extract_last_text_from_data(data) {
+        if !is_tool_input_delta_event(&event.event)
+            && let Some(text) = extract_last_text_from_data(data)
+        {
             last_text = Some(text);
         }
     }
 
     let final_text = last_text.unwrap_or_default();
-    if final_text.is_empty() && last_tool_call.is_none() {
+    if final_text.is_empty() && tool_calls.is_empty() {
         return Err(SseDecodeError::NoFinalText);
     }
 
@@ -79,8 +82,15 @@ where
         final_text,
         backend_model: None,
         token_usage: last_usage,
-        tool_call: last_tool_call,
+        tool_calls,
     })
+}
+
+fn is_tool_input_delta_event(event_name: &str) -> bool {
+    matches!(
+        event_name,
+        "response.function_call_arguments.delta" | "response.custom_tool_call_input.delta"
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -132,29 +142,15 @@ fn extract_usage_from_completed_event(data: &str) -> Option<CodexTokenUsage> {
     })
 }
 
-fn extract_tool_call_from_data(event_name: &str, data: &str) -> Option<CodexToolCall> {
-    // Codex backend uses typed SSE events; tool calls typically surface as a completed output item.
-    if event_name != "response.output_item.done" && event_name != "response.output_item.added" {
-        return None;
+fn upsert_tool_call(tool_calls: &mut Vec<CodexToolCall>, tool_call: CodexToolCall) {
+    if let Some(existing) = tool_calls
+        .iter_mut()
+        .find(|existing| existing.call_id == tool_call.call_id)
+    {
+        *existing = tool_call;
+        return;
     }
-    let value = serde_json::from_str::<serde_json::Value>(data).ok()?;
-    // Two common shapes observed:
-    // 1) { "type":"response.output_item.done", "item": { "type":"function_call", ... } }
-    // 2) { "item": { "type":"function_call", ... } } (older/variant)
-    let item = value
-        .get("item")
-        .cloned()
-        .or_else(|| value.get("response").and_then(|r| r.get("item")).cloned())?;
-
-    let item_type = item.get("type").and_then(|v| v.as_str())?;
-    if item_type != "function_call" {
-        return None;
-    }
-    Some(CodexToolCall {
-        call_id: item.get("call_id")?.as_str()?.to_string(),
-        name: item.get("name")?.as_str()?.to_string(),
-        arguments: item.get("arguments")?.as_str()?.to_string(),
-    })
+    tool_calls.push(tool_call);
 }
 
 fn extract_last_text_from_data(data: &str) -> Option<String> {
@@ -210,6 +206,7 @@ mod tests {
     use super::{
         extract_last_text_from_data, extract_usage_from_completed_event, read_sse_to_completion,
     };
+    use crate::types::CodexToolCallKind;
     use bytes::Bytes;
     use futures_util::stream;
 
@@ -237,6 +234,77 @@ mod tests {
         let byte_stream = stream::iter(vec![Ok::<Bytes, std::io::Error>(Bytes::from(sse))]);
         let decoded = read_sse_to_completion(byte_stream).await.unwrap();
         assert_eq!(decoded.final_text, "second");
+    }
+
+    #[tokio::test]
+    async fn sse_decodes_function_tool_call_without_text() {
+        let sse = concat!(
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"Read\",\"arguments\":\"{\\\"file_path\\\":\\\"/tmp/a.txt\\\"}\"}}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":0,\"total_tokens\":1}}}\n\n",
+        );
+
+        let byte_stream = stream::iter(vec![Ok::<Bytes, std::io::Error>(Bytes::from(sse))]);
+        let decoded = read_sse_to_completion(byte_stream).await.unwrap();
+        assert_eq!(decoded.final_text, "");
+        assert_eq!(decoded.tool_calls.len(), 1);
+        assert_eq!(decoded.tool_calls[0].kind, CodexToolCallKind::Function);
+        assert_eq!(decoded.tool_calls[0].name, "Read");
+        assert_eq!(
+            decoded.tool_calls[0].arguments,
+            r#"{"file_path":"/tmp/a.txt"}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn sse_decodes_custom_tool_call_without_text() {
+        let sse = concat!(
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"custom_tool_call\",\"call_id\":\"call_2\",\"name\":\"apply_patch\",\"input\":\"*** Begin Patch\\n*** End Patch\\n\"}}\n\n",
+        );
+
+        let byte_stream = stream::iter(vec![Ok::<Bytes, std::io::Error>(Bytes::from(sse))]);
+        let decoded = read_sse_to_completion(byte_stream).await.unwrap();
+        assert_eq!(decoded.tool_calls.len(), 1);
+        assert_eq!(decoded.tool_calls[0].kind, CodexToolCallKind::Custom);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&decoded.tool_calls[0].arguments).unwrap(),
+            serde_json::json!({"input":"*** Begin Patch\n*** End Patch\n"})
+        );
+    }
+
+    #[tokio::test]
+    async fn sse_decodes_tool_search_call_without_text() {
+        let sse = concat!(
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"tool_search_call\",\"call_id\":\"call_3\",\"execution\":\"client\",\"arguments\":{\"query\":\"Read\"}}}\n\n",
+        );
+
+        let byte_stream = stream::iter(vec![Ok::<Bytes, std::io::Error>(Bytes::from(sse))]);
+        let decoded = read_sse_to_completion(byte_stream).await.unwrap();
+        assert_eq!(decoded.tool_calls.len(), 1);
+        assert_eq!(decoded.tool_calls[0].kind, CodexToolCallKind::ToolSearch);
+        assert_eq!(decoded.tool_calls[0].name, "tool_search");
+        assert_eq!(decoded.tool_calls[0].arguments, r#"{"query":"Read"}"#);
+    }
+
+    #[tokio::test]
+    async fn sse_decodes_local_shell_call_without_text() {
+        let sse = concat!(
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"local_shell_call\",\"call_id\":\"call_4\",\"status\":\"completed\",\"action\":{\"type\":\"exec\",\"command\":[\"echo\",\"hi\"]}}}\n\n",
+        );
+
+        let byte_stream = stream::iter(vec![Ok::<Bytes, std::io::Error>(Bytes::from(sse))]);
+        let decoded = read_sse_to_completion(byte_stream).await.unwrap();
+        assert_eq!(decoded.tool_calls.len(), 1);
+        assert_eq!(decoded.tool_calls[0].kind, CodexToolCallKind::LocalShell);
+        assert_eq!(decoded.tool_calls[0].name, "local_shell");
+        let args = serde_json::from_str::<serde_json::Value>(&decoded.tool_calls[0].arguments)
+            .expect("json object");
+        assert_eq!(args["status"], "completed");
+        assert_eq!(args["action"]["command"][1], "hi");
     }
 
     #[test]

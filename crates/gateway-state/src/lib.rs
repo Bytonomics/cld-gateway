@@ -22,6 +22,12 @@ pub struct ToolCallStore {
     path: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredToolCall {
+    pub tool_name: String,
+    pub tool_kind: String,
+}
+
 impl Default for ToolCallStore {
     fn default() -> Self {
         Self {
@@ -51,6 +57,7 @@ impl ToolCallStore {
         &self,
         call_id: &str,
         tool_name: &str,
+        tool_kind: &str,
         request_id: Option<&str>,
     ) -> Result<(), StateError> {
         let conn = self.open_and_init()?;
@@ -63,10 +70,10 @@ impl ToolCallStore {
 
         conn.execute(
             r"
-            INSERT OR REPLACE INTO tool_calls(call_id, tool_name, created_at, request_id)
-            VALUES (?1, ?2, ?3, ?4)
+            INSERT OR REPLACE INTO tool_calls(call_id, tool_name, tool_kind, created_at, request_id)
+            VALUES (?1, ?2, ?3, ?4, ?5)
             ",
-            (call_id, tool_name, now, request_id),
+            (call_id, tool_name, tool_kind, now, request_id),
         )?;
         Ok(())
     }
@@ -80,6 +87,22 @@ impl ToolCallStore {
         Ok(rows.next()?.is_some())
     }
 
+    /// # Errors
+    /// Returns an error if the DB cannot be opened/initialized or the query fails.
+    pub fn get_tool_call(&self, call_id: &str) -> Result<Option<StoredToolCall>, StateError> {
+        let conn = self.open_and_init()?;
+        let mut stmt =
+            conn.prepare("SELECT tool_name, tool_kind FROM tool_calls WHERE call_id = ?1 LIMIT 1")?;
+        let mut rows = stmt.query([call_id])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        Ok(Some(StoredToolCall {
+            tool_name: row.get(0)?,
+            tool_kind: row.get(1)?,
+        }))
+    }
+
     fn open_and_init(&self) -> Result<rusqlite::Connection, StateError> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -91,13 +114,30 @@ impl ToolCallStore {
             (
                 call_id    TEXT PRIMARY KEY,
                 tool_name  TEXT NOT NULL,
+                tool_kind  TEXT NOT NULL DEFAULT 'function_call',
                 created_at INTEGER NOT NULL,
                 request_id TEXT
             );
             ",
         )?;
+        ensure_tool_kind_column(&conn)?;
         Ok(conn)
     }
+}
+
+fn ensure_tool_kind_column(conn: &rusqlite::Connection) -> Result<(), StateError> {
+    let mut stmt = conn.prepare("PRAGMA table_info(tool_calls)")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for row in rows {
+        if row? == "tool_kind" {
+            return Ok(());
+        }
+    }
+    conn.execute(
+        "ALTER TABLE tool_calls ADD COLUMN tool_kind TEXT NOT NULL DEFAULT 'function_call'",
+        [],
+    )?;
+    Ok(())
 }
 
 fn default_gateway_dir() -> Result<PathBuf, StateError> {
@@ -109,4 +149,61 @@ fn default_tool_calls_db_path() -> Result<PathBuf, StateError> {
     Ok(default_gateway_dir()?
         .join("state")
         .join("tool_calls.sqlite"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_db_path(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        std::env::temp_dir().join(format!("gateway_state_{name}_{nanos}.sqlite"))
+    }
+
+    #[test]
+    fn records_and_reads_tool_kind() {
+        let path = temp_db_path("tool_kind");
+        let store = ToolCallStore::new(&path);
+        store
+            .record_tool_call("call_1", "apply_patch", "custom_tool_call", Some("rid_1"))
+            .expect("record");
+
+        let stored = store
+            .get_tool_call("call_1")
+            .expect("read")
+            .expect("stored call");
+        assert_eq!(stored.tool_name, "apply_patch");
+        assert_eq!(stored.tool_kind, "custom_tool_call");
+    }
+
+    #[test]
+    fn migrates_existing_tool_calls_without_kind() {
+        let path = temp_db_path("migration");
+        let conn = rusqlite::Connection::open(&path).expect("open sqlite");
+        conn.execute_batch(
+            r"
+            CREATE TABLE tool_calls
+            (
+                call_id    TEXT PRIMARY KEY,
+                tool_name  TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                request_id TEXT
+            );
+            INSERT INTO tool_calls(call_id, tool_name, created_at, request_id)
+            VALUES ('call_1', 'Read', 1, 'rid_1');
+            ",
+        )
+        .expect("create old schema");
+        drop(conn);
+
+        let store = ToolCallStore::new(&path);
+        let stored = store
+            .get_tool_call("call_1")
+            .expect("read")
+            .expect("stored call");
+        assert_eq!(stored.tool_kind, "function_call");
+    }
 }

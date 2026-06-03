@@ -29,10 +29,6 @@ pub struct CodexBackendRequest {
     pub stream: bool,
     /// Optional include fields.
     pub include: Vec<String>,
-    /// Optional sampling temperature (best-effort; backend may ignore).
-    pub temperature: Option<f64>,
-    /// Optional nucleus sampling value (best-effort; backend may ignore).
-    pub top_p: Option<f64>,
     /// Optional client metadata (Codex-compatible).
     pub client_metadata: Option<HashMap<String, String>>,
 }
@@ -48,7 +44,7 @@ pub struct CodexUnaryDecoded {
     pub final_text: String,
     pub backend_model: Option<String>,
     pub token_usage: Option<CodexTokenUsage>,
-    pub tool_call: Option<CodexToolCall>,
+    pub tool_calls: Vec<CodexToolCall>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +60,50 @@ pub struct CodexTokenUsage {
 pub struct CodexToolCall {
     pub call_id: String,
     pub name: String,
-    /// JSON-encoded arguments string (Codex protocol uses a JSON string, not an object).
+    /// JSON-object encoded Anthropic-compatible `tool_use.input`.
     pub arguments: String,
+    pub kind: CodexToolCallKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodexToolCallKind {
+    Function,
+    Custom,
+    ToolSearch,
+    LocalShell,
+}
+
+impl CodexToolCallKind {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Function => "function_call",
+            Self::Custom => "custom_tool_call",
+            Self::ToolSearch => "tool_search_call",
+            Self::LocalShell => "local_shell_call",
+        }
+    }
+
+    #[must_use]
+    pub fn output_type(self) -> &'static str {
+        match self {
+            Self::Function | Self::LocalShell => "function_call_output",
+            Self::Custom => "custom_tool_call_output",
+            Self::ToolSearch => "tool_search_output",
+        }
+    }
+}
+
+impl std::str::FromStr for CodexToolCallKind {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "function_call" => Ok(Self::Function),
+            "custom_tool_call" => Ok(Self::Custom),
+            "tool_search_call" => Ok(Self::ToolSearch),
+            "local_shell_call" => Ok(Self::LocalShell),
+            _ => Err(()),
+        }
+    }
 }

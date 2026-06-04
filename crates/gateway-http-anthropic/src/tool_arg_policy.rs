@@ -3,6 +3,9 @@
 use serde_json::Map;
 use serde_json::Value;
 
+use gateway_backend_codex::tool_calls::normalize_json_object_string;
+use gateway_backend_codex::types::CodexToolCallKind;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PolicyEdit {
     pub(crate) field: &'static str,
@@ -21,6 +24,65 @@ pub(crate) fn apply_policies(
     let mut edits = Vec::new();
     edits.extend(read_policy(ctx, args));
     edits
+}
+
+pub(crate) fn sanitized_tool_args_for_kind(
+    tool_name: &str,
+    kind: CodexToolCallKind,
+    buf: &str,
+) -> Result<(Map<String, Value>, Vec<PolicyEdit>), String> {
+    let mut args = parse_tool_args_object_for_kind(kind, buf)?;
+    let ctx = ToolArgContext { tool_name };
+    let edits = apply_policies(&ctx, &mut args);
+    Ok((args, edits))
+}
+
+fn validate_tool_args_json_object(buf: &str) -> Result<(), String> {
+    let trimmed = buf.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+    let value: Value = serde_json::from_str(trimmed)
+        .map_err(|error| format!("tool_use.input is not valid JSON: {error}"))?;
+    if !value.is_object() {
+        return Err("tool_use.input must be a JSON object".to_string());
+    }
+    Ok(())
+}
+
+fn parse_tool_args_object(buf: &str) -> Result<Map<String, Value>, String> {
+    let trimmed = buf.trim();
+    validate_tool_args_json_object(trimmed)?;
+    if trimmed.is_empty() {
+        return Ok(Map::new());
+    }
+    let value: Value = serde_json::from_str(trimmed)
+        .map_err(|error| format!("tool_use.input is not valid JSON: {error}"))?;
+    let obj = value
+        .as_object()
+        .cloned()
+        .ok_or_else(|| "tool_use.input must be a JSON object".to_string())?;
+    Ok(obj)
+}
+
+fn parse_tool_args_object_for_kind(
+    kind: CodexToolCallKind,
+    buf: &str,
+) -> Result<Map<String, Value>, String> {
+    if kind != CodexToolCallKind::Custom {
+        return parse_tool_args_object(buf);
+    }
+
+    let trimmed = buf.trim();
+    if trimmed.is_empty() {
+        return Ok(Map::new());
+    }
+    if let Ok(obj) = parse_tool_args_object(trimmed) {
+        return Ok(obj);
+    }
+
+    let normalized = normalize_json_object_string(trimmed, "input");
+    parse_tool_args_object(&normalized)
 }
 
 fn read_policy(ctx: &ToolArgContext<'_>, args: &mut Map<String, Value>) -> Vec<PolicyEdit> {
@@ -108,6 +170,27 @@ mod tests {
         ]);
         let edits = apply_policies(&ctx("Read"), &mut args);
         assert!(args.get("pages").is_some());
+        assert!(edits.is_empty());
+    }
+
+    #[test]
+    fn tool_args_validation_requires_object() {
+        let err = validate_tool_args_json_object("[]").expect_err("should reject non-object");
+        assert_eq!(err, "tool_use.input must be a JSON object");
+    }
+
+    #[test]
+    fn parse_tool_args_object_accepts_empty_as_object() {
+        let obj = parse_tool_args_object("").expect("empty ok");
+        assert!(obj.is_empty());
+    }
+
+    #[test]
+    fn custom_tool_args_wrap_raw_input() {
+        let (args, edits) =
+            sanitized_tool_args_for_kind("apply_patch", CodexToolCallKind::Custom, "raw patch")
+                .expect("sanitize");
+        assert_eq!(args.get("input").and_then(Value::as_str), Some("raw patch"));
         assert!(edits.is_empty());
     }
 }

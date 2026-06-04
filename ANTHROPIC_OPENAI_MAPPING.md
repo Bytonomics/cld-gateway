@@ -110,7 +110,7 @@ Notes:
 
 | Anthropic field | Codex backend field | Mapping rule |
 |---|---|---|
-| `model` | `model` | Pass-through after model-map resolution (aliases/defaults). |
+| `model` | `model` | Pass-through unless listed in `providers.openai.unsupported_models`, in which case use `providers.openai.default_model` from gateway config. |
 | `system[]` | `instructions` | Join text blocks with `\n\n`. If empty, default to `"You are a helpful assistant."`. |
 | `messages[]` | `input[]` | Each Anthropic message becomes a Codex `ResponseItem::Message` (`type:"message"`). |
 | `messages[].content[].text` | `content[]: {type:"input_text"/"output_text"}` | Role-dependent: user→`input_text`, assistant→`output_text`. |

@@ -5,7 +5,9 @@
 
 #![forbid(unsafe_code)]
 
+pub mod backend_error;
 pub mod client;
+pub mod output_text;
 pub mod sse_unary;
 pub mod tool_calls;
 pub mod types;

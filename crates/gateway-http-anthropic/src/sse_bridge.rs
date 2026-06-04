@@ -1,14 +1,12 @@
 #![forbid(unsafe_code)]
 
 use axum::response::sse::Event;
-use gateway_backend_codex::tool_calls::{
-    normalize_json_object_string, parse_output_item_tool_call,
-};
+use gateway_backend_codex::tool_calls::parse_output_item_tool_call;
 use gateway_backend_codex::types::{CodexToolCall, CodexToolCallKind};
 use gateway_state::ToolCallStore;
 use std::collections::HashMap;
 
-use crate::tool_arg_policy::{ToolArgContext, apply_policies};
+use crate::tool_arg_policy::sanitized_tool_args_for_kind;
 
 #[derive(Debug, Clone, Copy)]
 struct BackendTokenUsage {
@@ -191,34 +189,6 @@ fn error_event(message: &str) -> Vec<Event> {
     vec![Event::default().event("error").data(payload)]
 }
 
-fn validate_tool_args_json_object(buf: &str) -> Result<(), String> {
-    let trimmed = buf.trim();
-    if trimmed.is_empty() {
-        return Ok(());
-    }
-    let value: serde_json::Value = serde_json::from_str(trimmed)
-        .map_err(|e| format!("tool_use.input is not valid JSON: {e}"))?;
-    if !value.is_object() {
-        return Err("tool_use.input must be a JSON object".to_string());
-    }
-    Ok(())
-}
-
-fn parse_tool_args_object(buf: &str) -> Result<serde_json::Map<String, serde_json::Value>, String> {
-    let trimmed = buf.trim();
-    validate_tool_args_json_object(trimmed)?;
-    if trimmed.is_empty() {
-        return Ok(serde_json::Map::new());
-    }
-    let value: serde_json::Value = serde_json::from_str(trimmed)
-        .map_err(|e| format!("tool_use.input is not valid JSON: {e}"))?;
-    let obj = value
-        .as_object()
-        .cloned()
-        .ok_or_else(|| "tool_use.input must be a JSON object".to_string())?;
-    Ok(obj)
-}
-
 fn tool_args_delta_from_object(
     index: u32,
     obj: &serde_json::Map<String, serde_json::Value>,
@@ -272,6 +242,13 @@ pub(crate) fn map_backend_event(
     tool_calls: &ToolCallStore,
     request_id: Option<&str>,
 ) -> Option<Vec<Event>> {
+    if let Some(message) =
+        gateway_backend_codex::backend_error::parse_backend_failure_event(event_name, data)
+    {
+        st.completed = true;
+        return Some(error_event(&format!("backend stream failed: {message}")));
+    }
+
     match event_name {
         "response.output_text.delta" => {
             handle_output_text_delta(st, data, extract_stream_delta_text)
@@ -360,20 +337,10 @@ fn handle_message_item(st: &mut StreamState, item: &serde_json::Value) -> Option
     if st.saw_output_text_delta {
         return None;
     }
-    let content = item.get("content").and_then(|v| v.as_array())?;
-    let mut out = Vec::new();
-    for c in content {
-        if c.get("type").and_then(|v| v.as_str()) != Some("output_text") {
-            continue;
-        }
-        let Some(text) = c.get("text").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        if text.is_empty() {
-            continue;
-        }
-        out.push(content_block_delta_text(st.active_text_index, text));
-    }
+    let out: Vec<Event> = gateway_backend_codex::output_text::message_item_output_texts(item)
+        .iter()
+        .map(|text| content_block_delta_text(st.active_text_index, text))
+        .collect();
     (!out.is_empty()).then_some(out)
 }
 
@@ -453,17 +420,14 @@ fn handle_completed(st: &mut StreamState, data: &str, request_id: Option<&str>) 
             .get(call_id)
             .copied()
             .unwrap_or(CodexToolCallKind::Function);
-        let mut obj = match parse_tool_args_object_for_kind(kind, buf) {
-            Ok(v) => v,
-            Err(err) => return error_event(&err),
-        };
-
         let tool_name = st
             .tool_name_by_call_id
             .get(call_id)
             .map_or("", String::as_str);
-        let ctx = ToolArgContext { tool_name };
-        let edits = apply_policies(&ctx, &mut obj);
+        let (obj, edits) = match sanitized_tool_args_for_kind(tool_name, kind, buf) {
+            Ok(value) => value,
+            Err(err) => return error_event(&err),
+        };
         if !edits.is_empty() {
             tracing::info!(
                 request_id,
@@ -480,27 +444,6 @@ fn handle_completed(st: &mut StreamState, data: &str, request_id: Option<&str>) 
     out.extend(finalize_message(st));
     out
 }
-
-fn parse_tool_args_object_for_kind(
-    kind: CodexToolCallKind,
-    buf: &str,
-) -> Result<serde_json::Map<String, serde_json::Value>, String> {
-    if kind != CodexToolCallKind::Custom {
-        return parse_tool_args_object(buf);
-    }
-
-    let trimmed = buf.trim();
-    if trimmed.is_empty() {
-        return Ok(serde_json::Map::new());
-    }
-    if let Ok(obj) = parse_tool_args_object(trimmed) {
-        return Ok(obj);
-    }
-
-    let normalized = normalize_json_object_string(trimmed, "input");
-    parse_tool_args_object(&normalized)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -514,23 +457,6 @@ mod tests {
     use gateway_core::DEFAULT_BACKEND_MODEL;
     use std::convert::Infallible;
     use uuid::Uuid;
-
-    #[test]
-    fn tool_args_validation_requires_object() {
-        let err = validate_tool_args_json_object("[]").expect_err("should reject non-object");
-        assert_eq!(err, "tool_use.input must be a JSON object");
-    }
-
-    #[test]
-    fn tool_args_validation_accepts_empty() {
-        validate_tool_args_json_object("").expect("empty ok");
-    }
-
-    #[test]
-    fn parse_tool_args_object_accepts_empty_as_object() {
-        let obj = parse_tool_args_object("").expect("empty ok");
-        assert!(obj.is_empty());
-    }
 
     #[test]
     fn parse_completed_usage_extracts_tokens() {
@@ -724,5 +650,30 @@ mod tests {
         let got = run_bridge_and_capture(&backend, DEFAULT_BACKEND_MODEL, Some("rid_TEST")).await;
         let expected = parse_expected_jsonl("streaming/expected_anthropic_local_shell_call.jsonl");
         assert_eq!(got, expected);
+    }
+
+    #[tokio::test]
+    async fn streaming_bridge_surfaces_backend_failure_event() {
+        let backend = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\"}\n\n",
+            "event: response.in_progress\n",
+            "data: {\"type\":\"response.in_progress\"}\n\n",
+            "event: error\n",
+            "data: {\"type\":\"error\",\"message\":\"model unavailable\"}\n\n",
+            "event: response.failed\n",
+            "data: {\"type\":\"response.failed\"}\n\n",
+        );
+        let got = run_bridge_and_capture(backend, DEFAULT_BACKEND_MODEL, Some("rid_TEST")).await;
+        let error = got
+            .iter()
+            .find(|(event, _data)| event == "error")
+            .expect("error event")
+            .1
+            .clone();
+        assert_eq!(
+            error["error"]["message"],
+            "backend stream failed: error: model unavailable"
+        );
     }
 }

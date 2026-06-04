@@ -1,0 +1,289 @@
+#![forbid(unsafe_code)]
+
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+
+use crate::{DEFAULT_BACKEND_MODEL, UNSUPPORTED_BACKEND_MODELS};
+
+pub const FAST_SERVICE_TIER: &str = "priority";
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct GatewayConfig {
+    #[serde(default = "default_config_version")]
+    pub version: u32,
+    pub workflow: WorkflowConfig,
+    pub providers: ProviderConfigs,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct WorkflowConfig {
+    pub fast_mode: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct ProviderConfigs {
+    pub openai: OpenAiProviderConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct OpenAiProviderConfig {
+    #[serde(default = "default_openai_model")]
+    pub default_model: String,
+    #[serde(default = "default_unsupported_models")]
+    pub unsupported_models: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ModelResolution {
+    pub requested: String,
+    pub selected_backend_model: String,
+    pub selection_reason: &'static str,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum GatewayConfigError {
+    #[error("failed to read gateway config")]
+    Io(#[from] std::io::Error),
+    #[error("failed to parse gateway config")]
+    Json(#[from] serde_json::Error),
+}
+
+impl Default for GatewayConfig {
+    fn default() -> Self {
+        Self {
+            version: default_config_version(),
+            workflow: WorkflowConfig::default(),
+            providers: ProviderConfigs::default(),
+        }
+    }
+}
+
+impl Default for OpenAiProviderConfig {
+    fn default() -> Self {
+        Self {
+            default_model: default_openai_model(),
+            unsupported_models: default_unsupported_models(),
+        }
+    }
+}
+
+#[must_use]
+fn default_config_version() -> u32 {
+    1
+}
+
+#[must_use]
+fn default_openai_model() -> String {
+    DEFAULT_BACKEND_MODEL.to_string()
+}
+
+#[must_use]
+fn default_unsupported_models() -> Vec<String> {
+    UNSUPPORTED_BACKEND_MODELS
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
+#[must_use]
+pub fn default_gateway_config_path() -> PathBuf {
+    if let Ok(path) = std::env::var("GATEWAY_CONFIG_PATH") {
+        return PathBuf::from(path);
+    }
+
+    if let Ok(gateway_home) = std::env::var("GATEWAY_HOME") {
+        return PathBuf::from(gateway_home).join("config.json");
+    }
+
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    home.join(".gateway").join("config.json")
+}
+
+/// Loads gateway runtime configuration from disk.
+///
+/// # Errors
+///
+/// Returns an error if the config file exists but cannot be read or parsed as JSON.
+pub fn load_gateway_config(path: &Path) -> Result<GatewayConfig, GatewayConfigError> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(serde_json::from_slice::<GatewayConfig>(&bytes)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(GatewayConfig::default()),
+        Err(error) => Err(GatewayConfigError::Io(error)),
+    }
+}
+
+/// Loads gateway runtime configuration from the configured default path.
+///
+/// # Errors
+///
+/// Returns an error if the config file exists but cannot be read or parsed as JSON.
+pub fn load_gateway_config_default_path() -> Result<GatewayConfig, GatewayConfigError> {
+    load_gateway_config(&default_gateway_config_path())
+}
+
+#[must_use]
+pub fn resolve_model(config: &GatewayConfig, requested: &str) -> ModelResolution {
+    let openai = &config.providers.openai;
+    if openai
+        .unsupported_models
+        .iter()
+        .any(|model| model == requested)
+    {
+        return ModelResolution {
+            requested: requested.to_string(),
+            selected_backend_model: openai.default_model.clone(),
+            selection_reason: "unsupported_model_compat_override",
+        };
+    }
+
+    ModelResolution {
+        requested: requested.to_string(),
+        selected_backend_model: requested.to_string(),
+        selection_reason: "passthrough",
+    }
+}
+
+#[must_use]
+pub fn service_tier_for_config(config: &GatewayConfig) -> Option<String> {
+    config
+        .workflow
+        .fast_mode
+        .then(|| FAST_SERVICE_TIER.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_config_path(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        std::env::temp_dir().join(format!("gateway_config_{name}_{nanos}.json"))
+    }
+
+    #[test]
+    fn missing_config_uses_defaults() {
+        let path = temp_config_path("missing");
+        let config = load_gateway_config(&path).expect("load missing config");
+        assert_eq!(config.version, 1);
+        assert!(!config.workflow.fast_mode);
+        assert_eq!(config.providers.openai.default_model, DEFAULT_BACKEND_MODEL);
+        assert_eq!(
+            config.providers.openai.unsupported_models,
+            vec!["gpt-5.2".to_string()]
+        );
+    }
+
+    #[test]
+    fn valid_config_overrides_defaults() {
+        let path = temp_config_path("valid");
+        std::fs::write(
+            &path,
+            r#"{
+                "version": 1,
+                "workflow": { "fast_mode": true },
+                "providers": {
+                    "openai": {
+                        "default_model": "gpt-test-default",
+                        "unsupported_models": ["gpt-test-old"]
+                    }
+                }
+            }"#,
+        )
+        .expect("write config");
+
+        let config = load_gateway_config(&path).expect("load config");
+        assert!(config.workflow.fast_mode);
+        assert_eq!(config.providers.openai.default_model, "gpt-test-default");
+        assert_eq!(
+            config.providers.openai.unsupported_models,
+            vec!["gpt-test-old".to_string()]
+        );
+        std::fs::remove_file(path).expect("remove config");
+    }
+
+    #[test]
+    fn partial_config_preserves_nested_defaults() {
+        let path = temp_config_path("partial");
+        std::fs::write(
+            &path,
+            r#"{
+                "workflow": { "fast_mode": true },
+                "providers": {
+                    "openai": {
+                        "default_model": "gpt-test-default"
+                    }
+                }
+            }"#,
+        )
+        .expect("write config");
+
+        let config = load_gateway_config(&path).expect("load config");
+        assert_eq!(config.version, 1);
+        assert!(config.workflow.fast_mode);
+        assert_eq!(config.providers.openai.default_model, "gpt-test-default");
+        assert_eq!(
+            config.providers.openai.unsupported_models,
+            vec!["gpt-5.2".to_string()]
+        );
+        std::fs::remove_file(path).expect("remove config");
+    }
+
+    #[test]
+    fn invalid_json_errors_clearly() {
+        let path = temp_config_path("invalid");
+        std::fs::write(&path, "{").expect("write config");
+        let error = load_gateway_config(&path).expect_err("invalid config should error");
+        assert!(matches!(error, GatewayConfigError::Json(_)));
+        std::fs::remove_file(path).expect("remove config");
+    }
+
+    #[test]
+    fn unsupported_model_uses_configured_default() {
+        let config = GatewayConfig {
+            providers: ProviderConfigs {
+                openai: OpenAiProviderConfig {
+                    default_model: "gpt-test-default".to_string(),
+                    unsupported_models: vec!["gpt-test-old".to_string()],
+                },
+            },
+            ..GatewayConfig::default()
+        };
+
+        let resolution = resolve_model(&config, "gpt-test-old");
+        assert_eq!(resolution.requested, "gpt-test-old");
+        assert_eq!(resolution.selected_backend_model, "gpt-test-default");
+        assert_eq!(
+            resolution.selection_reason,
+            "unsupported_model_compat_override"
+        );
+    }
+
+    #[test]
+    fn supported_model_passes_through() {
+        let resolution = resolve_model(&GatewayConfig::default(), DEFAULT_BACKEND_MODEL);
+        assert_eq!(resolution.requested, DEFAULT_BACKEND_MODEL);
+        assert_eq!(resolution.selected_backend_model, DEFAULT_BACKEND_MODEL);
+        assert_eq!(resolution.selection_reason, "passthrough");
+    }
+
+    #[test]
+    fn fast_mode_uses_priority_service_tier() {
+        let config = GatewayConfig {
+            workflow: WorkflowConfig { fast_mode: true },
+            ..GatewayConfig::default()
+        };
+
+        assert_eq!(
+            service_tier_for_config(&config),
+            Some(FAST_SERVICE_TIER.to_string())
+        );
+        assert_eq!(service_tier_for_config(&GatewayConfig::default()), None);
+    }
+}

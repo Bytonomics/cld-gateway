@@ -18,8 +18,10 @@ use futures_util::StreamExt as _;
 use gateway_backend_codex::types::{CodexToolCall, CodexToolCallKind};
 use gateway_core::RequestId;
 use gateway_core::Secret;
-use gateway_core::model_map::ModelResolution;
-use gateway_core::model_map::resolve_model;
+use gateway_core::config::{
+    GatewayConfig, ModelResolution, load_gateway_config_default_path, resolve_model,
+    service_tier_for_config,
+};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -45,13 +47,17 @@ pub struct AppState {
     openai_models_url: String,
     openai_api_key: Option<Secret<String>>,
     tool_calls: ToolCallStore,
+    gateway_config: GatewayConfig,
     #[cfg(test)]
     auth_json_path: Option<PathBuf>,
 }
 
 impl AppState {
-    #[must_use]
-    pub fn from_env() -> Self {
+    /// # Errors
+    ///
+    /// Returns an error if the gateway config file exists but cannot be read or parsed.
+    pub fn from_env() -> Result<Self, gateway_core::config::GatewayConfigError> {
+        let gateway_config = load_gateway_config_default_path()?;
         let openai_api_key = std::env::var("OPENAI_API_KEY")
             .ok()
             .map(Secret::new)
@@ -61,12 +67,13 @@ impl AppState {
                     .flatten()
             });
         let backend = backend_client_from_env();
-        Self {
+        Ok(Self {
             backend,
             openai_models_url: "https://api.openai.com/v1/models".to_string(),
             openai_api_key,
+            gateway_config,
             ..Self::default()
-        }
+        })
     }
 
     #[cfg(test)]
@@ -285,6 +292,7 @@ async fn v1_messages(
     }
 
     let resolution = resolve_and_log_model(
+        &state.gateway_config,
         &req.model,
         request_id.as_ref(),
         "resolved model for /v1/messages",
@@ -299,7 +307,7 @@ async fn v1_messages(
         Ok(c) => c,
         Err(err) => return bad_request(&format!("auth_error: {err}")),
     };
-    let backend_req = build_backend_request(&resolution, translated, creds);
+    let backend_req = build_backend_request(&state.gateway_config, &resolution, translated, creds);
     let decoded = match run_backend_unary(&state, backend_req).await {
         Ok(d) => d,
         Err(resp) => return resp,
@@ -356,8 +364,15 @@ async fn v1_messages(
 }
 
 fn tool_call_content_block(tool_call: &CodexToolCall) -> serde_json::Value {
-    let input_value: serde_json::Value =
-        serde_json::from_str(&tool_call.arguments).unwrap_or_else(|_| serde_json::json!({}));
+    let input_value = crate::tool_arg_policy::sanitized_tool_args_for_kind(
+        &tool_call.name,
+        tool_call.kind,
+        &tool_call.arguments,
+    )
+    .map_or_else(
+        |_| serde_json::json!({}),
+        |(args, _edits)| serde_json::Value::Object(args),
+    );
     serde_json::json!({
         "type": "tool_use",
         "id": tool_call.call_id,
@@ -367,11 +382,12 @@ fn tool_call_content_block(tool_call: &CodexToolCall) -> serde_json::Value {
 }
 
 fn resolve_and_log_model(
+    config: &GatewayConfig,
     model: &str,
     request_id: Option<&axum::extract::Extension<RequestId>>,
     msg: &str,
 ) -> ModelResolution {
-    let resolution = resolve_model(model);
+    let resolution = resolve_model(config, model);
     if let Some(axum::extract::Extension(rid)) = request_id {
         info!(
             request_id = %rid.0,
@@ -395,6 +411,7 @@ fn load_codex_credentials(
 }
 
 fn build_backend_request(
+    config: &GatewayConfig,
     resolution: &ModelResolution,
     translated: crate::translate::TranslateResult,
     creds: gateway_auth_codex::CodexCredentials,
@@ -413,6 +430,7 @@ fn build_backend_request(
         store: false,
         stream: true,
         include: translated.include,
+        service_tier: service_tier_for_config(config),
         client_metadata: translated.client_metadata,
     }
 }
@@ -620,6 +638,7 @@ async fn stream_messages(
     req: AnthropicMessagesRequest,
 ) -> Sse<futures_util::stream::BoxStream<'static, Result<Event, std::convert::Infallible>>> {
     let resolution = resolve_and_log_model(
+        &state.gateway_config,
         &req.model,
         request_id.as_ref(),
         "resolved model for /v1/messages (streaming)",
@@ -633,7 +652,8 @@ async fn stream_messages(
         Ok(c) => c,
         Err(err) => return sse_error("auth_error", &format!("auth_error: {err}")),
     };
-    let request_to_backend = build_backend_request(&resolution, translated, creds);
+    let request_to_backend =
+        build_backend_request(&state.gateway_config, &resolution, translated, creds);
 
     let backend_response = state
         .backend
@@ -735,7 +755,7 @@ fn backend_sse_to_anthropic_events(
                         &mut st,
                         evt.event.as_str(),
                         data,
-                        extract_stream_delta_text,
+                        gateway_backend_codex::output_text::extract_text_from_data,
                         &tool_calls,
                         request_id.as_ref().as_deref(),
                     )
@@ -746,47 +766,6 @@ fn backend_sse_to_anthropic_events(
             futures_util::stream::iter(events.into_iter().map(Ok::<_, std::convert::Infallible>))
         })
         .boxed()
-}
-
-fn extract_stream_delta_text(data: &str) -> Option<String> {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else {
-        return Some(data.to_string());
-    };
-
-    let mut last = None;
-    extract_last_text_from_value(&value, &mut last);
-    last
-}
-
-fn extract_last_text_from_value(value: &serde_json::Value, last: &mut Option<String>) {
-    match value {
-        serde_json::Value::Object(map) => {
-            if let Some(serde_json::Value::String(text)) = map.get("text") {
-                *last = Some(text.clone());
-            }
-            if let Some(serde_json::Value::String(delta)) = map.get("delta") {
-                *last = Some(delta.clone());
-            }
-            if let Some(content) = map.get("content") {
-                extract_last_text_from_value(content, last);
-            }
-            for (k, child) in map {
-                if k == "text" || k == "delta" || k == "content" {
-                    continue;
-                }
-                extract_last_text_from_value(child, last);
-            }
-        }
-        serde_json::Value::Array(items) => {
-            for child in items {
-                extract_last_text_from_value(child, last);
-            }
-        }
-        serde_json::Value::String(_)
-        | serde_json::Value::Null
-        | serde_json::Value::Bool(_)
-        | serde_json::Value::Number(_) => {}
-    }
 }
 
 fn deserialize_with_path<T>(body: &[u8]) -> Result<T, String>
@@ -1037,6 +1016,30 @@ mod messages_tests {
                 .and_then(|v| v.as_str()),
             Some("hi")
         );
+    }
+
+    #[test]
+    fn unary_tool_call_content_block_sanitizes_read_pages() {
+        let block = tool_call_content_block(&CodexToolCall {
+            call_id: "call_read".to_string(),
+            name: "Read".to_string(),
+            arguments: serde_json::json!({
+                "file_path": "/tmp/a.txt",
+                "pages": ""
+            })
+            .to_string(),
+            kind: CodexToolCallKind::Function,
+        });
+
+        let input = block
+            .get("input")
+            .and_then(|value| value.as_object())
+            .expect("input object");
+        assert_eq!(
+            input.get("file_path").and_then(|value| value.as_str()),
+            Some("/tmp/a.txt")
+        );
+        assert!(input.get("pages").is_none());
     }
 
     #[test]

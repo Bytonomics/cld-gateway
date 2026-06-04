@@ -298,6 +298,12 @@ fn build_request_body(req: &CodexBackendRequest) -> serde_json::Value {
                 .collect(),
         ),
     );
+    if let Some(service_tier) = req.service_tier.as_ref() {
+        obj.insert(
+            "service_tier".to_string(),
+            serde_json::Value::String(service_tier.clone()),
+        );
+    }
 
     if let Some(meta) = req.client_metadata.as_ref() {
         let mut m = serde_json::Map::new();

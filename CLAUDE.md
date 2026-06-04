@@ -63,8 +63,8 @@ Key entrypoint:
 The workspace is organized as small crates with explicit “allowed/not allowed” boundaries documented at the top of each crate’s `lib.rs`.
 
 - `crates/gateway-core`
-  - Shared types/utilities (`RequestId`, `Secret<T>`, model mapping).
-  - Model aliasing/resolution is in `gateway_core::model_map`.
+  - Shared types/utilities (`RequestId`, `Secret<T>`, gateway runtime config).
+  - Gateway-owned defaults, unsupported-model compatibility, and workflow toggles are in `gateway_core::config`.
 
 - `crates/gateway-auth-codex`
   - Loads/refreshes Codex OAuth credentials from disk.
@@ -120,8 +120,16 @@ The workspace is organized as small crates with explicit “allowed/not allowed�
     - `GATEWAY_AUTH_JSON_PATH` (full path)
     - `GATEWAY_HOME` (directory; auth.json is under it)
 
-- Model map:
-  - `~/.gateway/model_map.json` (see `gateway_core::model_map::default_model_map_path()`)
+- Gateway config:
+  - Default: `~/.gateway/config.json`
+  - Override via env:
+    - `GATEWAY_CONFIG_PATH` (full path)
+    - `GATEWAY_HOME` (directory; config.json is under it)
+  - Current fields:
+    - `providers.openai.default_model`
+    - `providers.openai.unsupported_models`
+    - `workflow.fast_mode`
+  - Details: `docs/gateway_config.md`
 
 - Exchange logs:
   - `~/.gateway/logs/http-exchange.jsonl`

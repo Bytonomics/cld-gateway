@@ -7,7 +7,7 @@ use std::collections::HashMap;
 pub struct CodexBackendRequest {
     pub access_token: Secret<String>,
     pub account_id: String,
-    /// Backend model id (post model-map resolution).
+    /// Backend model id after gateway compatibility resolution.
     pub model: String,
     /// System instructions (joined Anthropic `system[]` text blocks).
     pub instructions: String,
@@ -29,6 +29,8 @@ pub struct CodexBackendRequest {
     pub stream: bool,
     /// Optional include fields.
     pub include: Vec<String>,
+    /// Optional backend service tier. Codex Fast mode uses `priority`.
+    pub service_tier: Option<String>,
     /// Optional client metadata (Codex-compatible).
     pub client_metadata: Option<HashMap<String, String>>,
 }

@@ -68,7 +68,7 @@ pub async fn capture_http_exchange(
     let (response_parts, response_body) = res.into_parts();
     let model_resolution = response_parts
         .extensions
-        .get::<gateway_core::model_map::ModelResolution>()
+        .get::<gateway_core::config::ModelResolution>()
         .cloned();
     let (response_body_done, response_body_for_client) = capture_body_streaming(
         response_parts.headers.get(http::header::CONTENT_TYPE),

@@ -5,7 +5,7 @@
 
 #![forbid(unsafe_code)]
 
-pub mod model_map;
+pub mod config;
 
 pub const DEFAULT_BACKEND_MODEL: &str = "gpt-5.4";
 pub const UNSUPPORTED_BACKEND_MODELS: &[&str] = &["gpt-5.2"];

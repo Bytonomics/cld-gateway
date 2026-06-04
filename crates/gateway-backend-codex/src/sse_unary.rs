@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+use crate::backend_error::parse_backend_failure_event;
+use crate::output_text::{extract_text_from_data, parse_output_item_message_texts};
 use crate::tool_calls::parse_output_item_tool_call;
 use crate::types::{CodexTokenUsage, CodexToolCall, CodexUnaryDecoded};
 use bytes::Bytes;
@@ -19,8 +21,10 @@ pub enum SseDecodeError {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
-    #[error("no final text found in event stream")]
-    NoFinalText,
+    #[error("backend stream failed: {message}")]
+    BackendFailed { message: String },
+    #[error("no final text found in event stream; seen events: {events}")]
+    NoFinalText { events: String },
 }
 
 /// Read a backend `text/event-stream` response to completion and produce a single unary decoded value.
@@ -42,13 +46,17 @@ where
     E: Error + Send + Sync + 'static,
 {
     let mut event_stream = Box::pin(byte_stream.eventsource());
-    let mut last_text: Option<String> = None;
+    let mut final_text = String::new();
+    let mut fallback_text: Option<String> = None;
+    let mut saw_output_text_delta = false;
     let mut tool_calls: Vec<CodexToolCall> = Vec::new();
     let mut last_usage: Option<CodexTokenUsage> = None;
+    let mut seen_events = Vec::new();
 
     while let Some(item) = event_stream.next().await {
         let event = item.map_err(event_stream_decode_error)?;
         let data = event.data.trim();
+        record_seen_event(&mut seen_events, &event.event);
 
         if data.is_empty() {
             continue;
@@ -59,24 +67,55 @@ where
             continue;
         }
 
+        if let Some(message) = parse_backend_failure_event(&event.event, data) {
+            return Err(SseDecodeError::BackendFailed { message });
+        }
+
         if event.event == "response.completed"
             && let Some(usage) = extract_usage_from_completed_event(data)
         {
             last_usage = Some(usage);
         }
-        if let Some(tool_call) = parse_output_item_tool_call(&event.event, data) {
-            upsert_tool_call(&mut tool_calls, tool_call);
-        }
-        if !is_tool_input_delta_event(&event.event)
-            && let Some(text) = extract_last_text_from_data(data)
-        {
-            last_text = Some(text);
+        match event.event.as_str() {
+            "response.output_text.delta" => {
+                if let Some(text) = extract_text_from_data(data) {
+                    final_text.push_str(&text);
+                    saw_output_text_delta = true;
+                }
+            }
+            "response.output_text.done" => {
+                if !saw_output_text_delta && let Some(text) = extract_text_from_data(data) {
+                    final_text.push_str(&text);
+                }
+            }
+            "response.output_item.added" | "response.output_item.done" => {
+                if let Some(tool_call) = parse_output_item_tool_call(&event.event, data) {
+                    upsert_tool_call(&mut tool_calls, tool_call);
+                }
+                if !saw_output_text_delta {
+                    for text in parse_output_item_message_texts(&event.event, data) {
+                        final_text.push_str(&text);
+                    }
+                }
+            }
+            _ => {
+                if !is_tool_input_delta_event(&event.event)
+                    && event.event != "response.completed"
+                    && let Some(text) = extract_text_from_data(data)
+                {
+                    fallback_text = Some(text);
+                }
+            }
         }
     }
 
-    let final_text = last_text.unwrap_or_default();
+    if final_text.is_empty() {
+        final_text = fallback_text.unwrap_or_default();
+    }
     if final_text.is_empty() && tool_calls.is_empty() {
-        return Err(SseDecodeError::NoFinalText);
+        return Err(SseDecodeError::NoFinalText {
+            events: seen_events.join(","),
+        });
     }
 
     Ok(CodexUnaryDecoded {
@@ -178,76 +217,23 @@ fn upsert_tool_call(tool_calls: &mut Vec<CodexToolCall>, tool_call: CodexToolCal
     tool_calls.push(tool_call);
 }
 
-fn extract_last_text_from_data(data: &str) -> Option<String> {
-    // Be permissive: treat non-JSON as plaintext output.
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else {
-        return Some(data.to_string());
-    };
-
-    let mut last: Option<String> = None;
-    extract_last_text_from_value(&value, &mut last);
-    last
-}
-
-fn extract_last_text_from_value(value: &serde_json::Value, last: &mut Option<String>) {
-    match value {
-        serde_json::Value::Object(map) => {
-            // Heuristic: prefer direct "text" fields if present.
-            if let Some(serde_json::Value::String(text)) = map.get("text") {
-                *last = Some(text.clone());
-            }
-            if let Some(serde_json::Value::String(delta)) = map.get("delta") {
-                *last = Some(delta.clone());
-            }
-
-            // Special-case: some protocols embed assistant text in `content: [{text: "..."}]`.
-            if let Some(content) = map.get("content") {
-                extract_last_text_from_value(content, last);
-            }
-
-            // Walk nested structures, but only to find "text"/"delta"/content-like fields, not arbitrary strings.
-            for (k, v) in map {
-                if k == "text" || k == "delta" || k == "content" {
-                    continue;
-                }
-                extract_last_text_from_value(v, last);
-            }
-        }
-        serde_json::Value::Array(items) => {
-            for v in items {
-                extract_last_text_from_value(v, last);
-            }
-        }
-        // Don't treat arbitrary JSON scalars as content; only extract from known/likely fields.
-        serde_json::Value::String(_)
-        | serde_json::Value::Null
-        | serde_json::Value::Bool(_)
-        | serde_json::Value::Number(_) => {}
+fn record_seen_event(seen_events: &mut Vec<String>, event_name: &str) {
+    if seen_events.iter().any(|seen| seen == event_name) {
+        return;
     }
+    seen_events.push(event_name.to_string());
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_last_text_from_data, extract_usage_from_completed_event, format_event_stream_error,
+        SseDecodeError, extract_usage_from_completed_event, format_event_stream_error,
         read_sse_to_completion,
     };
     use crate::types::CodexToolCallKind;
     use bytes::Bytes;
     use eventsource_stream::EventStreamError;
     use futures_util::stream;
-
-    #[test]
-    fn plaintext_data_extracts_as_text() {
-        let got = extract_last_text_from_data("hello");
-        assert_eq!(got.as_deref(), Some("hello"));
-    }
-
-    #[test]
-    fn json_data_extracts_text_field() {
-        let got = extract_last_text_from_data(r#"{"text":"hi"}"#);
-        assert_eq!(got.as_deref(), Some("hi"));
-    }
 
     #[test]
     fn event_stream_transport_error_includes_underlying_error() {
@@ -270,6 +256,85 @@ mod tests {
         let byte_stream = stream::iter(vec![Ok::<Bytes, std::io::Error>(Bytes::from(sse))]);
         let decoded = read_sse_to_completion(byte_stream).await.unwrap();
         assert_eq!(decoded.final_text, "second");
+    }
+
+    #[tokio::test]
+    async fn sse_concatenates_output_text_deltas() {
+        let sse = concat!(
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\" world\"}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
+        );
+
+        let byte_stream = stream::iter(vec![Ok::<Bytes, std::io::Error>(Bytes::from(sse))]);
+        let decoded = read_sse_to_completion(byte_stream).await.unwrap();
+        assert_eq!(decoded.final_text, "hello world");
+    }
+
+    #[tokio::test]
+    async fn sse_decodes_output_item_message_text() {
+        let sse = concat!(
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"message text\"}]}}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
+        );
+
+        let byte_stream = stream::iter(vec![Ok::<Bytes, std::io::Error>(Bytes::from(sse))]);
+        let decoded = read_sse_to_completion(byte_stream).await.unwrap();
+        assert_eq!(decoded.final_text, "message text");
+    }
+
+    #[tokio::test]
+    async fn no_final_text_reports_seen_events() {
+        let sse = concat!(
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":0,\"total_tokens\":1}}}\n\n",
+        );
+
+        let byte_stream = stream::iter(vec![Ok::<Bytes, std::io::Error>(Bytes::from(sse))]);
+        let err = read_sse_to_completion(byte_stream).await.unwrap_err();
+        assert!(matches!(err, SseDecodeError::NoFinalText { .. }));
+        assert!(err.to_string().contains("response.completed"));
+    }
+
+    #[tokio::test]
+    async fn backend_error_event_returns_concrete_failure() {
+        let sse = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\"}\n\n",
+            "event: error\n",
+            "data: {\"type\":\"error\",\"message\":\"model unavailable\"}\n\n",
+            "event: response.failed\n",
+            "data: {\"type\":\"response.failed\"}\n\n",
+        );
+
+        let byte_stream = stream::iter(vec![Ok::<Bytes, std::io::Error>(Bytes::from(sse))]);
+        let err = read_sse_to_completion(byte_stream).await.unwrap_err();
+        assert!(matches!(err, SseDecodeError::BackendFailed { .. }));
+        assert_eq!(
+            err.to_string(),
+            "backend stream failed: error: model unavailable"
+        );
+    }
+
+    #[tokio::test]
+    async fn response_failed_event_returns_concrete_failure() {
+        let sse = concat!(
+            "event: response.failed\n",
+            "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"quota exceeded\"}}}\n\n",
+        );
+
+        let byte_stream = stream::iter(vec![Ok::<Bytes, std::io::Error>(Bytes::from(sse))]);
+        let err = read_sse_to_completion(byte_stream).await.unwrap_err();
+        assert!(matches!(err, SseDecodeError::BackendFailed { .. }));
+        assert_eq!(
+            err.to_string(),
+            "backend stream failed: response.failed: quota exceeded"
+        );
     }
 
     #[tokio::test]

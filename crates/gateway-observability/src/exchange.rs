@@ -6,7 +6,7 @@ use serde_json::Value;
 #[derive(Debug, Serialize, Clone, Default)]
 pub struct ExchangeMeta {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub model_resolution: Option<gateway_core::model_map::ModelResolution>,
+    pub model_resolution: Option<gateway_core::config::ModelResolution>,
 }
 
 #[derive(Debug, Serialize, Clone)]

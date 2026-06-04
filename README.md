@@ -35,36 +35,87 @@ Verify checksums using `cld-gateway-package_SHA256SUMS`, which is published alon
 
 ---
 
-## Running the gateway
+## Quick start
+
+### 1. Authenticate (one-time setup)
+
+```sh
+cld-gateway login openai
+```
+
+This opens an interactive login menu where you can choose:
+- **Sign in with ChatGPT** - OAuth authentication via browser
+- **Provide API key** - Paste an OpenAI API key directly
+
+Credentials are saved to `~/.gateway/auth.json` for reuse on subsequent runs.
+
+### 2. Start the daemon
+
+```sh
+cld-gateway serve
+```
+
+Or simply:
 
 ```sh
 cld-gateway
 ```
 
-On first run, `cld-gateway` will prompt for an authentication method (ChatGPT OAuth or API key) and store credentials at `~/.gateway/auth.json` for reuse on subsequent runs.
+The daemon starts a non-interactive HTTP server on `127.0.0.1:8080` and uses the credentials from your previous login.
 
-See [Auth](#auth) for details on authentication methods and how to configure them.
+---
 
-### Environment variables
+## Commands
+
+| Command | Description |
+|---|---|
+| `cld-gateway` or `cld-gateway serve` | Start the daemon (non-interactive) |
+| `cld-gateway login` | Interactive login to OpenAI (ChatGPT OAuth or API key) |
+| `cld-gateway login openai` | Same as `cld-gateway login` (defaults to OpenAI) |
+
+---
+
+## Authentication workflow
+
+The `cld-gateway login` command is a foreground, interactive process:
+
+1. **Run login:** `cld-gateway login openai`
+2. **Select method:** A TUI menu appears with options:
+   - "Sign in with ChatGPT" (opens browser for OAuth)
+   - "Provide API key" (paste your OpenAI API key)
+3. **Credentials saved:** Auth is written to `~/.gateway/auth.json`
+4. **Start daemon:** Run `cld-gateway serve` to start the background HTTP server
+5. **Requests are routed:** The daemon routes requests through the ChatGPT backend using your saved credentials
+
+**Token refresh:** If a token expires, the daemon automatically refreshes it on the next upstream request — no manual intervention needed.
+
+---
+
+## Daemon behavior (non-interactive)
+
+The daemon (`cld-gateway serve` or `cld-gateway`) is completely non-interactive:
+
+- **No startup prompts:** Daemon startup does not open browsers, prompt for credentials, or show login menus
+- **Uses persisted auth:** Daemon reads credentials from `~/.gateway/auth.json` (written by the login command)
+- **Auto-refresh:** If a token is expired or near-expiration, the daemon automatically refreshes it on the next request
+- **No blocking:** If auth is missing or invalid:
+  - Daemon continues to run (does not exit or block)
+  - HTTP responses include a remediation message telling the client to run: `cld-gateway login openai`
+  - Tools like Claude Code can surface this message to guide the user
+
+---
+
+## Environment variables
 
 | Variable | Default | Description |
 |---|---|---|
 | `CLD_GATEWAY_LISTEN_ADDR` | `127.0.0.1:8080` | Listen address and port |
 | `GATEWAY_HOME` | `~/.gateway` | Override all default `~/.gateway` paths at once |
 | `GATEWAY_AUTH_JSON_PATH` | `~/.gateway/auth.json` | Auth credentials file path |
-| `CLD_GATEWAY_AUTH_PORT` | `1455` | OAuth callback port (see below) |
+| `CLD_GATEWAY_AUTH_PORT` | `1455` | OAuth callback port (see Authentication section) |
 | `CLD_GATEWAY_LOG_PATH` | `~/.gateway/logs/http-exchange.jsonl` | Exchange log file path |
 | `CLD_GATEWAY_STATE_DB_PATH` | `~/.gateway/state/tool_calls.sqlite` | Tool-call state DB path |
 | `GATEWAY_CONFIG_PATH` | `~/.gateway/config.json` | Gateway config file path |
-
-### OAuth Callback Port Selection
-
-During the ChatGPT login flow, `cld-gateway` opens a local HTTP server to receive the OAuth callback. Port selection follows this order:
-
-1. **Preferred port:** The value of `CLD_GATEWAY_AUTH_PORT` (default `1455`)
-2. **Fallback port:** If binding the preferred port fails, the gateway automatically falls back to port `1457`
-
-Login succeeds as long as the gateway can bind one of those ports and the resulting localhost callback URL is reachable in the browser. If you know port 1455 is occupied (for example by another local service or another gateway instance), set `CLD_GATEWAY_AUTH_PORT` to an available port before starting the login flow.
 
 ---
 
@@ -73,13 +124,19 @@ Login succeeds as long as the gateway can bind one of those ports and the result
 You can run a dev build and a release build simultaneously by pointing each at different ports and data directories:
 
 ```sh
-# Release build (default ports/paths)
-cld-gateway
+# Release build — login first
+cld-gateway login openai
 
-# Dev build (different port and paths)
+# Release build — start daemon (default ports/paths)
+cld-gateway serve
+
+# Dev build — login with custom paths
+GATEWAY_HOME=~/.gateway-dev cld-gateway-dev login openai
+
+# Dev build — start daemon (different port and paths)
 CLD_GATEWAY_LISTEN_ADDR=127.0.0.1:8081 \
 GATEWAY_HOME=~/.gateway-dev \
-cld-gateway-dev
+cld-gateway-dev serve
 ```
 
 ---
@@ -96,47 +153,61 @@ cld-gateway-dev
 
 ---
 
-## Auth
+## Authentication
 
-`cld-gateway` supports two authentication methods:
+### Supported methods
 
-### ChatGPT OAuth (Recommended)
+The `cld-gateway login openai` command supports two authentication methods:
 
-On first run, `cld-gateway` interactively prompts for an authentication method. Selecting ChatGPT OAuth opens a browser window to authenticate with OpenAI. After completing login, credentials are stored at `~/.gateway/auth.json` for reuse on subsequent runs.
+1. **ChatGPT OAuth (recommended)**
+   - Opens your browser to authenticate with OpenAI
+   - Provides an access token, refresh token, and account ID
+   - Required for `/v1/messages` endpoint access
 
-This method is required for `/v1/messages` endpoint access. It provides an access token, refresh token, and account ID.
+2. **OpenAI API Key**
+   - Paste your OpenAI API key directly in the TUI prompt
+   - Enables `/v1/models` endpoint access
+   - Note: `/v1/messages` still requires ChatGPT OAuth regardless of which method you choose
 
-**Auth flow:**
-1. On startup, `cld-gateway` checks for existing valid credentials at `~/.gateway/auth.json`
-2. If credentials exist and are valid, the gateway validates them with the upstream backend (this may refresh expired tokens)
-3. If credentials are missing, expired, or invalid, an interactive login prompt appears
-4. On successful login, credentials are persisted and the gateway starts listening
+### Shared auth store
 
-**Token refresh:** On subsequent runs, stored credentials are loaded automatically. If a request to the upstream backend returns a 401, the gateway refreshes the token automatically and retries the request — no manual intervention needed.
+Both `cld-gateway login` and `cld-gateway serve` use the same auth file:
 
-### OpenAI API Key (Alternative)
-
-Alternatively, set `GATEWAY_FORCED_LOGIN_METHOD=api` to provide an OpenAI API key:
-
-```sh
-GATEWAY_FORCED_LOGIN_METHOD=api cld-gateway
+```
+~/.gateway/auth.json
 ```
 
-When prompted, paste your OpenAI API key. This method enables `/v1/models` endpoint access (requires a valid OpenAI API key). However, the `/v1/messages` endpoint still requires ChatGPT OAuth regardless of which authentication method is configured.
+- **`cld-gateway login openai`** writes credentials to this file
+- **`cld-gateway serve`** reads and uses credentials from this file
+- Token refresh happens automatically in the daemon; no manual refresh needed
 
-When ChatGPT OAuth credentials are missing or invalid, the installed daemon currently requires an interactive login on startup. If you are running `cld-gateway` behind Claude Code, make sure the login flow has been completed successfully in the same environment so the daemon and subsequent requests can reuse the same `~/.gateway/auth.json`.
+### Configuration and overrides
 
-### Configuration
+Override the auth file location using environment variables:
 
-To override the auth file location, set:
 - `GATEWAY_AUTH_JSON_PATH`: Full path to auth.json
 - `GATEWAY_HOME`: Directory containing auth.json (default: `~/.gateway`)
 
-To force a specific login method on every startup:
-- `GATEWAY_FORCED_LOGIN_METHOD=chatgpt`: Always use ChatGPT OAuth
-- `GATEWAY_FORCED_LOGIN_METHOD=api`: Always prompt for API key
+Example:
 
-The OAuth callback port can be customized via `CLD_GATEWAY_AUTH_PORT` (see [OAuth Callback Port Selection](#oauth-callback-port-selection) above).
+```sh
+export GATEWAY_HOME=~/.gateway-custom
+cld-gateway login openai      # Writes to ~/.gateway-custom/auth.json
+cld-gateway serve             # Reads from ~/.gateway-custom/auth.json
+```
+
+### OAuth callback port
+
+During ChatGPT OAuth, the gateway opens a local HTTP server to receive the callback. The port is selected as follows:
+
+1. **Preferred:** `CLD_GATEWAY_AUTH_PORT` (default `1455`)
+2. **Fallback:** If binding fails, automatically tries port `1457`
+
+If you know port 1455 is occupied, set `CLD_GATEWAY_AUTH_PORT` to an available port before login:
+
+```sh
+CLD_GATEWAY_AUTH_PORT=2000 cld-gateway login openai
+```
 
 ---
 

@@ -157,6 +157,7 @@ async fn auth_status() -> impl IntoResponse {
             "expires_at_unix_seconds": null,
             "source": "error",
             "error_type": format!("{err}"),
+            "auth_remediation": "Please run: cld-gateway login openai",
         })),
     }
 }
@@ -171,14 +172,7 @@ async fn auth_refresh() -> axum::response::Response {
             "source": "gateway_auth_json",
         }))
         .into_response(),
-        Err(err) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "ok": false,
-                "error_type": format!("{err}"),
-            })),
-        )
-            .into_response(),
+        Err(err) => auth_error(&format!("{err}")),
     }
 }
 
@@ -305,7 +299,7 @@ async fn v1_messages(
 
     let creds = match load_codex_credentials(auth_path_override(&state)) {
         Ok(c) => c,
-        Err(err) => return bad_request(&format!("auth_error: {err}")),
+        Err(err) => return auth_error(&err),
     };
     let backend_req = build_backend_request(&state.gateway_config, &resolution, translated, creds);
     let decoded = match run_backend_unary(&state, backend_req).await {
@@ -603,6 +597,28 @@ fn sse_error(
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
+fn sse_auth_error(
+    message: &str,
+) -> Sse<futures_util::stream::BoxStream<'static, Result<Event, std::convert::Infallible>>> {
+    let remediation = "Please run: cld-gateway login openai";
+    let payload = serde_json::json!({
+        "type": "error",
+        "error": {
+            "type": "auth_error",
+            "message": message,
+            "auth_remediation": remediation
+        }
+    })
+    .to_string();
+
+    let stream = futures_util::stream::iter([Ok::<Event, std::convert::Infallible>(
+        Event::default().event("error").data(payload),
+    )])
+    .boxed();
+
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
 fn anthropic_stream_start_events(msg_id: &str, model: &str) -> Vec<Event> {
     vec![
         Event::default().event("message_start").data(
@@ -649,7 +665,7 @@ async fn stream_messages(
     };
     let creds = match load_codex_credentials(auth_path_override(&state)) {
         Ok(c) => c,
-        Err(err) => return sse_error("auth_error", &format!("auth_error: {err}")),
+        Err(err) => return sse_auth_error(&err),
     };
     let request_to_backend =
         build_backend_request(&state.gateway_config, &resolution, translated, creds);
@@ -804,6 +820,21 @@ fn bad_request(message: &str) -> axum::response::Response {
         .into_response()
 }
 
+fn auth_error(message: &str) -> axum::response::Response {
+    let remediation = "Please run: cld-gateway login openai";
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(serde_json::json!({
+            "error": {
+                "type": "auth_error",
+                "message": message,
+                "auth_remediation": remediation
+            }
+        })),
+    )
+        .into_response()
+}
+
 // NOTE: Request translation lives in `translate.rs`. Keep handler code free of ad-hoc extraction
 // logic so we can maintain full-history fidelity.
 
@@ -819,7 +850,7 @@ mod messages_tests {
     };
     use axum::body::Body;
     use axum::body::to_bytes;
-    use axum::http::Request;
+    use axum::http::{Request, StatusCode};
     use gateway_backend_codex::types::{CodexToolCall, CodexToolCallKind};
     use gateway_core::DEFAULT_BACKEND_MODEL;
     use gateway_state::ToolCallStore;
@@ -1240,6 +1271,107 @@ mod messages_tests {
         assert_eq!(block.get("type").and_then(|v| v.as_str()), Some("tool_use"));
         assert_eq!(block.get("id").and_then(|v| v.as_str()), Some("call_1"));
         assert_eq!(block.get("name").and_then(|v| v.as_str()), Some("Read"));
+    }
+
+    #[tokio::test]
+    async fn test_unary_message_missing_auth_returns_remediation() {
+        let state = super::AppState {
+            auth_json_path: Some(std::path::PathBuf::from("/nonexistent/auth.json")),
+            ..super::AppState::default()
+        };
+
+        let app = super::router(state);
+        let req_body = serde_json::json!({
+            "model": DEFAULT_BACKEND_MODEL,
+            "stream": false,
+            "messages": [{ "role": "user", "content": "hello" }]
+        });
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .body(Body::from(req_body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+        let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(
+            json.get("error")
+                .and_then(|e| e.get("type"))
+                .and_then(|v| v.as_str()),
+            Some("auth_error")
+        );
+        assert_eq!(
+            json.get("error")
+                .and_then(|e| e.get("auth_remediation"))
+                .and_then(|v| v.as_str()),
+            Some("Please run: cld-gateway login openai")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_streaming_message_missing_auth_returns_remediation() {
+        let state = super::AppState {
+            auth_json_path: Some(std::path::PathBuf::from("/nonexistent/auth.json")),
+            ..super::AppState::default()
+        };
+
+        let app = super::router(state);
+        let req_body = serde_json::json!({
+            "model": DEFAULT_BACKEND_MODEL,
+            "stream": true,
+            "messages": [{ "role": "user", "content": "hello" }]
+        });
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .body(Body::from(req_body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::OK);
+        let content_type = res
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(content_type.contains("text/event-stream"));
+
+        let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let text = std::str::from_utf8(&body).unwrap();
+        let events = parse_sse_frames(text);
+
+        assert!(!events.is_empty());
+        let (first_event, first_data) = &events[0];
+        assert_eq!(first_event, "error");
+        assert_eq!(
+            first_data
+                .get("error")
+                .and_then(|e| e.get("type"))
+                .and_then(|v| v.as_str()),
+            Some("auth_error")
+        );
+        assert_eq!(
+            first_data
+                .get("error")
+                .and_then(|e| e.get("auth_remediation"))
+                .and_then(|v| v.as_str()),
+            Some("Please run: cld-gateway login openai")
+        );
     }
 }
 

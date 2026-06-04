@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use crate::LoginSelection;
+use crate::login::openai::LoginSelection;
 use crossterm::event::{Event, KeyCode, KeyEventKind};
 use crossterm::terminal::EnterAlternateScreen;
 use crossterm::{event, execute, terminal};

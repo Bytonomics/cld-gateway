@@ -10,7 +10,20 @@ use gateway_observability::middleware::{CaptureConfig, capture_http_exchange};
 use tracing::info;
 use tracing::warn;
 
+mod login;
 mod tui_login;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Command {
+    Serve,
+    Login(Vendor),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Vendor {
+    OpenAI,
+    Gemini,
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -21,7 +34,60 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
-    ensure_gateway_auth().await?;
+    let command = parse_command()?;
+
+    match command {
+        Command::Serve => run_serve().await?,
+        Command::Login(vendor) => login::run_login(vendor).await?,
+    }
+
+    Ok(())
+}
+
+fn parse_command() -> Result<Command, Box<dyn std::error::Error>> {
+    let args: Vec<String> = std::env::args().collect();
+    parse_command_from_args(&args)
+}
+
+fn parse_command_from_args(args: &[String]) -> Result<Command, Box<dyn std::error::Error>> {
+    match args.len() {
+        1 => {
+            // No args: bare `cld-gateway` defaults to serve
+            Ok(Command::Serve)
+        }
+        2 => {
+            match args[1].as_str() {
+                "serve" => Ok(Command::Serve),
+                "login" => {
+                    // `cld-gateway login` defaults to OpenAI
+                    Ok(Command::Login(Vendor::OpenAI))
+                }
+                arg => Err(format!(
+                    "unknown command '{arg}'; expected 'serve' or 'login [vendor]'"
+                )
+                .into()),
+            }
+        }
+        3 => match args[1].as_str() {
+            "login" => match args[2].as_str() {
+                "openai" => Ok(Command::Login(Vendor::OpenAI)),
+                "gemini" => Ok(Command::Login(Vendor::Gemini)),
+                vendor => {
+                    Err(format!("unknown vendor '{vendor}'; expected 'openai' or 'gemini'").into())
+                }
+            },
+            "serve" => Err("too many arguments; expected 'serve' or 'login [vendor]'".into()),
+            arg => {
+                Err(format!("unknown command '{arg}'; expected 'serve' or 'login [vendor]'").into())
+            }
+        },
+        _ => Err("too many arguments; expected 'serve' or 'login [vendor]'".into()),
+    }
+}
+
+async fn run_serve() -> Result<(), Box<dyn std::error::Error>> {
+    // Non-interactive auth preflight: attempt refresh if auth exists, but do not block startup.
+    auth_preflight_for_serve().await;
 
     let config = CaptureConfig::default();
     let app = gateway_http_anthropic::router(AppState::from_env()?).layer(
@@ -39,213 +105,132 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn ensure_gateway_auth() -> Result<(), Box<dyn std::error::Error>> {
-    let forced_login_method = forced_login_method_from_env()?;
+async fn auth_preflight_for_serve() {
     let auth_status = gateway_auth_codex::load_gateway_auth_status_default_path();
 
-    match forced_login_method {
-        Some(ForcedLoginMethod::Chatgpt) => {
-            ensure_forced_chatgpt_login(auth_status).await?;
-            Ok(())
-        }
-        Some(ForcedLoginMethod::ApiKey) => {
-            ensure_forced_api_key_login(auth_status).await?;
-            Ok(())
-        }
-        None => {
-            ensure_default_login(auth_status).await?;
-            Ok(())
-        }
-    }
-}
-
-async fn ensure_default_login(
-    auth_status: Result<
-        Option<gateway_auth_codex::GatewayAuthStatus>,
-        gateway_auth_codex::CodexAuthError,
-    >,
-) -> Result<(), Box<dyn std::error::Error>> {
     match auth_status {
         Ok(Some(status)) if status.ready_for_messages() => {
-            validate_chatgpt_auth(status, None).await
-        }
-        Ok(Some(status)) => {
-            warn!("gateway auth present but incomplete: {status:?}; starting interactive login");
-            interactive_login(None).await
-        }
-        Ok(None) => {
-            warn!("gateway auth not found; starting interactive login");
-            interactive_login(None).await
-        }
-        Err(err) => {
-            warn!("gateway auth check failed: {err}; starting interactive login");
-            interactive_login(None).await
-        }
-    }
-}
-
-async fn ensure_forced_chatgpt_login(
-    auth_status: Result<
-        Option<gateway_auth_codex::GatewayAuthStatus>,
-        gateway_auth_codex::CodexAuthError,
-    >,
-) -> Result<(), Box<dyn std::error::Error>> {
-    match auth_status {
-        Ok(Some(status))
-            if matches!(
-                status.login_method,
-                gateway_auth_codex::GatewayLoginMethod::Chatgpt
-            ) && status.ready_for_messages() =>
-        {
-            validate_chatgpt_auth(status, Some(ForcedLoginMethod::Chatgpt)).await
-        }
-        Ok(Some(status)) => {
-            warn!("forced ChatGPT login requested; existing auth is incompatible: {status:?}");
-            let _ = gateway_auth_codex::logout_with_revoke_default_path().await;
-            interactive_login(Some(ForcedLoginMethod::Chatgpt)).await
-        }
-        Ok(None) => {
-            warn!("forced ChatGPT login requested; no auth found");
-            interactive_login(Some(ForcedLoginMethod::Chatgpt)).await
-        }
-        Err(err) => {
-            warn!("gateway auth check failed: {err}; forcing ChatGPT login");
-            interactive_login(Some(ForcedLoginMethod::Chatgpt)).await
-        }
-    }
-}
-
-async fn ensure_forced_api_key_login(
-    auth_status: Result<
-        Option<gateway_auth_codex::GatewayAuthStatus>,
-        gateway_auth_codex::CodexAuthError,
-    >,
-) -> Result<(), Box<dyn std::error::Error>> {
-    match auth_status {
-        Ok(Some(status))
-            if matches!(
-                status.login_method,
-                gateway_auth_codex::GatewayLoginMethod::ApiKey
-            ) && status.has_openai_api_key =>
-        {
-            info!("gateway auth present: {status:?}");
-            Ok(())
-        }
-        Ok(Some(status)) => {
-            warn!("forced API key login requested; existing auth is incompatible: {status:?}");
-            let _ = gateway_auth_codex::logout_with_revoke_default_path().await;
-            interactive_login(Some(ForcedLoginMethod::ApiKey)).await
-        }
-        Ok(None) => {
-            warn!("forced API key login requested; no auth found");
-            interactive_login(Some(ForcedLoginMethod::ApiKey)).await
-        }
-        Err(err) => {
-            warn!("gateway auth check failed: {err}; forcing API key login");
-            interactive_login(Some(ForcedLoginMethod::ApiKey)).await
-        }
-    }
-}
-
-async fn validate_chatgpt_auth(
-    status: gateway_auth_codex::GatewayAuthStatus,
-    forced_login_method: Option<ForcedLoginMethod>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    info!("gateway auth present; validating ChatGPT auth: {status:?}");
-    let auth_manager = gateway_auth_codex::CodexAuthManager::default();
-    match auth_manager.refresh_and_persist_default_path().await {
-        Ok(snapshot) => {
-            info!(
-                "gateway auth health check succeeded for account_id={}",
-                snapshot.account_id
-            );
-            Ok(())
-        }
-        Err(err) => {
-            warn!("gateway auth health check failed; forcing login: {err}");
-            let _ = gateway_auth_codex::logout_with_revoke_default_path().await;
-            interactive_login(forced_login_method).await
-        }
-    }
-}
-
-async fn interactive_login(
-    forced_login_method: Option<ForcedLoginMethod>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    match forced_login_method {
-        Some(ForcedLoginMethod::Chatgpt) => {
-            gateway_auth_codex::login::login_with_chatgpt_and_write_default_auth_json().await?;
-            println!("\nLogin successful.\n");
-            Ok(())
-        }
-        Some(ForcedLoginMethod::ApiKey) => {
-            let api_key = prompt_api_key()?;
-            gateway_auth_codex::write_openai_api_key_default_path(&api_key)?;
-            println!("\nAPI key saved.\n");
-            Ok(())
-        }
-        None => {
-            let selection = tui_login::login_menu()?;
-            match selection {
-                LoginSelection::Chatgpt => {
-                    gateway_auth_codex::login::login_with_chatgpt_and_write_default_auth_json()
-                        .await?;
-                    println!("\nLogin successful.\n");
-                    Ok(())
+            info!("gateway auth present; validating ChatGPT auth: {status:?}");
+            let auth_manager = gateway_auth_codex::CodexAuthManager::default();
+            match auth_manager.refresh_and_persist_default_path().await {
+                Ok(snapshot) => {
+                    info!(
+                        "gateway auth health check succeeded for account_id={}",
+                        snapshot.account_id
+                    );
                 }
-                LoginSelection::ApiKey => {
-                    let api_key = prompt_api_key()?;
-                    gateway_auth_codex::write_openai_api_key_default_path(&api_key)?;
-                    println!("\nAPI key saved.\n");
-                    Ok(())
+                Err(err) => {
+                    warn!("gateway auth health check failed; continuing without auth: {err}");
                 }
             }
         }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LoginSelection {
-    Chatgpt,
-    ApiKey,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ForcedLoginMethod {
-    Chatgpt,
-    ApiKey,
-}
-
-fn forced_login_method_from_env() -> Result<Option<ForcedLoginMethod>, Box<dyn std::error::Error>> {
-    match std::env::var("GATEWAY_FORCED_LOGIN_METHOD") {
-        Ok(value) if value.eq_ignore_ascii_case("chatgpt") => Ok(Some(ForcedLoginMethod::Chatgpt)),
-        Ok(value) if value.eq_ignore_ascii_case("api") || value.eq_ignore_ascii_case("api_key") => {
-            Ok(Some(ForcedLoginMethod::ApiKey))
+        Ok(Some(status)) => {
+            warn!("gateway auth present but incomplete: {status:?}; continuing without auth");
         }
-        Ok(value) if value.trim().is_empty() => Ok(None),
-        Ok(value) => Err(format!(
-            "invalid GATEWAY_FORCED_LOGIN_METHOD value '{value}'; expected chatgpt or api"
-        )
-        .into()),
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(err) => Err(err.into()),
+        Ok(None) => {
+            warn!("gateway auth not found; continuing without auth");
+        }
+        Err(err) => {
+            warn!("gateway auth check failed: {err}; continuing without auth");
+        }
     }
 }
 
-fn prompt_api_key() -> Result<String, Box<dyn std::error::Error>> {
-    use std::io::Write as _;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    println!(
-        "\nPaste your OpenAI API key. This enables /v1/models; /v1/messages still requires ChatGPT login.\n"
-    );
-    print!("OPENAI_API_KEY: ");
-    std::io::stdout().flush()?;
-
-    let mut key = String::new();
-    std::io::stdin().read_line(&mut key)?;
-    let key = key.trim().to_string();
-    if key.is_empty() {
-        return Err("empty API key".into());
+    #[test]
+    fn test_bare_gateway_defaults_to_serve() {
+        let args = vec!["cld-gateway".to_string()];
+        let result = parse_command_from_args(&args);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Command::Serve);
     }
-    Ok(key)
+
+    #[test]
+    fn test_serve_command() {
+        let args = vec!["cld-gateway".to_string(), "serve".to_string()];
+        let result = parse_command_from_args(&args);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Command::Serve);
+    }
+
+    #[test]
+    fn test_login_defaults_to_openai() {
+        let args = vec!["cld-gateway".to_string(), "login".to_string()];
+        let result = parse_command_from_args(&args);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Command::Login(Vendor::OpenAI));
+    }
+
+    #[test]
+    fn test_login_openai() {
+        let args = vec![
+            "cld-gateway".to_string(),
+            "login".to_string(),
+            "openai".to_string(),
+        ];
+        let result = parse_command_from_args(&args);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Command::Login(Vendor::OpenAI));
+    }
+
+    #[test]
+    fn test_login_gemini() {
+        let args = vec![
+            "cld-gateway".to_string(),
+            "login".to_string(),
+            "gemini".to_string(),
+        ];
+        let result = parse_command_from_args(&args);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Command::Login(Vendor::Gemini));
+    }
+
+    #[test]
+    fn test_invalid_vendor_error() {
+        let args = vec![
+            "cld-gateway".to_string(),
+            "login".to_string(),
+            "invalid".to_string(),
+        ];
+        let result = parse_command_from_args(&args);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("unknown vendor"));
+    }
+
+    #[test]
+    fn test_unknown_command_error() {
+        let args = vec!["cld-gateway".to_string(), "unknown".to_string()];
+        let result = parse_command_from_args(&args);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("unknown command"));
+    }
+
+    #[test]
+    fn test_too_many_args_error() {
+        let args = vec![
+            "cld-gateway".to_string(),
+            "serve".to_string(),
+            "extra".to_string(),
+        ];
+        let result = parse_command_from_args(&args);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("too many arguments")
+        );
+    }
+
+    #[test]
+    fn test_vendor_enum_properties() {
+        // Confirm Vendor::OpenAI and Vendor::Gemini exist and are Copy/Clone/PartialEq
+        let v1 = Vendor::OpenAI;
+        let v2 = v1;
+        assert_eq!(v1, v2);
+        assert_ne!(v1, Vendor::Gemini);
+    }
 }

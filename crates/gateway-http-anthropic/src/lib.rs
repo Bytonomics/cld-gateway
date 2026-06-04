@@ -144,17 +144,27 @@ async fn health() -> impl IntoResponse {
 }
 
 async fn auth_status() -> impl IntoResponse {
-    match gateway_auth_codex::load_codex_auth_default_path() {
-        Ok(snap) => Json(serde_json::json!({
-            "logged_in": snap.has_access_token && snap.has_refresh_token,
-            "account_id": snap.account_id,
-            "expires_at_unix_seconds": snap.expires_at_unix_seconds,
+    match gateway_auth_codex::load_gateway_auth_status_default_path() {
+        Ok(Some(status)) => Json(serde_json::json!({
+            "logged_in": status.ready_for_messages(),
+            "account_id": status.account_id,
+            "login_method": match status.login_method {
+                gateway_auth_codex::GatewayLoginMethod::Chatgpt => "chatgpt",
+                gateway_auth_codex::GatewayLoginMethod::ApiKey => "api_key",
+            },
             "source": "gateway_auth_json",
+        })),
+        Ok(None) => Json(serde_json::json!({
+            "logged_in": false,
+            "account_id": null,
+            "login_method": null,
+            "source": "gateway_auth_json",
+            "auth_remediation": "Please run: cld-gateway login openai",
         })),
         Err(err) => Json(serde_json::json!({
             "logged_in": false,
             "account_id": null,
-            "expires_at_unix_seconds": null,
+            "login_method": null,
             "source": "error",
             "error_type": format!("{err}"),
             "auth_remediation": "Please run: cld-gateway login openai",
@@ -438,10 +448,15 @@ async fn run_backend_unary(
         .send_streaming_with_refresh_retry(&state.auth, backend_req)
         .await
         .map_err(|err| {
+            // Check if this is an auth failure (e.g., permanent refresh failure)
+            let err_str = err.to_string();
+            if err_str.contains("refresh") || err_str.contains("auth") {
+                return auth_error(&err_str);
+            }
             (
                 StatusCode::BAD_GATEWAY,
                 Json(serde_json::json!({
-                    "error": { "type": "backend_error", "message": format!("{err}") }
+                    "error": { "type": "backend_error", "message": err_str }
                 })),
             )
                 .into_response()
@@ -1372,6 +1387,128 @@ mod messages_tests {
                 .and_then(|v| v.as_str()),
             Some("Please run: cld-gateway login openai")
         );
+    }
+
+    #[tokio::test]
+    async fn test_auth_status_missing_auth_returns_remediation() {
+        // Temporarily move the default auth file if it exists, to ensure we test the missing auth case
+        let default_auth_path = gateway_auth_codex::paths::default_auth_json_path();
+        let backup_path = default_auth_path.with_extension("json.backup");
+
+        // Move existing auth file to backup
+        let moved_backup = if default_auth_path.exists() {
+            let _ = std::fs::rename(&default_auth_path, &backup_path);
+            true
+        } else {
+            false
+        };
+
+        // Delete the auth file to ensure missing state
+        let _ = std::fs::remove_file(&default_auth_path);
+
+        let app = super::router(super::AppState::default());
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/auth/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(
+            json.get("logged_in").and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            json.get("auth_remediation").and_then(|v| v.as_str()),
+            Some("Please run: cld-gateway login openai")
+        );
+
+        // Restore the backup if we moved one
+        if moved_backup {
+            let _ = std::fs::rename(&backup_path, &default_auth_path);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_refresh_failure_returns_remediation() {
+        if std::env::var("RUN_WIREMOCK").ok().as_deref() != Some("1") {
+            return;
+        }
+
+        let auth_path = write_temp_auth_json();
+        let mock = MockServer::start().await;
+
+        // Mock any POST to codex/responses to return 401
+        Mock::given(method("POST"))
+            .and(path("/backend-api/codex/responses"))
+            .respond_with(
+                ResponseTemplate::new(401)
+                    .set_body_json(serde_json::json!({"error": "refresh_required"})),
+            )
+            .mount(&mock)
+            .await;
+
+        let base_url = url::Url::parse(&mock.uri()).expect("mock url");
+        let state = super::AppState {
+            backend: gateway_backend_codex::client::CodexBackendClient::default()
+                .with_base_url(&base_url),
+            auth_json_path: Some(auth_path.clone()),
+            ..super::AppState::default()
+        };
+
+        let app = super::router(state);
+        let req_body = serde_json::json!({
+            "model": DEFAULT_BACKEND_MODEL,
+            "stream": false,
+            "messages": [{ "role": "user", "content": "hello" }]
+        });
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .body(Body::from(req_body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // When backend returns 401, gateway should return 401 with remediation
+        assert_eq!(
+            res.status(),
+            StatusCode::UNAUTHORIZED,
+            "expected 401 when backend returns 401, got {}",
+            res.status()
+        );
+        let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(
+            json.get("error")
+                .and_then(|e| e.get("type"))
+                .and_then(|v| v.as_str()),
+            Some("auth_error"),
+            "expected auth_error type in response, got: {json:?}"
+        );
+        assert_eq!(
+            json.get("error")
+                .and_then(|e| e.get("auth_remediation"))
+                .and_then(|v| v.as_str()),
+            Some("Please run: cld-gateway login openai"),
+            "expected remediation message in error response, got: {json:?}"
+        );
+
+        let _ = std::fs::remove_file(&auth_path);
     }
 }
 

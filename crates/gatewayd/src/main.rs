@@ -87,7 +87,8 @@ fn parse_command_from_args(args: &[String]) -> Result<Command, Box<dyn std::erro
 
 async fn run_serve() -> Result<(), Box<dyn std::error::Error>> {
     // Non-interactive auth preflight: attempt refresh if auth exists, but do not block startup.
-    auth_preflight_for_serve().await;
+    // For now, OpenAI is the default vendor in serve mode.
+    auth_preflight_for_serve(Vendor::OpenAI).await;
 
     let config = CaptureConfig::default();
     let app = gateway_http_anthropic::router(AppState::from_env()?).layer(
@@ -105,7 +106,16 @@ async fn run_serve() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn auth_preflight_for_serve() {
+async fn auth_preflight_for_serve(vendor: Vendor) {
+    match vendor {
+        Vendor::OpenAI => auth_preflight_openai().await,
+        Vendor::Gemini => {
+            info!("Gemini auth is not yet configured for serve mode; skipping preflight");
+        }
+    }
+}
+
+async fn auth_preflight_openai() {
     let auth_status = gateway_auth_codex::load_gateway_auth_status_default_path();
 
     match auth_status {

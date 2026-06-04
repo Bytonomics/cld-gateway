@@ -2,15 +2,17 @@
 
 use crate::types::{CodexBackendRequest, CodexBackendResponse};
 use gateway_auth_codex::CodexAuthManager;
+use gateway_core::format_error_chain;
 use reqwest::Response;
 use std::time::Duration;
 use url::Url;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BackendError {
-    #[error("request failed during {stage}: {source}")]
+    #[error("request failed during {stage}: {message}")]
     RequestFailed {
         stage: &'static str,
+        message: String,
         #[source]
         source: reqwest::Error,
     },
@@ -29,6 +31,7 @@ pub enum BackendError {
 pub struct CodexBackendClient {
     http: reqwest::Client,
     base_url: String,
+    request_timeout: Option<Duration>,
 }
 
 impl Default for CodexBackendClient {
@@ -36,6 +39,7 @@ impl Default for CodexBackendClient {
         Self {
             http: reqwest::Client::new(),
             base_url: "https://chatgpt.com".to_string(),
+            request_timeout: None,
         }
     }
 }
@@ -45,6 +49,17 @@ impl CodexBackendClient {
     pub fn with_base_url(mut self, base_url: &Url) -> Self {
         self.base_url = base_url.to_string();
         self
+    }
+
+    #[must_use]
+    pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = Some(timeout);
+        self
+    }
+
+    #[must_use]
+    pub fn request_timeout(&self) -> Option<Duration> {
+        self.request_timeout
     }
 
     /// Sends a request to the Codex backend.
@@ -61,10 +76,7 @@ impl CodexBackendClient {
         let body_text = res
             .text()
             .await
-            .map_err(|source| BackendError::RequestFailed {
-                stage: "read response body",
-                source,
-            })?;
+            .map_err(|source| request_failed("read response body", source))?;
 
         Ok(CodexBackendResponse {
             status,
@@ -90,7 +102,7 @@ impl CodexBackendClient {
 
         let body = build_request_body(req);
 
-        let res = self
+        let mut builder = self
             .http
             .post(url)
             .header(
@@ -100,15 +112,17 @@ impl CodexBackendClient {
             .header("chatgpt-account-id", &req.account_id)
             .header("OpenAI-Beta", "responses=experimental")
             .header("originator", "codex_cli_rs")
-            .header(reqwest::header::ACCEPT, "text/event-stream")
-            .timeout(Duration::from_mins(1))
+            .header(reqwest::header::ACCEPT, "text/event-stream");
+
+        if let Some(timeout) = self.request_timeout {
+            builder = builder.timeout(timeout);
+        }
+
+        let res = builder
             .json(&body)
             .send()
             .await
-            .map_err(|source| BackendError::RequestFailed {
-                stage: "send request",
-                source,
-            })?;
+            .map_err(|source| request_failed("send request", source))?;
 
         let status = res.status().as_u16();
         if status >= 300 {
@@ -217,6 +231,15 @@ impl CodexBackendClient {
     }
 }
 
+fn request_failed(stage: &'static str, source: reqwest::Error) -> BackendError {
+    let message = format_error_chain(&source);
+    BackendError::RequestFailed {
+        stage,
+        message,
+        source,
+    }
+}
+
 fn truncate_error_body(body: &str) -> String {
     const MAX: usize = 8 * 1024;
     if body.len() <= MAX {
@@ -285,4 +308,22 @@ fn build_request_body(req: &CodexBackendRequest) -> serde_json::Value {
     }
 
     serde_json::Value::Object(obj)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CodexBackendClient;
+    use std::time::Duration;
+
+    #[test]
+    fn default_client_has_no_total_request_timeout() {
+        assert_eq!(CodexBackendClient::default().request_timeout(), None);
+    }
+
+    #[test]
+    fn request_timeout_can_be_configured() {
+        let timeout = Duration::from_secs(123);
+        let client = CodexBackendClient::default().with_request_timeout(timeout);
+        assert_eq!(client.request_timeout(), Some(timeout));
+    }
 }

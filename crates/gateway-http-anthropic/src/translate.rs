@@ -500,15 +500,18 @@ fn translate_output_config(
 mod tests {
     use super::*;
     use gateway_backend_codex::types::CodexToolCallKind;
+    use gateway_core::DEFAULT_BACKEND_MODEL;
 
     fn fixture(path: &str) -> String {
         let full = format!("{}/tests/fixtures/{}", env!("CARGO_MANIFEST_DIR"), path);
-        std::fs::read_to_string(full).expect("read fixture")
+        std::fs::read_to_string(full)
+            .expect("read fixture")
+            .replace("__DEFAULT_BACKEND_MODEL__", DEFAULT_BACKEND_MODEL)
     }
 
     fn base_req() -> AnthropicMessagesRequest {
         AnthropicMessagesRequest {
-            model: "gpt-5.2".to_string(),
+            model: DEFAULT_BACKEND_MODEL.to_string(),
             messages: Vec::new(),
             system: Vec::new(),
             stream: false,

@@ -7,12 +7,15 @@ use eventsource_stream::EventStreamError;
 use eventsource_stream::Eventsource as _;
 use futures_util::Stream;
 use futures_util::StreamExt as _;
+use gateway_core::format_error_chain;
 use serde::Deserialize;
+use std::error::Error;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SseDecodeError {
-    #[error("event stream error")]
+    #[error("event stream error: {message}")]
     EventStream {
+        message: String,
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
@@ -36,7 +39,7 @@ pub async fn read_sse_to_completion<S, E>(
 ) -> Result<CodexUnaryDecoded, SseDecodeError>
 where
     S: Stream<Item = Result<Bytes, E>> + Send,
-    E: std::fmt::Debug + std::fmt::Display + Send + Sync + 'static,
+    E: Error + Send + Sync + 'static,
 {
     let mut event_stream = Box::pin(byte_stream.eventsource());
     let mut last_text: Option<String> = None;
@@ -44,9 +47,7 @@ where
     let mut last_usage: Option<CodexTokenUsage> = None;
 
     while let Some(item) = event_stream.next().await {
-        let event = item.map_err(|e: EventStreamError<E>| SseDecodeError::EventStream {
-            source: Box::new(e),
-        })?;
+        let event = item.map_err(event_stream_decode_error)?;
         let data = event.data.trim();
 
         if data.is_empty() {
@@ -142,6 +143,30 @@ fn extract_usage_from_completed_event(data: &str) -> Option<CodexTokenUsage> {
     })
 }
 
+fn event_stream_decode_error<E>(source: EventStreamError<E>) -> SseDecodeError
+where
+    E: Error + Send + Sync + 'static,
+{
+    let message = format_event_stream_error(&source);
+    SseDecodeError::EventStream {
+        message,
+        source: Box::new(source),
+    }
+}
+
+#[must_use]
+pub fn format_event_stream_error<E>(error: &EventStreamError<E>) -> String
+where
+    E: Error + Send + Sync + 'static,
+{
+    match error {
+        EventStreamError::Transport(source) => {
+            format!("Transport error: {}", format_error_chain(source))
+        }
+        EventStreamError::Utf8(_) | EventStreamError::Parser(_) => format_error_chain(error),
+    }
+}
+
 fn upsert_tool_call(tool_calls: &mut Vec<CodexToolCall>, tool_call: CodexToolCall) {
     if let Some(existing) = tool_calls
         .iter_mut()
@@ -204,10 +229,12 @@ fn extract_last_text_from_value(value: &serde_json::Value, last: &mut Option<Str
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_last_text_from_data, extract_usage_from_completed_event, read_sse_to_completion,
+        extract_last_text_from_data, extract_usage_from_completed_event, format_event_stream_error,
+        read_sse_to_completion,
     };
     use crate::types::CodexToolCallKind;
     use bytes::Bytes;
+    use eventsource_stream::EventStreamError;
     use futures_util::stream;
 
     #[test]
@@ -220,6 +247,15 @@ mod tests {
     fn json_data_extracts_text_field() {
         let got = extract_last_text_from_data(r#"{"text":"hi"}"#);
         assert_eq!(got.as_deref(), Some("hi"));
+    }
+
+    #[test]
+    fn event_stream_transport_error_includes_underlying_error() {
+        let err = EventStreamError::Transport(std::io::Error::other("socket closed"));
+        assert_eq!(
+            format_event_stream_error(&err),
+            "Transport error: socket closed"
+        );
     }
 
     #[tokio::test]

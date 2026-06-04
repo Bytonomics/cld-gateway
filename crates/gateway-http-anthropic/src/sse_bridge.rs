@@ -511,6 +511,7 @@ mod tests {
     use eventsource_stream::Eventsource as _;
     use futures_util::StreamExt as _;
     use futures_util::stream;
+    use gateway_core::DEFAULT_BACKEND_MODEL;
     use std::convert::Infallible;
     use uuid::Uuid;
 
@@ -540,7 +541,9 @@ mod tests {
 
     fn fixture(path: &str) -> String {
         let full = format!("{}/tests/fixtures/{}", env!("CARGO_MANIFEST_DIR"), path);
-        std::fs::read_to_string(full).expect("read fixture")
+        std::fs::read_to_string(full)
+            .expect("read fixture")
+            .replace("__DEFAULT_BACKEND_MODEL__", DEFAULT_BACKEND_MODEL)
     }
 
     fn parse_expected_jsonl(path: &str) -> Vec<(String, serde_json::Value)> {
@@ -686,7 +689,7 @@ mod tests {
     #[tokio::test]
     async fn streaming_bridge_matches_text_only_fixture() {
         let backend = fixture("streaming/backend_stream_text_only.sse");
-        let got = run_bridge_and_capture(&backend, "gpt-5.2", None).await;
+        let got = run_bridge_and_capture(&backend, DEFAULT_BACKEND_MODEL, None).await;
         let expected = parse_expected_jsonl("streaming/expected_anthropic_text_only.jsonl");
         assert_eq!(got, expected);
     }
@@ -694,7 +697,7 @@ mod tests {
     #[tokio::test]
     async fn streaming_bridge_matches_tool_call_fixture_and_sanitizes_args() {
         let backend = fixture("streaming/backend_stream_tool_call.sse");
-        let got = run_bridge_and_capture(&backend, "gpt-5.2", Some("rid_TEST")).await;
+        let got = run_bridge_and_capture(&backend, DEFAULT_BACKEND_MODEL, Some("rid_TEST")).await;
         let expected = parse_expected_jsonl("streaming/expected_anthropic_tool_call.jsonl");
         assert_eq!(got, expected);
     }
@@ -702,7 +705,7 @@ mod tests {
     #[tokio::test]
     async fn streaming_bridge_matches_custom_tool_call_fixture() {
         let backend = fixture("streaming/backend_stream_custom_tool_call.sse");
-        let got = run_bridge_and_capture(&backend, "gpt-5.2", Some("rid_TEST")).await;
+        let got = run_bridge_and_capture(&backend, DEFAULT_BACKEND_MODEL, Some("rid_TEST")).await;
         let expected = parse_expected_jsonl("streaming/expected_anthropic_custom_tool_call.jsonl");
         assert_eq!(got, expected);
     }
@@ -710,7 +713,7 @@ mod tests {
     #[tokio::test]
     async fn streaming_bridge_matches_tool_search_call_fixture() {
         let backend = fixture("streaming/backend_stream_tool_search_call.sse");
-        let got = run_bridge_and_capture(&backend, "gpt-5.2", Some("rid_TEST")).await;
+        let got = run_bridge_and_capture(&backend, DEFAULT_BACKEND_MODEL, Some("rid_TEST")).await;
         let expected = parse_expected_jsonl("streaming/expected_anthropic_tool_search_call.jsonl");
         assert_eq!(got, expected);
     }
@@ -718,7 +721,7 @@ mod tests {
     #[tokio::test]
     async fn streaming_bridge_matches_local_shell_call_fixture() {
         let backend = fixture("streaming/backend_stream_local_shell_call.sse");
-        let got = run_bridge_and_capture(&backend, "gpt-5.2", Some("rid_TEST")).await;
+        let got = run_bridge_and_capture(&backend, DEFAULT_BACKEND_MODEL, Some("rid_TEST")).await;
         let expected = parse_expected_jsonl("streaming/expected_anthropic_local_shell_call.jsonl");
         assert_eq!(got, expected);
     }

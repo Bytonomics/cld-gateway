@@ -15,7 +15,7 @@ Important constraints:
 
 ```json
 {
-  "model": "gpt-5.2",
+  "model": "gpt-5.4",
   "stream": true,
   "max_tokens": 32000,
   "temperature": 1,
@@ -66,7 +66,7 @@ Supported content blocks we parse today:
 
 ```json
 {
-  "model": "gpt-5.2",
+  "model": "gpt-5.4",
   "instructions": "You are Claude Code, Anthropic's official CLI for Claude.",
   "input": [
     {

@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use gateway_core::Secret;
+use gateway_core::{DEFAULT_BACKEND_MODEL, Secret};
 use wiremock::matchers::{body_json, header, header_exists, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -20,7 +20,7 @@ async fn sends_required_headers_and_minimal_body() {
         .and(header("originator", "codex_cli_rs"))
         .and(header("accept", "text/event-stream"))
         .and(body_json(serde_json::json!({
-            "model": "gpt-5.2",
+            "model": DEFAULT_BACKEND_MODEL,
             "instructions": "You are a helpful assistant.",
             "input": [
                 {
@@ -48,7 +48,7 @@ async fn sends_required_headers_and_minimal_body() {
     let req = gateway_backend_codex::types::CodexBackendRequest {
         access_token: Secret::new("access_test".to_string()),
         account_id: "acct_test_123".to_string(),
-        model: "gpt-5.2".to_string(),
+        model: DEFAULT_BACKEND_MODEL.to_string(),
         instructions: "You are a helpful assistant.".to_string(),
         input: vec![serde_json::json!({
             "role": "user",

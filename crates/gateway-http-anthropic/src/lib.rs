@@ -22,7 +22,8 @@ use gateway_core::model_map::ModelResolution;
 use gateway_core::model_map::resolve_model;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use tracing::info;
+use std::time::Duration;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 #[cfg(test)]
@@ -59,7 +60,9 @@ impl AppState {
                     .ok()
                     .flatten()
             });
+        let backend = backend_client_from_env();
         Self {
+            backend,
             openai_models_url: "https://api.openai.com/v1/models".to_string(),
             openai_api_key,
             ..Self::default()
@@ -78,6 +81,30 @@ impl AppState {
     fn with_openai_api_key(mut self, key: &str) -> Self {
         self.openai_api_key = Some(Secret::new(key.to_string()));
         self
+    }
+}
+
+fn backend_client_from_env() -> gateway_backend_codex::client::CodexBackendClient {
+    let client = gateway_backend_codex::client::CodexBackendClient::default();
+    match backend_request_timeout_from_env() {
+        Some(timeout) => client.with_request_timeout(timeout),
+        None => client,
+    }
+}
+
+fn backend_request_timeout_from_env() -> Option<Duration> {
+    let raw = std::env::var("GATEWAY_BACKEND_REQUEST_TIMEOUT_SECS").ok()?;
+    match raw.parse::<u64>() {
+        Ok(0) => None,
+        Ok(seconds) => Some(Duration::from_secs(seconds)),
+        Err(err) => {
+            warn!(
+                value = raw.as_str(),
+                error = %err,
+                "ignoring invalid GATEWAY_BACKEND_REQUEST_TIMEOUT_SECS"
+            );
+            None
+        }
     }
 }
 
@@ -686,9 +713,13 @@ fn backend_sse_to_anthropic_events(
                         Ok(e) => e,
                         Err(e) => {
                             st.completed = true;
+                            let message = format!(
+                                "event stream error: {}",
+                                gateway_backend_codex::sse_unary::format_event_stream_error(&e)
+                            );
                             let payload = serde_json::json!({
                                 "type": "error",
-                                "error": { "type": "upstream_error", "message": format!("{e}") }
+                                "error": { "type": "upstream_error", "message": message }
                             })
                             .to_string();
                             return Some(vec![Event::default().event("error").data(payload)]);
@@ -812,6 +843,7 @@ mod messages_tests {
     use axum::body::to_bytes;
     use axum::http::Request;
     use gateway_backend_codex::types::{CodexToolCall, CodexToolCallKind};
+    use gateway_core::DEFAULT_BACKEND_MODEL;
     use gateway_state::ToolCallStore;
     use tower::ServiceExt as _;
     use wiremock::matchers::{header, method, path};
@@ -819,7 +851,9 @@ mod messages_tests {
 
     fn fixture(path: &str) -> String {
         let full = format!("{}/tests/fixtures/{}", env!("CARGO_MANIFEST_DIR"), path);
-        std::fs::read_to_string(full).expect("read fixture")
+        std::fs::read_to_string(full)
+            .expect("read fixture")
+            .replace("__DEFAULT_BACKEND_MODEL__", DEFAULT_BACKEND_MODEL)
     }
 
     fn translate_request(req: &AnthropicMessagesRequest) -> Result<TranslateResult, String> {
@@ -888,7 +922,7 @@ mod messages_tests {
     #[test]
     fn translation_accepts_string_and_blocks_text() {
         let req = AnthropicMessagesRequest {
-            model: "gpt-5.2".to_string(),
+            model: DEFAULT_BACKEND_MODEL.to_string(),
             messages: vec![
                 AnthropicMessage {
                     role: "system".to_string(),
@@ -1026,7 +1060,7 @@ mod messages_tests {
         };
 
         let mut req = AnthropicMessagesRequest {
-            model: "gpt-5.2".to_string(),
+            model: DEFAULT_BACKEND_MODEL.to_string(),
             messages: Vec::new(),
             system: Vec::new(),
             stream: false,
@@ -1096,7 +1130,7 @@ mod messages_tests {
 
         let app = super::router(state);
         let req_body = serde_json::json!({
-            "model": "gpt-5.2",
+            "model": DEFAULT_BACKEND_MODEL,
             "stream": true,
             "messages": [{ "role": "user", "content": "hi" }]
         });
@@ -1172,7 +1206,7 @@ mod messages_tests {
 
         let app = super::router(state);
         let req_body = serde_json::json!({
-            "model": "gpt-5.2",
+            "model": DEFAULT_BACKEND_MODEL,
             "stream": false,
             "messages": [{ "role": "user", "content": "call a tool" }]
         });
@@ -1212,6 +1246,7 @@ mod models_api_tests {
     use super::{AppState, router};
     use axum::body::{Body, to_bytes};
     use axum::http::Request;
+    use gateway_core::DEFAULT_BACKEND_MODEL;
     use tower::ServiceExt as _;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1226,10 +1261,10 @@ mod models_api_tests {
         Mock::given(method("GET"))
             .and(path("/v1/models"))
             .and(header("authorization", "Bearer test-key"))
-            .respond_with(ResponseTemplate::new(200).set_body_raw(
-                r#"{"object":"list","data":[{"id":"gpt-5.2"},{"id":"gpt-5.2-codex"}]}"#,
-                "application/json",
-            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "object": "list",
+                "data": [{"id": DEFAULT_BACKEND_MODEL}]
+            })))
             .mount(&mock)
             .await;
 
@@ -1258,9 +1293,6 @@ mod models_api_tests {
             .map(|v| v["id"].as_str().unwrap().to_string())
             .collect();
 
-        assert_eq!(
-            ids,
-            vec!["gpt-5.2".to_string(), "gpt-5.2-codex".to_string()]
-        );
+        assert_eq!(ids, vec![DEFAULT_BACKEND_MODEL.to_string()]);
     }
 }

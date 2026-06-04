@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use crate::{DEFAULT_BACKEND_MODEL, UNSUPPORTED_BACKEND_MODELS};
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ModelMap {
     #[serde(default = "default_backend_model")]
@@ -13,7 +15,7 @@ pub struct ModelMap {
 }
 
 fn default_backend_model() -> String {
-    "gpt-5.2".to_string()
+    DEFAULT_BACKEND_MODEL.to_string()
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -72,6 +74,14 @@ impl ModelMap {
 
 #[must_use]
 pub fn resolve_model(requested: &str) -> ModelResolution {
+    if UNSUPPORTED_BACKEND_MODELS.contains(&requested) {
+        return ModelResolution {
+            requested: requested.to_string(),
+            selected_backend_model: DEFAULT_BACKEND_MODEL.to_string(),
+            selection_reason: "unsupported_model_compat_override",
+        };
+    }
+
     ModelResolution {
         requested: requested.to_string(),
         selected_backend_model: requested.to_string(),
@@ -81,13 +91,22 @@ pub fn resolve_model(requested: &str) -> ModelResolution {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_model;
+    use super::{DEFAULT_BACKEND_MODEL, UNSUPPORTED_BACKEND_MODELS, resolve_model};
 
     #[test]
     fn always_passes_through_requested_model() {
-        let res = resolve_model("gpt-5.4");
-        assert_eq!(res.requested, "gpt-5.4");
-        assert_eq!(res.selected_backend_model, "gpt-5.4");
+        let res = resolve_model(DEFAULT_BACKEND_MODEL);
+        assert_eq!(res.requested, DEFAULT_BACKEND_MODEL);
+        assert_eq!(res.selected_backend_model, DEFAULT_BACKEND_MODEL);
         assert_eq!(res.selection_reason, "passthrough");
+    }
+
+    #[test]
+    fn overrides_unsupported_gpt_5_2() {
+        let unsupported_model = UNSUPPORTED_BACKEND_MODELS[0];
+        let res = resolve_model(unsupported_model);
+        assert_eq!(res.requested, unsupported_model);
+        assert_eq!(res.selected_backend_model, DEFAULT_BACKEND_MODEL);
+        assert_eq!(res.selection_reason, "unsupported_model_compat_override");
     }
 }

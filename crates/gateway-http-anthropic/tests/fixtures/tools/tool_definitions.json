@@ -1,5 +1,5 @@
 {
-  "model": "gpt-5.2",
+  "model": "gpt-5.4",
   "stream": false,
   "system": [
     { "type": "text", "text": "You are a helpful assistant." }

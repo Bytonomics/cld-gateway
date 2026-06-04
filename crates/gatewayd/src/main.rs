@@ -31,7 +31,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }),
     );
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:8080").await?;
+    let listen_addr =
+        std::env::var("CLD_GATEWAY_LISTEN_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
+    let listener = tokio::net::TcpListener::bind(&listen_addr).await?;
+    info!("Listening on {listen_addr}");
     axum::serve(listener, app).await?;
     Ok(())
 }

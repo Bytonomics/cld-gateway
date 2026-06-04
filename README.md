@@ -1,0 +1,138 @@
+# cld-gateway
+
+An Anthropic-compatible HTTP proxy that routes requests through the ChatGPT/Codex backend.
+
+---
+
+## Installation
+
+### Homebrew tap (planned)
+
+```sh
+brew tap bytonomics/tap
+brew install cld-gateway
+```
+
+> **Note:** Homebrew tap is planned. Subscribe to releases for updates.
+
+### Shell installer
+
+```sh
+curl -fsSL https://github.com/bytonomics/gateway/releases/latest/download/install.sh | sh
+```
+
+Or with version pinning:
+
+```sh
+curl -fsSL https://github.com/bytonomics/gateway/releases/latest/download/install.sh | sh -s -- --release 0.1.0
+```
+
+### Direct download
+
+Download pre-built binaries from the [GitHub Releases page](https://github.com/bytonomics/gateway/releases).
+
+Verify checksums using `cld-gateway-package_SHA256SUMS`, which is published alongside every release.
+
+---
+
+## Running the gateway
+
+```sh
+cld-gateway
+```
+
+On first run, `cld-gateway` will open a browser window to authenticate with ChatGPT/OpenAI. Auth credentials are stored at `~/.gateway/auth.json` and reused on subsequent runs.
+
+### Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `CLD_GATEWAY_LISTEN_ADDR` | `127.0.0.1:8080` | Listen address and port |
+| `GATEWAY_HOME` | `~/.gateway` | Override all default `~/.gateway` paths at once |
+| `GATEWAY_AUTH_JSON_PATH` | `~/.gateway/auth.json` | Auth credentials file path |
+| `CLD_GATEWAY_AUTH_PORT` | `1455` | OAuth callback port |
+| `CLD_GATEWAY_LOG_PATH` | `~/.gateway/logs/http-exchange.jsonl` | Exchange log file path |
+| `CLD_GATEWAY_STATE_DB_PATH` | `~/.gateway/state/tool_calls.sqlite` | Tool-call state DB path |
+| `GATEWAY_CONFIG_PATH` | `~/.gateway/config.json` | Gateway config file path |
+
+---
+
+## Side-by-side dev and release
+
+You can run a dev build and a release build simultaneously by pointing each at different ports and data directories:
+
+```sh
+# Release build (default ports/paths)
+cld-gateway
+
+# Dev build (different port and paths)
+CLD_GATEWAY_LISTEN_ADDR=127.0.0.1:8081 \
+GATEWAY_HOME=~/.gateway-dev \
+cld-gateway-dev
+```
+
+---
+
+## Supported endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/health` | Health check |
+| `GET` | `/auth/status` | Auth status |
+| `POST` | `/auth/refresh` | Force auth token refresh |
+| `GET` | `/v1/models` | List models (Anthropic-compatible) |
+| `POST` | `/v1/messages` | Create message (Anthropic-compatible, streaming supported) |
+
+---
+
+## Auth
+
+On first run, `cld-gateway` opens a browser window for ChatGPT/OpenAI OAuth login. After completing login, credentials are stored at `~/.gateway/auth.json`.
+
+On subsequent runs, the stored credentials are loaded automatically. If a request to the upstream backend returns a 401, the gateway refreshes the token automatically and retries the request — no manual intervention needed.
+
+To override the auth file location, set `GATEWAY_AUTH_JSON_PATH` or `GATEWAY_HOME`.
+
+---
+
+## Logs and debugging
+
+Exchange logs are written to:
+
+```
+~/.gateway/logs/http-exchange.jsonl
+```
+
+Every proxied request receives an `x-proxy-request-id` response header that you can use to correlate request and response entries in the log.
+
+To follow the log in real time:
+
+```sh
+tail -f ~/.gateway/logs/http-exchange.jsonl
+```
+
+If the log shows a `backend_error` or transport failure, the issue is upstream of the gateway (connectivity or auth). Start there before looking at request translation.
+
+---
+
+## Unsupported features
+
+Some Anthropic API fields are accepted and parsed by the gateway but intentionally not forwarded to the upstream backend. See [UNSUPPORTED.md](UNSUPPORTED.md) for the full list and rationale.
+
+Current no-ops include `top_k` and `stop_sequences`.
+
+---
+
+## Building from source
+
+Release binary:
+
+```sh
+cargo build --release -p gatewayd --bin cld-gateway
+```
+
+Run locally (with checks):
+
+```sh
+make check && cargo run -p gatewayd --bin cld-gateway
+```

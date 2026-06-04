@@ -141,12 +141,36 @@ fn ensure_tool_kind_column(conn: &rusqlite::Connection) -> Result<(), StateError
 }
 
 fn default_gateway_dir() -> Result<PathBuf, StateError> {
+    if let Ok(gateway_home) = std::env::var("GATEWAY_HOME") {
+        return Ok(PathBuf::from(gateway_home));
+    }
     let home = dirs::home_dir().ok_or(StateError::NoHomeDir)?;
     Ok(home.join(".gateway"))
 }
 
 fn default_tool_calls_db_path() -> Result<PathBuf, StateError> {
+    if let Ok(path) = std::env::var("CLD_GATEWAY_STATE_DB_PATH") {
+        return Ok(PathBuf::from(path));
+    }
     Ok(default_gateway_dir()?
+        .join("state")
+        .join("tool_calls.sqlite"))
+}
+
+#[cfg(test)]
+fn resolve_tool_calls_db_path(
+    explicit_db_path: Option<&str>,
+    gateway_home: Option<&str>,
+) -> Result<PathBuf, StateError> {
+    if let Some(path) = explicit_db_path {
+        return Ok(PathBuf::from(path));
+    }
+    if let Some(home) = gateway_home {
+        return Ok(PathBuf::from(home).join("state").join("tool_calls.sqlite"));
+    }
+    let home = dirs::home_dir().ok_or(StateError::NoHomeDir)?;
+    Ok(home
+        .join(".gateway")
         .join("state")
         .join("tool_calls.sqlite"))
 }
@@ -205,5 +229,34 @@ mod tests {
             .expect("read")
             .expect("stored call");
         assert_eq!(stored.tool_kind, "function_call");
+    }
+
+    #[test]
+    fn explicit_db_path_overrides_all() {
+        let result = resolve_tool_calls_db_path(Some("/explicit/db.sqlite"), Some("/some/home"))
+            .expect("path");
+        assert_eq!(result, PathBuf::from("/explicit/db.sqlite"));
+    }
+
+    #[test]
+    fn gateway_home_used_when_no_explicit_db_path() {
+        let result = resolve_tool_calls_db_path(None, Some("/custom/gateway")).expect("path");
+        assert_eq!(
+            result,
+            PathBuf::from("/custom/gateway/state/tool_calls.sqlite")
+        );
+    }
+
+    #[test]
+    fn falls_back_to_default_db_path_when_no_env_vars() {
+        let result = resolve_tool_calls_db_path(None, None).expect("path");
+        assert!(
+            result.to_string_lossy().contains(".gateway"),
+            "expected .gateway in path: {result:?}"
+        );
+        assert!(
+            result.to_string_lossy().ends_with("tool_calls.sqlite"),
+            "expected tool_calls.sqlite suffix: {result:?}"
+        );
     }
 }

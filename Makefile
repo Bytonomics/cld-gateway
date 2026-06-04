@@ -1,7 +1,10 @@
-.PHONY: check fmt-check fmt-fix clippy test metadata tree
+.PHONY: check fmt-check fmt-fix clippy test test-release-scripts metadata tree
 .PHONY: verify-test
 
-check: fmt-check clippy test
+check: fmt-check clippy test test-release-scripts
+
+test-release-scripts:
+	uv run --project scripts/release pytest scripts/release/test/
 
 fmt-check:
 	cargo fmt --check

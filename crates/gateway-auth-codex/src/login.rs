@@ -93,10 +93,18 @@ fn parse_query_params(raw_url: &str) -> HashMap<String, String> {
     out
 }
 
+fn preferred_callback_port() -> u16 {
+    std::env::var("CLD_GATEWAY_AUTH_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_PORT)
+}
+
 fn bind_callback_server() -> io::Result<(Server, u16)> {
-    let preferred = format!("127.0.0.1:{DEFAULT_PORT}");
+    let preferred_port = preferred_callback_port();
+    let preferred = format!("127.0.0.1:{preferred_port}");
     if let Ok(server) = Server::http(&preferred) {
-        Ok((server, DEFAULT_PORT))
+        Ok((server, preferred_port))
     } else {
         let fallback = format!("127.0.0.1:{FALLBACK_PORT}");
         let server = Server::http(&fallback).map_err(io::Error::other)?;

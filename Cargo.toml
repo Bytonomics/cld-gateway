@@ -12,6 +12,7 @@ members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]
+version = "0.1.0"
 # Default Rust edition for all member crates that opt into edition.workspace = true.
 # (Each crate can still override if needed, but we want consistency.)
 edition = "2024"

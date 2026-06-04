@@ -30,6 +30,7 @@ pub enum BackendError {
 #[derive(Clone)]
 pub struct CodexBackendClient {
     http: reqwest::Client,
+
     base_url: String,
     request_timeout: Option<Duration>,
 }

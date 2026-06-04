@@ -1,6 +1,6 @@
 [package]
 name = "gatewayd"
-version = "0.0.0"
+version.workspace = true
 edition.workspace = true
 
 [lints]
@@ -16,3 +16,7 @@ tracing-subscriber.workspace = true
 tracing.workspace = true
 crossterm.workspace = true
 ratatui.workspace = true
+
+[[bin]]
+name = "cld-gateway"
+path = "src/main.rs"

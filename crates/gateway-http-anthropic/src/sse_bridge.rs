@@ -1,17 +1,13 @@
 #![forbid(unsafe_code)]
 
 use axum::response::sse::Event;
+use gateway_backend_codex::sse_unary::extract_usage_from_completed_event;
 use gateway_backend_codex::tool_calls::parse_output_item_tool_call;
-use gateway_backend_codex::types::{CodexToolCall, CodexToolCallKind};
+use gateway_backend_codex::types::{CodexTokenUsage, CodexToolCall, CodexToolCallKind};
 use gateway_state::ToolCallStore;
 use std::collections::HashMap;
 
 use crate::tool_arg_policy::sanitized_tool_args_for_kind;
-
-#[derive(Debug, Clone, Copy)]
-struct BackendTokenUsage {
-    output_tokens: i64,
-}
 
 #[derive(Debug, Clone)]
 struct BlockState {
@@ -40,7 +36,7 @@ pub(crate) struct StreamState {
     last_tool_call_id: Option<String>,
 
     // Backend usage snapshot (emitted on `response.completed`).
-    completed_usage: Option<BackendTokenUsage>,
+    completed_usage: Option<CodexTokenUsage>,
 
     pub(crate) completed: bool,
 }
@@ -162,16 +158,27 @@ fn content_block_stop(index: u32) -> Event {
         .data(serde_json::json!({"type":"content_block_stop","index":index}).to_string())
 }
 
-fn message_delta(stop_reason: &str, usage: Option<BackendTokenUsage>) -> Event {
-    let output_tokens = usage.map_or(0, |u| u.output_tokens);
-    Event::default().event("message_delta").data(
-        serde_json::json!({
+fn message_delta(stop_reason: &str, usage: Option<CodexTokenUsage>) -> Event {
+    let mut payload = serde_json::json!({
             "type":"message_delta",
-            "delta":{"stop_reason":stop_reason,"stop_sequence":null},
-            "usage":{"output_tokens":output_tokens}
-        })
-        .to_string(),
-    )
+            "delta":{"stop_reason":stop_reason,"stop_sequence":null}
+    });
+    if let Some(token_usage) = usage {
+        payload["usage"] = anthropic_usage_value(token_usage);
+    }
+    Event::default()
+        .event("message_delta")
+        .data(payload.to_string())
+}
+
+fn anthropic_usage_value(usage: CodexTokenUsage) -> serde_json::Value {
+    let uncached_input_tokens = usage.input_tokens.saturating_sub(usage.cached_input_tokens);
+    serde_json::json!({
+        "input_tokens": uncached_input_tokens,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": usage.cached_input_tokens,
+        "output_tokens": usage.output_tokens,
+    })
 }
 
 fn message_stop() -> Event {
@@ -373,34 +380,8 @@ fn handle_reasoning_delta(st: &mut StreamState, data: &str) -> Option<Vec<Event>
     Some(out)
 }
 
-#[derive(serde::Deserialize)]
-struct BackendCompletedEnvelope {
-    response: Option<BackendCompletedResponse>,
-}
-
-#[derive(serde::Deserialize)]
-struct BackendCompletedResponse {
-    usage: Option<BackendCompletedUsage>,
-}
-
-#[derive(serde::Deserialize)]
-struct BackendCompletedUsage {
-    input_tokens: i64,
-    output_tokens: i64,
-}
-
-fn parse_completed_usage(data: &str) -> Option<BackendTokenUsage> {
-    let value = serde_json::from_str::<serde_json::Value>(data).ok()?;
-    let env: BackendCompletedEnvelope = serde_json::from_value(value).ok()?;
-    let usage = env.response?.usage?;
-    let _ = usage.input_tokens;
-    Some(BackendTokenUsage {
-        output_tokens: usage.output_tokens,
-    })
-}
-
 fn handle_completed(st: &mut StreamState, data: &str, request_id: Option<&str>) -> Vec<Event> {
-    st.completed_usage = parse_completed_usage(data);
+    st.completed_usage = extract_usage_from_completed_event(data);
 
     let mut tool_calls_by_index: Vec<(&String, u32)> = st
         .tool_blocks_by_call_id
@@ -459,10 +440,18 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
-    fn parse_completed_usage_extracts_tokens() {
-        let json = r#"{"type":"response.completed","response":{"id":"r1","usage":{"input_tokens":7,"output_tokens":9}}}"#;
-        let got = parse_completed_usage(json).expect("usage");
-        assert_eq!(got.output_tokens, 9);
+    fn message_delta_includes_cumulative_usage() {
+        let payload = anthropic_usage_value(CodexTokenUsage {
+            input_tokens: 7,
+            cached_input_tokens: 3,
+            output_tokens: 9,
+            reasoning_output_tokens: 2,
+            total_tokens: 16,
+        });
+        assert_eq!(payload["input_tokens"], 4);
+        assert_eq!(payload["cache_creation_input_tokens"], 0);
+        assert_eq!(payload["cache_read_input_tokens"], 3);
+        assert_eq!(payload["output_tokens"], 9);
     }
 
     fn fixture(path: &str) -> String {
@@ -548,8 +537,7 @@ mod tests {
                         "content": [],
                         "model": model,
                         "stop_reason": null,
-                        "stop_sequence": null,
-                        "usage": { "input_tokens": 0, "output_tokens": 0 }
+                        "stop_sequence": null
                     }
                 })
                 .to_string(),

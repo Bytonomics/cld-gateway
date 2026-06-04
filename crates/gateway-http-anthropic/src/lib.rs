@@ -615,8 +615,7 @@ fn anthropic_stream_start_events(msg_id: &str, model: &str) -> Vec<Event> {
                     "content": [],
                     "model": model,
                     "stop_reason": null,
-                    "stop_sequence": null,
-                    "usage": { "input_tokens": 0, "output_tokens": 0 }
+                    "stop_sequence": null
                 }
             })
             .to_string(),

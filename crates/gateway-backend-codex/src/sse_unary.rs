@@ -151,7 +151,8 @@ struct CompletedUsage {
     output_tokens: i64,
     #[serde(default)]
     output_tokens_details: Option<CompletedOutputTokensDetails>,
-    total_tokens: i64,
+    #[serde(default)]
+    total_tokens: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -164,13 +165,17 @@ struct CompletedOutputTokensDetails {
     reasoning_tokens: i64,
 }
 
-fn extract_usage_from_completed_event(data: &str) -> Option<CodexTokenUsage> {
+#[must_use]
+pub fn extract_usage_from_completed_event(data: &str) -> Option<CodexTokenUsage> {
     let value = serde_json::from_str::<serde_json::Value>(data).ok()?;
     // Observed shapes:
     // - { "type":"response.completed", "response": { "usage": {..} } }
     // - { "response": { "usage": {..} } } (variant)
     let env: CompletedEnvelope = serde_json::from_value(value).ok()?;
     let usage = env.response?.usage?;
+    let total_tokens = usage
+        .total_tokens
+        .unwrap_or_else(|| usage.input_tokens.saturating_add(usage.output_tokens));
     Some(CodexTokenUsage {
         input_tokens: usage.input_tokens,
         cached_input_tokens: usage.input_tokens_details.map_or(0, |d| d.cached_tokens),
@@ -178,7 +183,7 @@ fn extract_usage_from_completed_event(data: &str) -> Option<CodexTokenUsage> {
         reasoning_output_tokens: usage
             .output_tokens_details
             .map_or(0, |d| d.reasoning_tokens),
-        total_tokens: usage.total_tokens,
+        total_tokens,
     })
 }
 
@@ -416,6 +421,15 @@ mod tests {
         assert_eq!(usage.cached_input_tokens, 1);
         assert_eq!(usage.output_tokens, 5);
         assert_eq!(usage.reasoning_output_tokens, 2);
+        assert_eq!(usage.total_tokens, 8);
+    }
+
+    #[test]
+    fn usage_derives_total_when_missing() {
+        let json = r#"{"type":"response.completed","response":{"id":"r1","usage":{"input_tokens":3,"output_tokens":5}}}"#;
+        let usage = extract_usage_from_completed_event(json).expect("usage present");
+        assert_eq!(usage.input_tokens, 3);
+        assert_eq!(usage.output_tokens, 5);
         assert_eq!(usage.total_tokens, 8);
     }
 }

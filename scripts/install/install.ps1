@@ -1,4 +1,7 @@
-# NOTE: Windows support is planned for a future release. This script is provided for completeness.
+# NOTE: Windows support is CURRENTLY UNSUPPORTED. This script is provided as a placeholder
+# and is designed to be forward-compatible for eventual Windows support in a future release.
+#
+# STATUS: This script will be activated when cld-gateway Windows binaries become available.
 
 [CmdletBinding()]
 param(
@@ -163,99 +166,139 @@ function Path-Contains {
 }
 
 # ── main ────────────────────────────────────────────────────────────────────
+# PLATFORM VALIDATION: Windows support is currently unsupported.
 
 if ($env:OS -ne "Windows_NT") {
-    Write-Error "install.ps1 supports Windows only. Use install.sh on macOS or Linux."
+    Write-Error "install.ps1 is designed for Windows only. Use install.sh on macOS or Linux."
     exit 1
 }
 
-if (-not [Environment]::Is64BitOperatingSystem) {
-    Write-Error "cld-gateway requires a 64-bit version of Windows."
-    exit 1
-}
+# ── WINDOWS NOT CURRENTLY SUPPORTED ──────────────────────────────────────────
+# cld-gateway binaries for Windows are not yet available. This script is a
+# placeholder for future Windows support. This message will be removed when
+# Windows binary support is released.
+#
+# WORKAROUNDS FOR WINDOWS USERS:
+# 1. Use WSL2 (Windows Subsystem for Linux) and run install.sh from there
+# 2. Build from source: clone the repo and run 'cargo build --release -p gatewayd'
+#
+# Check https://github.com/bytonomics/gateway/releases for future Windows binary
+# availability.
+# This placeholder is intentionally not part of the v1 release asset set.
+# This placeholder is intentionally not part of the v1 release asset set.
 
-# Windows support is planned for a future release.
-# Currently only x86_64 is supported; ARM64 will be added when a Windows target is released.
-$architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
-$target = $null
-$platformLabel = $null
-switch ($architecture) {
-    "X64" {
-        $target = "x86_64-pc-windows-msvc"
-        $platformLabel = "Windows (x64)"
-    }
-    default {
-        Write-Error "Unsupported architecture: $architecture. Only x86_64 Windows is currently supported."
-        exit 1
-    }
-}
+Write-Host "╔═══════════════════════════════════════════════════════════════════════════╗"
+Write-Host "║                                                                           ║"
+Write-Host "║  cld-gateway for Windows is CURRENTLY UNSUPPORTED                         ║"
+Write-Host "║                                                                           ║"
+Write-Host "║  Windows binaries will be available in a future release.                  ║"
+Write-Host "║                                                                           ║"
+Write-Host "║  RECOMMENDED WORKAROUNDS:                                                 ║"
+Write-Host "║  1. Use WSL2: Install WSL2, then run:                                     ║"
+Write-Host "║     bash -c 'curl -fsSL github.com/bytonomics/gateway/releases/latest"
+Write-Host "║     /download/install.sh | sh'"
+Write-Host "║                                                                           ║"
+Write-Host "║  2. Build from source: https://github.com/bytonomics/gateway              ║"
+Write-Host "║     git clone <repo> && cd gateway                                        ║"
+Write-Host "║     cargo build --release -p gatewayd                                     ║"
+Write-Host "║                                                                           ║"
+Write-Host "║  For updates, watch: https://github.com/bytonomics/gateway/releases       ║"
+Write-Host "║                                                                           ║"
+Write-Host "╚═══════════════════════════════════════════════════════════════════════════╝"
+exit 1
 
-$resolvedVersion = Resolve-Version
-$packageAsset = "cld-gateway-package-$target.tar.gz"
-$checksumAsset = "cld-gateway-package_SHA256SUMS"
-$packageUrl = Get-ReleaseAssetUrl -AssetName $packageAsset -ResolvedVersion $resolvedVersion
-$checksumUrl = Get-ReleaseAssetUrl -AssetName $checksumAsset -ResolvedVersion $resolvedVersion
-
-Write-Step "Installing cld-gateway"
-Write-Step "Detected platform: $platformLabel"
-Write-Step "Resolved version: $resolvedVersion"
-
-$tempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("cld-gateway-install-" + [System.Guid]::NewGuid().ToString("N"))
-New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
-
-try {
-    $archivePath = Join-Path $tempDir $packageAsset
-    $checksumPath = Join-Path $tempDir $checksumAsset
-
-    Write-Step "Downloading cld-gateway"
-    Invoke-WebRequest -Uri $checksumUrl -OutFile $checksumPath
-    $expectedPackageDigest = Get-PackageArchiveDigest -ManifestPath $checksumPath -AssetName $packageAsset
-    Invoke-WebRequest -Uri $packageUrl -OutFile $archivePath
-    Test-ArchiveDigest -ArchivePath $archivePath -ExpectedDigest $expectedPackageDigest
-
-    Write-Step "Installing cld-gateway to $InstallDir"
-    New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-
-    # Extract bin/cld-gateway.exe from the archive
-    $extractDir = Join-Path $tempDir "extract"
-    New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
-    tar -xzf $archivePath -C $extractDir "bin/cld-gateway.exe"
-
-    $extractedBin = Join-Path $extractDir "bin\cld-gateway.exe"
-    Copy-Item -LiteralPath $extractedBin -Destination $BinPath -Force
-} finally {
-    Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
-}
-
-# Add to PATH if needed
-$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-if (-not (Path-Contains -PathValue $userPath -Entry $InstallDir)) {
-    if ([string]::IsNullOrWhiteSpace($userPath)) {
-        $newUserPath = $InstallDir
-    } else {
-        $newUserPath = "$InstallDir;$userPath"
-    }
-    [Environment]::SetEnvironmentVariable("Path", $newUserPath, "User")
-    Write-Step "PATH updated for future PowerShell sessions."
-} elseif (Path-Contains -PathValue $env:Path -Entry $InstallDir) {
-    Write-Step "$InstallDir is already on PATH."
-} else {
-    Write-Step "PATH is already configured for future PowerShell sessions."
-}
-
-if (-not (Path-Contains -PathValue $env:Path -Entry $InstallDir)) {
-    if ([string]::IsNullOrWhiteSpace($env:Path)) {
-        $env:Path = $InstallDir
-    } else {
-        $env:Path = "$InstallDir;$env:Path"
-    }
-}
-
-Write-Step "Current PowerShell session: cld-gateway"
-Write-Step "Future PowerShell windows: open a new PowerShell window and run: cld-gateway"
-Write-Host "cld-gateway $resolvedVersion installed successfully to $BinPath."
-
-if (Prompt-YesNo "Start cld-gateway now?") {
-    Write-Step "Launching cld-gateway"
-    & $BinPath
-}
+# ──────────────────────────────────────────────────────────────────────────────
+# FUTURE IMPLEMENTATION SECTION (for eventual Windows support)
+#
+# When Windows binary support is released, remove the exit 1 above and uncomment
+# the following code sections to enable actual installation functionality.
+#
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# # [FUTURE] Platform detection (uncomment when Windows binaries are released)
+# #
+# # if (-not [Environment]::Is64BitOperatingSystem) {
+# #     Write-Error "cld-gateway requires a 64-bit version of Windows."
+# #     exit 1
+# # }
+# #
+# # $architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+# # $target = $null
+# # $platformLabel = $null
+# # switch ($architecture) {
+# #     "X64" {
+# #         $target = "x86_64-pc-windows-msvc"
+# #         $platformLabel = "Windows (x64)"
+# #     }
+# #     "Arm64" {
+# #         $target = "aarch64-pc-windows-msvc"
+# #         $platformLabel = "Windows (ARM64)"
+# #     }
+# #     default {
+# #         Write-Error "Unsupported architecture: $architecture."
+# #         exit 1
+# #     }
+# # }
+# #
+# # $resolvedVersion = Resolve-Version
+# # $packageAsset = "cld-gateway-package-$target.tar.gz"
+# # $checksumAsset = "cld-gateway-package_SHA256SUMS"
+# # $packageUrl = Get-ReleaseAssetUrl -AssetName $packageAsset -ResolvedVersion $resolvedVersion
+# # $checksumUrl = Get-ReleaseAssetUrl -AssetName $checksumAsset -ResolvedVersion $resolvedVersion
+# #
+# # Write-Step "Installing cld-gateway"
+# # Write-Step "Detected platform: $platformLabel"
+# # Write-Step "Resolved version: $resolvedVersion"
+# #
+# # [FUTURE] Download and install (uncomment when Windows binaries are released)
+# #
+# # $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("cld-gateway-install-" + [System.Guid]::NewGuid().ToString("N"))
+# # New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
+# #
+# # try {
+# #     $archivePath = Join-Path $tempDir $packageAsset
+# #     $checksumPath = Join-Path $tempDir $checksumAsset
+# #
+# #     Write-Step "Downloading cld-gateway"
+# #     Invoke-WebRequest -Uri $checksumUrl -OutFile $checksumPath
+# #     $expectedPackageDigest = Get-PackageArchiveDigest -ManifestPath $checksumPath -AssetName $packageAsset
+# #     Invoke-WebRequest -Uri $packageUrl -OutFile $archivePath
+# #     Test-ArchiveDigest -ArchivePath $archivePath -ExpectedDigest $expectedPackageDigest
+# #
+# #     Write-Step "Installing cld-gateway to $InstallDir"
+# #     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+# #
+# #     $extractDir = Join-Path $tempDir "extract"
+# #     New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
+# #     tar -xzf $archivePath -C $extractDir "bin/cld-gateway.exe"
+# #
+# #     $extractedBin = Join-Path $extractDir "bin\cld-gateway.exe"
+# #     Copy-Item -LiteralPath $extractedBin -Destination $BinPath -Force
+# # } finally {
+# #     Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
+# # }
+# #
+# # [FUTURE] PATH configuration (uncomment when Windows binaries are released)
+# #
+# # $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+# # if (-not (Path-Contains -PathValue $userPath -Entry $InstallDir)) {
+# #     if ([string]::IsNullOrWhiteSpace($userPath)) {
+# #         $newUserPath = $InstallDir
+# #     } else {
+# #         $newUserPath = "$InstallDir;$userPath"
+# #     }
+# #     [Environment]::SetEnvironmentVariable("Path", $newUserPath, "User")
+# #     Write-Step "PATH updated for future PowerShell sessions."
+# # }
+# #
+# # if (-not (Path-Contains -PathValue $env:Path -Entry $InstallDir)) {
+# #     $env:Path = "$InstallDir;$env:Path"
+# # }
+# #
+# # Write-Host "cld-gateway $resolvedVersion installed successfully to $BinPath."
+# # Write-Step "Installation complete. Open a new PowerShell window to use cld-gateway."
+# #
+# # if (Prompt-YesNo "Start cld-gateway now?") {
+# #     Write-Step "Launching cld-gateway"
+# #     & $BinPath
+# # }

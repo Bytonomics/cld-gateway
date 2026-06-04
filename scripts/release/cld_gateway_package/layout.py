@@ -34,6 +34,7 @@ def build_package_dir(
     version: str,
     spec: TargetSpec,
     entrypoint_bin: Path,
+    cargo_profile: str = "release",
 ) -> None:
     bin_dir = package_dir / "bin"
     bin_dir.mkdir()
@@ -48,6 +49,7 @@ def build_package_dir(
         "layoutVersion": LAYOUT_VERSION,
         "version": version,
         "target": spec.target,
+        "cargoProfile": cargo_profile,
         "entrypoint": f"bin/{BIN_NAME}",
     }
     _write_json(package_dir / METADATA_FILENAME, metadata)
@@ -76,6 +78,14 @@ def validate_package_dir(package_dir: Path, spec: TargetSpec) -> None:
                 f"Invalid package metadata field {key!r}: "
                 f"expected {expected!r}, got {actual!r}"
             )
+
+    # Validate cargoProfile field exists and is a non-empty string
+    cargo_profile = metadata.get("cargoProfile")
+    if not cargo_profile or not isinstance(cargo_profile, str):
+        raise RuntimeError(
+            f"Invalid package metadata field 'cargoProfile': "
+            f"expected a non-empty string, got {cargo_profile!r}"
+        )
 
     bin_path = package_dir / "bin" / BIN_NAME
     if not bin_path.is_file():

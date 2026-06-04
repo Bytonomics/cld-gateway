@@ -104,10 +104,14 @@ fn bind_callback_server() -> io::Result<(Server, u16)> {
     let preferred_port = preferred_callback_port();
     let preferred = format!("127.0.0.1:{preferred_port}");
     if let Ok(server) = Server::http(&preferred) {
+        println!("Using OAuth callback port {preferred_port}");
         Ok((server, preferred_port))
     } else {
         let fallback = format!("127.0.0.1:{FALLBACK_PORT}");
         let server = Server::http(&fallback).map_err(io::Error::other)?;
+        eprintln!(
+            "Preferred OAuth callback port {preferred_port} unavailable; falling back to {FALLBACK_PORT}"
+        );
         Ok((server, FALLBACK_PORT))
     }
 }

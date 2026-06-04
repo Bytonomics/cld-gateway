@@ -56,7 +56,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--cargo-profile",
         default="release",
-        help="Cargo profile label recorded in package metadata (informational only).",
+        help="Cargo profile label to record in package metadata and keep aligned with the binary build path.",
     )
     parser.add_argument(
         "--force",
@@ -84,7 +84,7 @@ def main() -> int:
     version = read_workspace_version()
 
     prepare_package_dir(package_dir, force=args.force)
-    build_package_dir(package_dir, version, spec, entrypoint_bin)
+    build_package_dir(package_dir, version, spec, entrypoint_bin, args.cargo_profile)
     validate_package_dir(package_dir, spec)
 
     for archive_output in args.archive_output:

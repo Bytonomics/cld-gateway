@@ -4,13 +4,32 @@ Maintainer-facing checklist for publishing a new `cld-gateway` release.
 
 ---
 
+## Platform Scope
+
+`cld-gateway` currently supports Unix-like platforms (macOS and Linux). Windows support is planned for a future release.
+
+| Platform | Status | Installer |
+|----------|--------|-----------|
+| macOS (Intel) | Supported | `install.sh` |
+| macOS (ARM64) | Supported | `install.sh` |
+| Linux x86_64 | Supported | `install.sh` |
+| Linux ARM64 | Supported | `install.sh` |
+| Windows (x64) | Future | not published in v1 |
+
 ## Prerequisites
 
 - Push tag access to `bytonomics/gateway`
 - Ability to create GitHub Releases on `bytonomics/gateway`
-- Access to update `bytonomics/homebrew-tap` (for Homebrew formula update)
-- Homebrew installed locally (for formula validation)
-- Python 3.8+ (for package builder scripts)
+- Python 3.9+ (for package builder scripts)
+- Rust stable toolchain (for building binaries locally if needed)
+- macOS or Linux (Windows support is planned for a future release)
+- `uv` installed locally for release-tooling tests and package-builder commands
+
+### Optional prerequisites
+
+- Access to update `bytonomics/homebrew-tap` (only required if maintaining the Homebrew formula)
+- Homebrew installed locally (only required for validating the formula before publishing)
+- Zig and cargo-zigbuild (automatically installed by the CI workflow for Linux targets)
 
 ---
 
@@ -27,6 +46,8 @@ RUN_WIREMOCK=1 make verify-test
 ```
 
 All checks must pass before proceeding.
+
+**Note:** These tests validate Unix/Linux/macOS targets. Windows support is planned for a future release and does not currently have binary assets.
 
 ### 2. Bump the version
 
@@ -86,7 +107,6 @@ Confirm the following assets are present:
 - `cld-gateway-package-x86_64-unknown-linux-musl.tar.gz`
 - `cld-gateway-package_SHA256SUMS`
 - `install.sh`
-- `install.ps1`
 
 If any asset is missing, check the workflow logs for the `release` job.
 
@@ -106,7 +126,18 @@ curl -fsSL https://github.com/bytonomics/gateway/releases/download/cld-gateway-v
 
 Use the output to update the corresponding `sha256` fields in the formula. Commit and push to `bytonomics/homebrew-tap`.
 
-### 7. Validate Homebrew install
+### 7. Validate Homebrew formula
+
+After updating the Homebrew tap, validate that the formula is correct and resolves to the expected binary version:
+
+```sh
+brew tap bytonomics/tap
+brew fetch --dry-run cld-gateway
+```
+
+This confirms that the formula can fetch the release artifacts before publishing.
+
+### 8. Validate Homebrew install
 
 ```sh
 brew tap bytonomics/tap
@@ -116,7 +147,7 @@ cld-gateway --help || cld-gateway
 
 Confirm the installed binary reports the expected version and starts without error.
 
-### 8. Post-release sanity check
+### 9. Post-release sanity check (shell installer)
 
 Verify the shell installer works from the published release:
 
@@ -131,6 +162,17 @@ Then run the installed binary:
 ```
 
 Confirm it starts, listens on `127.0.0.1:8080`, and responds to `GET /health`.
+
+### 10. Auth callback port verification
+
+During installation testing, verify that the OAuth callback port selection works as expected:
+
+- The default auth callback port is `1455` (configurable via `CLD_GATEWAY_AUTH_PORT`)
+- If binding the preferred port fails, the gateway automatically falls back to port `1457`
+- Login succeeds as long as the gateway can bind one of those localhost ports and the resulting callback URL is reachable in the browser
+- Users can set `CLD_GATEWAY_AUTH_PORT=<custom_port>` to prefer a non-default port
+
+Test this by running the gateway while port 1455 is occupied by another service.
 
 ---
 

@@ -15,6 +15,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
 use eventsource_stream::Eventsource as _;
 use futures_util::StreamExt as _;
+use gateway_backend_codex::client::BackendError;
 use gateway_backend_codex::types::{CodexToolCall, CodexToolCallKind};
 use gateway_core::RequestId;
 use gateway_core::Secret;
@@ -147,6 +148,8 @@ async fn auth_status() -> impl IntoResponse {
     match gateway_auth_codex::load_gateway_auth_status_default_path() {
         Ok(Some(status)) => Json(serde_json::json!({
             "logged_in": status.ready_for_messages(),
+            "ready_for_messages": status.ready_for_messages(),
+            "ready_for_models": status.ready_for_models(),
             "account_id": status.account_id,
             "login_method": match status.login_method {
                 gateway_auth_codex::GatewayLoginMethod::Chatgpt => "chatgpt",
@@ -159,7 +162,7 @@ async fn auth_status() -> impl IntoResponse {
             "account_id": null,
             "login_method": null,
             "source": "gateway_auth_json",
-            "auth_remediation": "Please run: cld-gateway login openai",
+            "auth_remediation": "Please run: cld-gateway login claude",
         })),
         Err(err) => Json(serde_json::json!({
             "logged_in": false,
@@ -167,7 +170,7 @@ async fn auth_status() -> impl IntoResponse {
             "login_method": null,
             "source": "error",
             "error_type": format!("{err}"),
-            "auth_remediation": "Please run: cld-gateway login openai",
+            "auth_remediation": "Please run: cld-gateway login claude",
         })),
     }
 }
@@ -447,19 +450,17 @@ async fn run_backend_unary(
         .backend
         .send_streaming_with_refresh_retry(&state.auth, backend_req)
         .await
-        .map_err(|err| {
-            // Check if this is an auth failure (e.g., permanent refresh failure)
-            let err_str = err.to_string();
-            if err_str.contains("refresh") || err_str.contains("auth") {
-                return auth_error(&err_str);
-            }
-            (
+        .map_err(|err| match err {
+            BackendError::AuthFailed { stage: _, message } => auth_error(&message),
+            BackendError::UnexpectedStatusWithBody { status: 401, body } => auth_error(&body),
+            BackendError::UnexpectedStatus(401) => auth_error("Authentication failed"),
+            _ => (
                 StatusCode::BAD_GATEWAY,
                 Json(serde_json::json!({
-                    "error": { "type": "backend_error", "message": err_str }
+                    "error": { "type": "backend_error", "message": err.to_string() }
                 })),
             )
-                .into_response()
+                .into_response(),
         })?;
 
     let decoded = gateway_backend_codex::sse_unary::read_sse_to_completion(res.bytes_stream())
@@ -615,7 +616,7 @@ fn sse_error(
 fn sse_auth_error(
     message: &str,
 ) -> Sse<futures_util::stream::BoxStream<'static, Result<Event, std::convert::Infallible>>> {
-    let remediation = "Please run: cld-gateway login openai";
+    let remediation = "Please run: cld-gateway login claude";
     let payload = serde_json::json!({
         "type": "error",
         "error": {
@@ -714,6 +715,18 @@ async fn stream_messages(
         match backend_response {
             Ok(res) => backend_sse_to_anthropic_events(res, tool_calls, rid_str),
             Err(err) => {
+                match err {
+                    BackendError::AuthFailed { stage: _, message } => {
+                        return sse_auth_error(&message);
+                    }
+                    BackendError::UnexpectedStatusWithBody { status: 401, body } => {
+                        return sse_auth_error(&body);
+                    }
+                    BackendError::UnexpectedStatus(401) => {
+                        return sse_auth_error("Authentication failed");
+                    }
+                    _ => {}
+                }
                 let payload = serde_json::json!({
                     "type": "error",
                     "error": { "type": "upstream_error", "message": format!("{err}") }
@@ -836,7 +849,7 @@ fn bad_request(message: &str) -> axum::response::Response {
 }
 
 fn auth_error(message: &str) -> axum::response::Response {
-    let remediation = "Please run: cld-gateway login openai";
+    let remediation = "Please run: cld-gateway login claude";
     (
         StatusCode::UNAUTHORIZED,
         Json(serde_json::json!({
@@ -1328,7 +1341,7 @@ mod messages_tests {
             json.get("error")
                 .and_then(|e| e.get("auth_remediation"))
                 .and_then(|v| v.as_str()),
-            Some("Please run: cld-gateway login openai")
+            Some("Please run: cld-gateway login claude")
         );
     }
 
@@ -1385,7 +1398,7 @@ mod messages_tests {
                 .get("error")
                 .and_then(|e| e.get("auth_remediation"))
                 .and_then(|v| v.as_str()),
-            Some("Please run: cld-gateway login openai")
+            Some("Please run: cld-gateway login claude")
         );
     }
 
@@ -1428,7 +1441,7 @@ mod messages_tests {
         );
         assert_eq!(
             json.get("auth_remediation").and_then(|v| v.as_str()),
-            Some("Please run: cld-gateway login openai")
+            Some("Please run: cld-gateway login claude")
         );
 
         // Restore the backup if we moved one
@@ -1504,8 +1517,93 @@ mod messages_tests {
             json.get("error")
                 .and_then(|e| e.get("auth_remediation"))
                 .and_then(|v| v.as_str()),
-            Some("Please run: cld-gateway login openai"),
+            Some("Please run: cld-gateway login claude"),
             "expected remediation message in error response, got: {json:?}"
+        );
+
+        let _ = std::fs::remove_file(&auth_path);
+    }
+
+    #[tokio::test]
+    async fn test_refresh_failure_returns_remediation_streaming() {
+        if std::env::var("RUN_WIREMOCK").ok().as_deref() != Some("1") {
+            return;
+        }
+
+        let auth_path = write_temp_auth_json();
+        let mock = MockServer::start().await;
+
+        // Mock any POST to codex/responses to return 401
+        Mock::given(method("POST"))
+            .and(path("/backend-api/codex/responses"))
+            .respond_with(
+                ResponseTemplate::new(401)
+                    .set_body_json(serde_json::json!({"error": "refresh_required"})),
+            )
+            .mount(&mock)
+            .await;
+
+        let base_url = url::Url::parse(&mock.uri()).expect("mock url");
+        let state = super::AppState {
+            backend: gateway_backend_codex::client::CodexBackendClient::default()
+                .with_base_url(&base_url),
+            auth_json_path: Some(auth_path.clone()),
+            ..super::AppState::default()
+        };
+
+        let app = super::router(state);
+        let req_body = serde_json::json!({
+            "model": DEFAULT_BACKEND_MODEL,
+            "stream": true,
+            "messages": [{ "role": "user", "content": "hello" }]
+        });
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .body(Body::from(req_body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // When backend returns 401, gateway should return 200 (SSE stream starts)
+        // but the first event should be an error with structured auth remediation.
+        assert_eq!(
+            res.status(),
+            StatusCode::OK,
+            "expected 200 for SSE stream, got {}",
+            res.status()
+        );
+
+        let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let body_str = std::str::from_utf8(&body).unwrap();
+        let events = parse_sse_frames(body_str);
+
+        assert!(
+            !events.is_empty(),
+            "expected at least one SSE event, got empty stream"
+        );
+        let (first_event, first_payload) = &events[0];
+        assert_eq!(first_event, "error");
+        assert_eq!(
+            first_payload
+                .get("error")
+                .and_then(|e| e.get("type"))
+                .and_then(|v| v.as_str()),
+            Some("auth_error"),
+            "expected structured auth_error payload, got: {first_payload:?}"
+        );
+        assert_eq!(
+            first_payload
+                .get("error")
+                .and_then(|e| e.get("auth_remediation"))
+                .and_then(|v| v.as_str()),
+            Some("Please run: cld-gateway login claude"),
+            "expected structured remediation in SSE payload, got: {first_payload:?}"
         );
 
         let _ = std::fs::remove_file(&auth_path);

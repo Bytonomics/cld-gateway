@@ -40,10 +40,17 @@ Verify checksums using `cld-gateway-package_SHA256SUMS`, which is published alon
 ### 1. Log in (one-time setup)
 
 ```sh
-cld-gateway login openai
+cld-gateway login
 ```
 
-This opens your browser for authentication and saves credentials to `~/.gateway/auth.json`.
+This displays an interactive menu to choose your login method (ChatGPT, API Key, or Gemini).
+Select ChatGPT to authenticate via browser. Credentials are saved to `~/.gateway/auth.json`.
+
+For ChatGPT login directly without the menu:
+
+```sh
+cld-gateway login claude
+```
 
 ### 2. Start the daemon
 
@@ -53,7 +60,7 @@ cld-gateway serve
 
 The daemon runs on `127.0.0.1:8080` and automatically handles token refresh.
 
-If you see an auth error, run the login command again.
+If you see an auth error, run `cld-gateway login` again.
 
 ---
 
@@ -62,7 +69,21 @@ If you see an auth error, run the login command again.
 | Command | Description |
 |---|---|
 | `cld-gateway` or `cld-gateway serve` | Start the daemon |
-| `cld-gateway login openai` | Interactive login |
+| `cld-gateway login` | Interactive login menu |
+| `cld-gateway login claude` | ChatGPT/Claude browser login |
+| `cld-gateway login gemini` | Gemini login (not yet implemented) |
+
+---
+
+## Future / Not Implemented
+
+### Gemini login
+
+`cld-gateway login gemini` is recognized but not yet implemented. Currently only ChatGPT/Claude OAuth is supported.
+
+### Windows support
+
+The gateway currently runs on Linux and macOS. Windows support is planned for a future release.
 
 ---
 
@@ -86,13 +107,13 @@ You can run a dev build and a release build simultaneously by pointing each at d
 
 ```sh
 # Release build — login first
-cld-gateway login openai
+cld-gateway login claude
 
 # Release build — start daemon (default ports/paths)
 cld-gateway serve
 
 # Dev build — login with custom paths
-GATEWAY_HOME=~/.gateway-dev cld-gateway-dev login openai
+GATEWAY_HOME=~/.gateway-dev cld-gateway-dev login claude
 
 # Dev build — start daemon (different port and paths)
 CLD_GATEWAY_LISTEN_ADDR=127.0.0.1:8081 \

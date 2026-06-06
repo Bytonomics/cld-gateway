@@ -112,40 +112,32 @@ If any asset is missing, check the workflow logs for the `release` job.
 
 ### 6. Update the Homebrew tap
 
-In the `bytonomics/homebrew-tap` repo, update `Formula/cld-gateway.rb`:
+The release workflow publishes the GitHub Release first, then dispatches a `version-updated` event to `bytonomics/homebrew-tap`.
 
-- Set `version` to `X.Y.Z`
-- Update `url` for each macOS target to point at the new GitHub Release URLs
-- Update `sha256` for each asset using values from `cld-gateway-package_SHA256SUMS`
+Monitor the tap repo workflow run and confirm that it rewrites `Formula/cld-gateway.rb` for `X.Y.Z` using the published `cld-gateway-package_SHA256SUMS` manifest.
 
-Fetch the SHA256 values:
-
-```sh
-curl -fsSL https://github.com/bytonomics/gateway/releases/download/cld-gateway-vX.Y.Z/cld-gateway-package_SHA256SUMS
-```
-
-Use the output to update the corresponding `sha256` fields in the formula. Commit and push to `bytonomics/homebrew-tap`.
+If the dispatch does not run or fails, trigger the manual fallback workflow in `bytonomics/homebrew-tap` with the same version.
 
 ### 7. Validate Homebrew formula
 
-After updating the Homebrew tap, validate that the formula is correct and resolves to the expected binary version:
+After the tap workflow completes, validate that the formula resolves to the expected release artifacts:
 
 ```sh
-brew tap bytonomics/tap
+brew tap bytonomics/homebrew-tap
 brew fetch --dry-run cld-gateway
 ```
 
-This confirms that the formula can fetch the release artifacts before publishing.
+This confirms that the formula can fetch the published release artifacts.
 
 ### 8. Validate Homebrew install
 
 ```sh
-brew tap bytonomics/tap
+brew tap bytonomics/homebrew-tap
 brew install cld-gateway
-cld-gateway --help || cld-gateway
+cld-gateway invalid-command 2>&1 | grep -q "unknown command"
 ```
 
-Confirm the installed binary reports the expected version and starts without error.
+Confirm the installed binary prints the deterministic `unknown command` parser error from the current CLI.
 
 ### 9. Post-release sanity check (shell installer)
 

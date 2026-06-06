@@ -9,11 +9,11 @@ An Anthropic-compatible HTTP proxy that routes requests through the ChatGPT/Code
 ### Homebrew tap
 
 ```sh
-brew tap bytonomics/tap
+brew tap bytonomics/homebrew-tap
 brew install cld-gateway
 ```
 
-> **Note:** Homebrew availability depends on the separate `bytonomics/homebrew-tap` repo being updated for the release you want to install.
+> **Note:** Homebrew availability depends on the separate `bytonomics/homebrew-tap` repo being updated for the release you want to install. Stable releases are intended to flow there automatically from the gateway release workflow.
 
 ### Shell installer
 

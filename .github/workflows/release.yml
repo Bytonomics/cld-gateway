@@ -186,3 +186,34 @@ jobs:
             dist/cld-gateway-package_SHA256SUMS
             dist/install.sh
           generate_release_notes: true
+
+      - name: Extract release version
+        id: release_version
+        shell: bash
+        env:
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#cld-gateway-v}"
+          [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta)(\.[0-9]+)?)?$ ]] \
+            || { echo "Unsupported release version: ${version}"; exit 1; }
+          printf 'value=%s\n' "${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Require tap dispatch token
+        env:
+          HOMEBREW_TAP_DISPATCH_TOKEN: ${{ secrets.HOMEBREW_TAP_DISPATCH_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "${HOMEBREW_TAP_DISPATCH_TOKEN}" ]] \
+            || { echo "Missing HOMEBREW_TAP_DISPATCH_TOKEN secret"; exit 1; }
+
+      - name: Dispatch Homebrew tap update
+        env:
+          HOMEBREW_TAP_DISPATCH_TOKEN: ${{ secrets.HOMEBREW_TAP_DISPATCH_TOKEN }}
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.HOMEBREW_TAP_DISPATCH_TOKEN }}
+          repository: Bytonomics/homebrew-tap
+          event-type: version-updated
+          client-payload: '{"version":"${{ steps.release_version.outputs.value }}"}'

@@ -1,105 +1,284 @@
 # Release Playbook
 
-Maintainer-facing checklist for publishing a new `cld-gateway` release.
+Maintainer-facing checklist for publishing a new `cld-gateway` release from `Bytonomics/cld-gateway` and updating the public Homebrew tap at `Bytonomics/homebrew-tap`.
 
 ---
 
-## Platform Scope
+## Platform scope
 
 `cld-gateway` currently supports Unix-like platforms (macOS and Linux). Windows support is planned for a future release.
 
-| Platform | Status | Installer |
-|----------|--------|-----------|
-| macOS (Intel) | Supported | `install.sh` |
-| macOS (ARM64) | Supported | `install.sh` |
-| Linux x86_64 | Supported | `install.sh` |
-| Linux ARM64 | Supported | `install.sh` |
-| Windows (x64) | Future | not published in v1 |
+| Platform | Status | Published archive |
+|---|---|---|
+| macOS ARM64 | Supported | `cld-gateway-package-aarch64-apple-darwin.tar.gz` |
+| macOS Intel | Supported | `cld-gateway-package-x86_64-apple-darwin.tar.gz` |
+| Linux ARM64 | Supported | `cld-gateway-package-aarch64-unknown-linux-musl.tar.gz` |
+| Linux x86_64 | Supported | `cld-gateway-package-x86_64-unknown-linux-musl.tar.gz` |
+| Windows x64 | Future | not published in v1 |
 
-## Prerequisites
+Every published package archive must contain:
 
-- Push tag access to `Bytonomics/cld-gateway`
-- Ability to create GitHub Releases on `Bytonomics/cld-gateway`
-- Python 3.9+ (for package builder scripts)
-- Rust stable toolchain (for building binaries locally if needed)
-- macOS or Linux (Windows support is planned for a future release)
-- `uv` installed locally for release-tooling tests and package-builder commands
+- `bin/cld-gateway`
+- `cld-gateway-package.json`
 
-### Optional prerequisites
+---
 
-- Access to update `bytonomics/homebrew-tap` (only required if maintaining the Homebrew formula)
-- Homebrew installed locally (only required for validating the formula before publishing)
-- Zig and cargo-zigbuild (automatically installed by the CI workflow for Linux targets)
+## Release architecture
+
+There are two repositories involved.
+
+### Main package repo
+
+`Bytonomics/cld-gateway` builds and publishes GitHub Release assets.
+
+A tag push matching `cld-gateway-vX.Y.Z` triggers `.github/workflows/release.yml`, which runs:
+
+```text
+tag-check → build (matrix) → verify → release
+```
+
+The release job publishes:
+
+- all four target archives
+- `cld-gateway-package_SHA256SUMS`
+- `install.sh`
+
+After publishing the release assets, the workflow dispatches a tap update event to `Bytonomics/homebrew-tap`.
+
+### Homebrew tap repo
+
+`Bytonomics/homebrew-tap` owns the formula at:
+
+```text
+Formula/cld-gateway.rb
+```
+
+The formula is generated from the checksum manifest published by `Bytonomics/cld-gateway`.
+
+Before the first release exists, `Formula/cld-gateway.rb` may be a bootstrap placeholder because there are no release archives or SHA256 values yet. It becomes installable only after the first release publishes `cld-gateway-package_SHA256SUMS` and the tap workflow renders the real formula.
+
+---
+
+## Required GitHub setup
+
+### 1. Ensure the tap repo is public and initialized
+
+Before tagging a `cld-gateway` release, the tap repo must already be pushed to GitHub with its workflows present.
+
+Required tap repo files:
+
+- `LICENSE`
+- `README.md`
+- `Formula/cld-gateway.rb`
+- `.github/scripts/check-version.sh`
+- `.github/scripts/render-formula.py`
+- `.github/scripts/tests/...`
+- `.github/workflows/ci.yml`
+- `.github/workflows/publish-formula-update.yml`
+- `.github/workflows/manual-publish-formula-update.yml`
+
+If you changed files inside the `homebrew-tap` submodule, push that repo first:
+
+```sh
+cd homebrew-tap
+git status
+git push origin main
+cd ..
+```
+
+Then commit the updated submodule pointer in `Bytonomics/cld-gateway` if it changed.
+
+### 2. Add the cross-repo dispatch secret
+
+In `Bytonomics/cld-gateway`, configure this GitHub Actions secret:
+
+```text
+HOMEBREW_TAP_DISPATCH_TOKEN
+```
+
+The token must be able to dispatch repository events to:
+
+```text
+Bytonomics/homebrew-tap
+```
+
+The release workflow requires this secret. If it is missing, the release job fails before dispatching the tap update.
+
+The dispatch contract is:
+
+```text
+event-type: version-updated
+repository: Bytonomics/homebrew-tap
+payload: {"version":"X.Y.Z"}
+```
+
+The tap repo workflow `publish-formula-update.yml` listens for this event and renders `Formula/cld-gateway.rb` from the published release manifest.
 
 ---
 
 ## Release steps
 
-### 1. Pre-release validation
+### 1. Verify the working tree
 
-Run the full test suite locally before tagging:
+Start from the main repo root:
+
+```sh
+git status
+```
+
+Confirm only intended release changes are present. If the `homebrew-tap` submodule changed, make sure the submodule commit has already been pushed to `Bytonomics/homebrew-tap`, then include the updated submodule pointer in the main repo commit.
+
+### 2. Pre-release validation
+
+Run the local validation suite before tagging:
 
 ```sh
 make check
-make test
 RUN_WIREMOCK=1 make verify-test
 ```
 
 All checks must pass before proceeding.
 
-**Note:** These tests validate Unix/Linux/macOS targets. Windows support is planned for a future release and does not currently have binary assets.
+These checks validate the current Unix-like platform scope. Windows support is planned for a future release and does not currently have binary assets.
 
-### 2. Bump the version
+### 3. Choose and set the release version
 
-Edit the root `Cargo.toml` and change `version` under `[workspace.package]` from the current version to the new one:
+The canonical version is in the root `Cargo.toml` under `[workspace.package]`:
 
 ```toml
 [workspace.package]
 version = "X.Y.Z"
 ```
 
-Then update `Cargo.lock`:
+For the first release, if publishing `0.1.0`, keep:
+
+```toml
+version = "0.1.0"
+```
+
+If changing the version, update `Cargo.toml`, then run the validation step below. `make check` already runs the normal test suite and will surface whether `Cargo.lock` needs to be updated. If `Cargo.lock` changes, include it in the release-preparation commit.
+
+The release tag must match this version exactly:
+
+```text
+Cargo.toml version: X.Y.Z
+Release tag:        cld-gateway-vX.Y.Z
+```
+
+The release workflow rejects mismatches.
+
+### 4. Commit the release-ready state
+
+Commit the version bump and any release-preparation changes.
+
+Include the submodule pointer if `homebrew-tap` changed:
 
 ```sh
-cargo build -p gatewayd
+git add Cargo.toml Cargo.lock .github/workflows/release.yml README.md RELEASE.md homebrew-tap
+git commit -m "chore: prepare cld-gateway vX.Y.Z release"
+git push origin main
 ```
 
-Commit the change:
+Only stage files that are intentionally part of the release preparation.
+
+### 5. Create and push the release tag
+
+Use the required `cld-gateway-v` prefix. The tag version must match the version in `Cargo.toml` exactly.
+
+Set the release version once in your shell:
 
 ```sh
-git commit -am "chore: bump version to X.Y.Z"
+VERSION=X.Y.Z
 ```
 
-### 3. Tag and push
+For the first `0.1.0` release, use:
 
 ```sh
-git tag cld-gateway-vX.Y.Z
-git push origin cld-gateway-vX.Y.Z
+VERSION=0.1.0
 ```
 
-The tag push triggers the release workflow automatically.
+Verify that `Cargo.toml` contains the same version:
 
-### 4. Monitor the release workflow
-
-Go to: `https://github.com/Bytonomics/cld-gateway/actions`
-
-Wait for the `release` workflow to complete. It runs four jobs in sequence:
-
+```sh
+grep -A5 '^\[workspace.package\]' Cargo.toml
 ```
+
+Verify the tag does not already exist locally:
+
+```sh
+git tag --list "cld-gateway-v${VERSION}"
+```
+
+If that command prints anything, stop and investigate before continuing.
+
+Create an annotated release tag:
+
+```sh
+git tag -a "cld-gateway-v${VERSION}" -m "Release ${VERSION}"
+```
+
+Verify the local tag points at the intended commit:
+
+```sh
+git show --stat "cld-gateway-v${VERSION}"
+```
+
+Push the tag:
+
+```sh
+git push origin "cld-gateway-v${VERSION}"
+```
+
+Verify the remote tag exists:
+
+```sh
+git ls-remote --tags origin "cld-gateway-v${VERSION}"
+```
+
+The tag push triggers the `release` workflow automatically.
+
+```text
+cld-gateway-vX.Y.Z
+cld-gateway-vX.Y.Z-alpha
+cld-gateway-vX.Y.Z-alpha.N
+cld-gateway-vX.Y.Z-beta
+cld-gateway-vX.Y.Z-beta.N
+```
+
+Do not use a bare `vX.Y.Z` tag.
+
+### 6. Monitor the main release workflow
+
+Open:
+
+```text
+https://github.com/Bytonomics/cld-gateway/actions
+```
+
+Wait for the `release` workflow.
+
+The workflow is complete only when all jobs are green:
+
+```text
 tag-check → build (matrix) → verify → release
 ```
 
-The build matrix produces binaries for all supported targets. The workflow is complete only when all four jobs are green.
+What each job does:
 
-### 5. Verify GitHub Release assets
+- `tag-check`: validates tag format and confirms tag version equals `Cargo.toml` version.
+- `build`: builds all four target binaries and packages archives.
+- `verify`: confirms each archive exists and contains `bin/cld-gateway` plus `cld-gateway-package.json`.
+- `release`: publishes GitHub Release assets, generates `cld-gateway-package_SHA256SUMS`, and dispatches the Homebrew tap update.
 
-After the workflow completes, open the release at:
+### 7. Verify GitHub Release assets
 
-```
+After the workflow completes, open:
+
+```text
 https://github.com/Bytonomics/cld-gateway/releases/tag/cld-gateway-vX.Y.Z
 ```
 
-Confirm the following assets are present:
+Confirm these assets are present:
 
 - `cld-gateway-package-aarch64-apple-darwin.tar.gz`
 - `cld-gateway-package-x86_64-apple-darwin.tar.gz`
@@ -108,28 +287,71 @@ Confirm the following assets are present:
 - `cld-gateway-package_SHA256SUMS`
 - `install.sh`
 
-If any asset is missing, check the workflow logs for the `release` job.
+Inspect `cld-gateway-package_SHA256SUMS` and confirm it has one checksum line per archive.
 
-### 6. Update the Homebrew tap
+If any asset is missing, inspect the `release` workflow logs before continuing.
 
-The release workflow publishes the GitHub Release first, then dispatches a `version-updated` event to `bytonomics/homebrew-tap`.
+### 8. Monitor the Homebrew tap update
 
-Monitor the tap repo workflow run and confirm that it rewrites `Formula/cld-gateway.rb` for `X.Y.Z` using the published `cld-gateway-package_SHA256SUMS` manifest.
+The main release workflow dispatches a `version-updated` event to `Bytonomics/homebrew-tap` after publishing the release assets.
 
-If the dispatch does not run or fails, trigger the manual fallback workflow in `bytonomics/homebrew-tap` with the same version.
+Open:
 
-### 7. Validate Homebrew formula
+```text
+https://github.com/Bytonomics/homebrew-tap/actions
+```
 
-After the tap workflow completes, validate that the formula resolves to the expected release artifacts:
+Monitor the `publish-formula-update` workflow.
+
+It should:
+
+1. receive payload `{"version":"X.Y.Z"}`
+2. run `.github/scripts/check-version.sh X.Y.Z`
+3. fetch `cld-gateway-package_SHA256SUMS` from the new release
+4. render `Formula/cld-gateway.rb`
+5. validate the formula
+6. commit and push the formula update to `main`
+
+After it completes, confirm `Formula/cld-gateway.rb` references:
+
+```text
+https://github.com/Bytonomics/cld-gateway/releases/download/cld-gateway-vX.Y.Z/...
+```
+
+and contains real SHA256 values from `cld-gateway-package_SHA256SUMS`.
+
+### 9. If automatic tap update fails, run the manual fallback
+
+If the dispatch does not run or the automated tap workflow fails, open:
+
+```text
+https://github.com/Bytonomics/homebrew-tap/actions/workflows/manual-publish-formula-update.yml
+```
+
+Run the workflow with:
+
+```text
+version = X.Y.Z
+```
+
+The manual workflow uses the same renderer and checksum manifest as the automated workflow.
+
+Do not hand-edit formula checksums unless the workflows cannot be used.
+
+### 10. Validate Homebrew formula fetch
+
+After the tap formula update lands:
 
 ```sh
 brew tap bytonomics/homebrew-tap
 brew fetch --dry-run cld-gateway
 ```
 
-This confirms that the formula can fetch the published release artifacts.
+This confirms Homebrew can resolve the formula and fetch the published release artifact for the current platform.
 
-### 8. Validate Homebrew install
+### 11. Validate Homebrew install
+
+Install from the tap:
 
 ```sh
 brew tap bytonomics/homebrew-tap
@@ -137,39 +359,136 @@ brew install cld-gateway
 cld-gateway invalid-command 2>&1 | grep -q "unknown command"
 ```
 
-Confirm the installed binary prints the deterministic `unknown command` parser error from the current CLI.
+The current binary does not rely on a stable `--version` or `--help` contract for release validation. The `invalid-command` check verifies that the installed binary executes and reaches the deterministic CLI parser error path.
 
-### 9. Post-release sanity check (shell installer)
+### 12. Validate shell installer
 
-Verify the shell installer works from the published release:
+Verify the latest-release installer:
 
 ```sh
 curl -fsSL https://github.com/Bytonomics/cld-gateway/releases/latest/download/install.sh | sh
 ```
 
-Then run the installed binary:
+For a pinned version:
 
 ```sh
-~/.local/bin/cld-gateway
+curl -fsSL https://github.com/Bytonomics/cld-gateway/releases/latest/download/install.sh | sh -s -- --release X.Y.Z
 ```
 
-Confirm it starts, listens on `127.0.0.1:8080`, and responds to `GET /health`.
+Then verify the installed binary executes:
 
-### 10. Auth callback port verification
+```sh
+~/.local/bin/cld-gateway invalid-command 2>&1 | grep -q "unknown command"
+```
 
-During installation testing, verify that the OAuth callback port selection works as expected:
+### 13. Validate daemon startup
 
-- The default auth callback port is `1455` (configurable via `CLD_GATEWAY_AUTH_PORT`)
-- If binding the preferred port fails, the gateway automatically falls back to port `1457`
-- Login succeeds as long as the gateway can bind one of those localhost ports and the resulting callback URL is reachable in the browser
-- Users can set `CLD_GATEWAY_AUTH_PORT=<custom_port>` to prefer a non-default port
+Run:
 
-Test this by running the gateway while port 1455 is occupied by another service.
+```sh
+cld-gateway serve
+```
+
+Expected behavior:
+
+- listens on `127.0.0.1:8080` by default
+- does not require Homebrew after installation
+- auth/login can be tested separately
+
+In another shell, verify health:
+
+```sh
+curl -fsSL http://127.0.0.1:8080/health
+```
+
+### 14. Validate login/auth flow
+
+Run the installed binary login flow:
+
+```sh
+cld-gateway login
+```
+
+If testing direct vendor login with a version that supports it:
+
+```sh
+cld-gateway login claude
+```
+
+Then start the daemon:
+
+```sh
+cld-gateway serve
+```
+
+Send a real client request through the gateway and verify it succeeds.
+
+### 15. Auth callback port verification
+
+During installation testing, verify OAuth callback port fallback behavior:
+
+- default auth callback port is `1455`
+- it is configurable via `CLD_GATEWAY_AUTH_PORT`
+- if binding the preferred port fails, the gateway falls back to port `1457`
+- login succeeds as long as the gateway can bind a supported localhost callback port and the browser can reach it
+
+Test this by occupying port `1455`, then running login again.
+
+---
+
+## First-release checklist
+
+For the very first package release, there are no existing GitHub Release assets yet. The bootstrap formula in the tap is expected to be non-installable until the first release publishes archives and checksums.
+
+Before pushing the first tag, confirm:
+
+- `Bytonomics/homebrew-tap` is public and pushed.
+- `Bytonomics/homebrew-tap` contains the tap workflows.
+- `Bytonomics/cld-gateway` has `HOMEBREW_TAP_DISPATCH_TOKEN` configured.
+- The submodule pointer in `Bytonomics/cld-gateway` points at the pushed tap commit.
+- `Cargo.toml` version matches the tag you are about to push.
+- The tag uses the `cld-gateway-v` prefix.
+
+Example first release for `0.1.0`:
+
+```sh
+# Push tap repo first if it changed.
+cd homebrew-tap
+git status
+git push origin main
+cd ..
+
+# Validate main repo.
+make check
+make test
+RUN_WIREMOCK=1 make verify-test
+
+# Commit release-ready state.
+git status
+git add Cargo.toml Cargo.lock .github/workflows/release.yml README.md RELEASE.md homebrew-tap
+git commit -m "chore: prepare cld-gateway v0.1.0 release"
+git push origin main
+
+# Tag and publish.
+git tag -a cld-gateway-v0.1.0 -m "Release 0.1.0"
+git push origin cld-gateway-v0.1.0
+```
+
+Then monitor:
+
+1. `Bytonomics/cld-gateway` → `release` workflow
+2. `Bytonomics/homebrew-tap` → `publish-formula-update` workflow
+3. GitHub Release assets
+4. Homebrew fetch/install
+5. shell installer
+6. daemon/login smoke checks
 
 ---
 
 ## Notes
 
-**Homebrew tap maintenance (v1):** The Homebrew tap is updated manually for v1. Future releases may automate tap PR creation via the release workflow.
+**Homebrew tap maintenance:** The tap update is automated through repository dispatch after the main release publishes assets. Use `manual-publish-formula-update.yml` only as a fallback.
 
-**Version format:** All release tags use the format `cld-gateway-vX.Y.Z`. Do not use bare `vX.Y.Z` tags — the release workflow matches on the `cld-gateway-v` prefix.
+**Version format:** All release tags use the format `cld-gateway-vX.Y.Z`. Do not use bare `vX.Y.Z` tags.
+
+**Tap license vs package license:** `Bytonomics/homebrew-tap` is licensed separately as the tap repository. The formula’s `license` field describes the packaged `cld-gateway` software license.

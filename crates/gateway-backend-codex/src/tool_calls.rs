@@ -162,4 +162,11 @@ mod tests {
         assert_eq!(args["status"], "completed");
         assert_eq!(args["action"]["command"][0], "echo");
     }
+
+    #[test]
+    fn hosted_web_search_call_is_not_client_tool_call() {
+        let data = r#"{"type":"response.output_item.done","item":{"type":"web_search_call","id":"ws_1","status":"completed","action":{"type":"search","query":"rust release"}}}"#;
+        let call = parse_output_item_tool_call("response.output_item.done", data);
+        assert!(call.is_none());
+    }
 }

@@ -2,9 +2,11 @@
 
 use axum::response::sse::Event;
 use gateway_backend_codex::sse_unary::extract_usage_from_completed_event;
+use gateway_backend_codex::sse_unary::record_completed_web_search_call_ids;
 use gateway_backend_codex::tool_calls::parse_output_item_tool_call;
 use gateway_backend_codex::types::{CodexTokenUsage, CodexToolCall, CodexToolCallKind};
 use gateway_state::ToolCallStore;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 
 use crate::tool_arg_policy::sanitized_tool_args_for_kind;
@@ -13,6 +15,14 @@ use crate::tool_arg_policy::sanitized_tool_args_for_kind;
 struct BlockState {
     index: u32,
     closed: bool,
+}
+
+#[derive(Debug, Clone)]
+struct WebSearchCall {
+    call_id: String,
+    server_tool_use_id: String,
+    query: Option<String>,
+    results: Vec<serde_json::Value>,
 }
 
 #[derive(Default)]
@@ -37,6 +47,8 @@ pub(crate) struct StreamState {
 
     // Backend usage snapshot (emitted on `response.completed`).
     completed_usage: Option<CodexTokenUsage>,
+    completed_web_search_call_ids: BTreeSet<String>,
+    emitted_web_search_call_ids: BTreeSet<String>,
 
     pub(crate) completed: bool,
 }
@@ -58,6 +70,8 @@ impl StreamState {
             tool_args_buf_by_call_id: HashMap::new(),
             last_tool_call_id: None,
             completed_usage: None,
+            completed_web_search_call_ids: BTreeSet::new(),
+            emitted_web_search_call_ids: BTreeSet::new(),
             completed: false,
         }
     }
@@ -105,6 +119,47 @@ fn content_block_start_tool_use(index: u32, call_id: &str, name: &str) -> Event 
             "id": call_id,
             "name": name,
             "input": {}
+        }
+    })
+    .to_string();
+    Event::default().event("content_block_start").data(payload)
+}
+
+fn content_block_start_server_tool_use(
+    index: u32,
+    server_tool_use_id: &str,
+    query: Option<&str>,
+) -> Event {
+    let input = query.map_or_else(
+        || serde_json::json!({}),
+        |query_text| serde_json::json!({ "query": query_text }),
+    );
+    let payload = serde_json::json!({
+        "type": "content_block_start",
+        "index": index,
+        "content_block": {
+            "type": "server_tool_use",
+            "id": server_tool_use_id,
+            "name": "web_search",
+            "input": input
+        }
+    })
+    .to_string();
+    Event::default().event("content_block_start").data(payload)
+}
+
+fn content_block_start_web_search_tool_result(
+    index: u32,
+    server_tool_use_id: &str,
+    results: &[serde_json::Value],
+) -> Event {
+    let payload = serde_json::json!({
+        "type": "content_block_start",
+        "index": index,
+        "content_block": {
+            "type": "web_search_tool_result",
+            "tool_use_id": server_tool_use_id,
+            "content": results
         }
     })
     .to_string();
@@ -173,12 +228,19 @@ fn message_delta(stop_reason: &str, usage: Option<CodexTokenUsage>) -> Event {
 
 fn anthropic_usage_value(usage: CodexTokenUsage) -> serde_json::Value {
     let uncached_input_tokens = usage.input_tokens.saturating_sub(usage.cached_input_tokens);
-    serde_json::json!({
+    let mut value = serde_json::json!({
         "input_tokens": uncached_input_tokens,
         "cache_creation_input_tokens": 0,
         "cache_read_input_tokens": usage.cached_input_tokens,
         "output_tokens": usage.output_tokens,
-    })
+    });
+    if usage.web_search_requests > 0 {
+        value["server_tool_use"] = serde_json::json!({
+            "web_search_requests": usage.web_search_requests,
+            "web_fetch_requests": 0
+        });
+    }
+    value
 }
 
 fn message_stop() -> Event {
@@ -255,6 +317,7 @@ pub(crate) fn map_backend_event(
         st.completed = true;
         return Some(error_event(&format!("backend stream failed: {message}")));
     }
+    record_completed_web_search_call_ids(&mut st.completed_web_search_call_ids, event_name, data);
 
     match event_name {
         "response.output_text.delta" => {
@@ -263,6 +326,7 @@ pub(crate) fn map_backend_event(
         "response.output_item.added" | "response.output_item.done" => {
             handle_output_item(st, event_name, data, tool_calls, request_id)
         }
+        "response.web_search_call.completed" => handle_web_search_call_event(st, event_name, data),
         "response.function_call_arguments.delta" | "response.custom_tool_call_input.delta" => {
             handle_tool_arg_delta(st, data)
         }
@@ -304,6 +368,7 @@ fn handle_output_item(
     let v = serde_json::from_str::<serde_json::Value>(data).ok()?;
     let item = v.get("item")?;
     match item.get("type").and_then(|v| v.as_str()) {
+        Some("web_search_call") => handle_web_search_call_item(st, item),
         Some("message") => handle_message_item(st, item),
         _ => None,
     }
@@ -351,6 +416,158 @@ fn handle_message_item(st: &mut StreamState, item: &serde_json::Value) -> Option
     (!out.is_empty()).then_some(out)
 }
 
+fn handle_web_search_call_event(
+    st: &mut StreamState,
+    event_name: &str,
+    data: &str,
+) -> Option<Vec<Event>> {
+    let event = serde_json::from_str::<serde_json::Value>(data).ok()?;
+    let call = web_search_call_from_value(event_name, &event)?;
+    emit_web_search_call_blocks(st, call)
+}
+
+fn handle_web_search_call_item(
+    st: &mut StreamState,
+    item: &serde_json::Value,
+) -> Option<Vec<Event>> {
+    let call = web_search_call_from_item(item, "output_item")?;
+    emit_web_search_call_blocks(st, call)
+}
+
+fn emit_web_search_call_blocks(st: &mut StreamState, call: WebSearchCall) -> Option<Vec<Event>> {
+    if !st.emitted_web_search_call_ids.insert(call.call_id) {
+        return None;
+    }
+
+    let server_tool_index = st.add_block();
+    let result_index = st.add_block();
+    Some(vec![
+        content_block_start_server_tool_use(
+            server_tool_index,
+            &call.server_tool_use_id,
+            call.query.as_deref(),
+        ),
+        content_block_stop(server_tool_index),
+        content_block_start_web_search_tool_result(
+            result_index,
+            &call.server_tool_use_id,
+            &call.results,
+        ),
+        content_block_stop(result_index),
+    ])
+}
+
+fn web_search_call_from_value(
+    event_name: &str,
+    event: &serde_json::Value,
+) -> Option<WebSearchCall> {
+    if event.get("type").and_then(serde_json::Value::as_str) != Some(event_name) {
+        return None;
+    }
+    let call_id = event
+        .get("id")
+        .or_else(|| event.get("call_id"))
+        .or_else(|| event.get("item_id"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            event
+                .get("output_index")
+                .and_then(serde_json::Value::as_u64)
+                .map(|index| format!("{event_name}:{index}"))
+        })
+        .unwrap_or_else(|| event_name.to_string());
+    Some(WebSearchCall {
+        server_tool_use_id: server_tool_use_id(&call_id),
+        query: web_search_query(event),
+        results: web_search_results(event),
+        call_id,
+    })
+}
+
+fn web_search_call_from_item(item: &serde_json::Value, fallback: &str) -> Option<WebSearchCall> {
+    if item.get("type").and_then(serde_json::Value::as_str) != Some("web_search_call") {
+        return None;
+    }
+    if item
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|status| status != "completed")
+    {
+        return None;
+    }
+
+    let call_id = item
+        .get("id")
+        .or_else(|| item.get("call_id"))
+        .or_else(|| item.get("item_id"))
+        .and_then(serde_json::Value::as_str)
+        .map_or_else(|| fallback.to_string(), str::to_string);
+    Some(WebSearchCall {
+        server_tool_use_id: server_tool_use_id(&call_id),
+        query: web_search_query(item),
+        results: web_search_results(item),
+        call_id,
+    })
+}
+
+fn server_tool_use_id(call_id: &str) -> String {
+    let safe_suffix: String = call_id
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || *character == '_')
+        .collect();
+    if safe_suffix.is_empty() {
+        "srvtoolu_web_search".to_string()
+    } else if safe_suffix.starts_with("srvtoolu_") {
+        safe_suffix
+    } else {
+        format!("srvtoolu_{safe_suffix}")
+    }
+}
+
+fn web_search_query(value: &serde_json::Value) -> Option<String> {
+    value
+        .pointer("/action/query")
+        .or_else(|| value.pointer("/input/query"))
+        .or_else(|| value.get("query"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+}
+
+fn web_search_results(value: &serde_json::Value) -> Vec<serde_json::Value> {
+    value
+        .pointer("/action/sources")
+        .or_else(|| value.get("sources"))
+        .and_then(serde_json::Value::as_array)
+        .map_or_else(Vec::new, |sources| {
+            sources
+                .iter()
+                .filter_map(web_search_result_from_source)
+                .collect()
+        })
+}
+
+fn web_search_result_from_source(source: &serde_json::Value) -> Option<serde_json::Value> {
+    let url = source.get("url").and_then(serde_json::Value::as_str)?;
+    let mut result = serde_json::json!({
+        "type": "web_search_result",
+        "url": url,
+    });
+    if let Some(title) = source.get("title").and_then(serde_json::Value::as_str) {
+        result["title"] = serde_json::Value::String(title.to_string());
+    }
+    if let Some(page_age) = source.get("page_age").and_then(serde_json::Value::as_str) {
+        result["page_age"] = serde_json::Value::String(page_age.to_string());
+    }
+    if let Some(encrypted_content) = source
+        .get("encrypted_content")
+        .and_then(serde_json::Value::as_str)
+    {
+        result["encrypted_content"] = serde_json::Value::String(encrypted_content.to_string());
+    }
+    Some(result)
+}
+
 fn handle_tool_arg_delta(st: &mut StreamState, data: &str) -> Option<Vec<Event>> {
     let (call_id, _item_id, delta) = parse_delta_event_fields(data)?;
     let call_id = call_id.or_else(|| st.last_tool_call_id.clone())?;
@@ -382,6 +599,16 @@ fn handle_reasoning_delta(st: &mut StreamState, data: &str) -> Option<Vec<Event>
 
 fn handle_completed(st: &mut StreamState, data: &str, request_id: Option<&str>) -> Vec<Event> {
     st.completed_usage = extract_usage_from_completed_event(data);
+    if let Some(usage) = st.completed_usage.as_mut() {
+        usage.web_search_requests =
+            u32::try_from(st.completed_web_search_call_ids.len()).unwrap_or(u32::MAX);
+    }
+
+    let mut out = web_search_calls_from_completed(data)
+        .into_iter()
+        .filter_map(|call| emit_web_search_call_blocks(st, call))
+        .flatten()
+        .collect::<Vec<_>>();
 
     let mut tool_calls_by_index: Vec<(&String, u32)> = st
         .tool_blocks_by_call_id
@@ -390,7 +617,6 @@ fn handle_completed(st: &mut StreamState, data: &str, request_id: Option<&str>) 
         .collect();
     tool_calls_by_index.sort_by_key(|(_, idx)| *idx);
 
-    let mut out = Vec::new();
     for (call_id, tool_index) in tool_calls_by_index {
         let buf = st
             .tool_args_buf_by_call_id
@@ -425,6 +651,22 @@ fn handle_completed(st: &mut StreamState, data: &str, request_id: Option<&str>) 
     out.extend(finalize_message(st));
     out
 }
+
+fn web_search_calls_from_completed(data: &str) -> Vec<WebSearchCall> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else {
+        return Vec::new();
+    };
+    value
+        .pointer("/response/output")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            web_search_call_from_item(item, &format!("response_output_{index}"))
+        })
+        .collect()
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -447,11 +689,14 @@ mod tests {
             output_tokens: 9,
             reasoning_output_tokens: 2,
             total_tokens: 16,
+            web_search_requests: 2,
         });
         assert_eq!(payload["input_tokens"], 4);
         assert_eq!(payload["cache_creation_input_tokens"], 0);
         assert_eq!(payload["cache_read_input_tokens"], 3);
         assert_eq!(payload["output_tokens"], 9);
+        assert_eq!(payload["server_tool_use"]["web_search_requests"], 2);
+        assert_eq!(payload["server_tool_use"]["web_fetch_requests"], 0);
     }
 
     fn fixture(path: &str) -> String {
@@ -644,6 +889,61 @@ mod tests {
         let got = run_bridge_and_capture(&backend, DEFAULT_BACKEND_MODEL, Some("rid_TEST")).await;
         let expected = parse_expected_jsonl("streaming/expected_anthropic_local_shell_call.jsonl");
         assert_eq!(got, expected);
+    }
+
+    #[tokio::test]
+    async fn streaming_bridge_counts_hosted_web_search_usage() {
+        let backend = concat!(
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"web_search_call\",\"id\":\"ws_1\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"rust release\",\"sources\":[{\"title\":\"Rust\",\"url\":\"https://www.rust-lang.org\"}]}}}\n\n",
+            "event: response.output_text.delta\n",
+            "data: {\"delta\":\"Search complete.\"}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"web_search_call\",\"id\":\"ws_1\",\"status\":\"completed\"}],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
+        );
+        let got = run_bridge_and_capture(backend, DEFAULT_BACKEND_MODEL, Some("rid_TEST")).await;
+        let server_tool_uses = got
+            .iter()
+            .filter(|(event, data)| {
+                event == "content_block_start" && data["content_block"]["type"] == "server_tool_use"
+            })
+            .count();
+        let web_search_results = got
+            .iter()
+            .filter(|(event, data)| {
+                event == "content_block_start"
+                    && data["content_block"]["type"] == "web_search_tool_result"
+            })
+            .count();
+        assert_eq!(server_tool_uses, 1);
+        assert_eq!(web_search_results, 1);
+        let result_block = got
+            .iter()
+            .find(|(event, data)| {
+                event == "content_block_start"
+                    && data["content_block"]["type"] == "web_search_tool_result"
+            })
+            .expect("web_search_tool_result")
+            .1
+            .clone();
+        assert_eq!(
+            result_block["content_block"]["content"][0]["url"],
+            "https://www.rust-lang.org"
+        );
+        let message_delta = got
+            .iter()
+            .find(|(event, _data)| event == "message_delta")
+            .expect("message_delta")
+            .1
+            .clone();
+        assert_eq!(
+            message_delta["usage"]["server_tool_use"]["web_search_requests"],
+            1
+        );
+        assert_eq!(
+            message_delta["usage"]["server_tool_use"]["web_fetch_requests"],
+            0
+        );
     }
 
     #[tokio::test]

@@ -41,10 +41,20 @@ pub struct AnthropicOutputConfig {
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct AnthropicToolDefinition {
     pub name: String,
+    #[serde(rename = "type", default)]
+    pub tool_type: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
     pub input_schema: serde_json::Value,
+    #[serde(default)]
+    pub allowed_domains: Vec<String>,
+    #[serde(default)]
+    pub blocked_domains: Vec<String>,
+    #[serde(default)]
+    pub max_uses: Option<u32>,
+    #[serde(flatten)]
+    pub extra: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]

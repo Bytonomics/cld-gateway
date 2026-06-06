@@ -9,7 +9,7 @@ An Anthropic-compatible HTTP proxy that routes requests through the ChatGPT/Code
 ### Homebrew tap
 
 ```sh
-brew tap bytonomics/homebrew-tap
+brew tap bytonomics/tap
 brew install cld-gateway
 ```
 

@@ -3,6 +3,7 @@
 use crate::types::{CodexBackendRequest, CodexBackendResponse};
 use gateway_auth_codex::CodexAuthManager;
 use gateway_core::format_error_chain;
+use gateway_net::{GatewayHttpClient, NetworkPolicyError};
 use reqwest::Response;
 use std::time::Duration;
 use url::Url;
@@ -21,6 +22,11 @@ pub enum BackendError {
         stage: &'static str,
         message: String,
     },
+    #[error("outbound request blocked during {stage}: {message}")]
+    NetworkPolicy {
+        stage: &'static str,
+        message: String,
+    },
     #[error("unexpected response status {0}")]
     UnexpectedStatus(u16),
     #[error("unexpected response status {status}: {body}")]
@@ -29,7 +35,7 @@ pub enum BackendError {
 
 #[derive(Clone)]
 pub struct CodexBackendClient {
-    http: reqwest::Client,
+    http: GatewayHttpClient,
     base_url: String,
     request_timeout: Option<Duration>,
 }
@@ -37,7 +43,7 @@ pub struct CodexBackendClient {
 impl Default for CodexBackendClient {
     fn default() -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http: GatewayHttpClient::default(),
             base_url: "https://chatgpt.com".to_string(),
             request_timeout: None,
         }
@@ -48,6 +54,12 @@ impl CodexBackendClient {
     #[must_use]
     pub fn with_base_url(mut self, base_url: &Url) -> Self {
         self.base_url = base_url.to_string();
+        self
+    }
+
+    #[must_use]
+    pub fn with_http_client(mut self, http: GatewayHttpClient) -> Self {
+        self.http = http;
         self
     }
 
@@ -101,18 +113,17 @@ impl CodexBackendClient {
         );
 
         let body = build_request_body(req);
+        let authorization = format!("Bearer {}", req.access_token.expose());
 
         let mut builder = self
             .http
-            .post(url)
-            .header(
-                reqwest::header::AUTHORIZATION,
-                format!("Bearer {}", req.access_token.expose()),
-            )
+            .post(&url)
+            .map_err(|source| network_policy_failed("prepare request", &source))?
+            .header("Authorization", &authorization)
             .header("chatgpt-account-id", &req.account_id)
             .header("OpenAI-Beta", "responses=experimental")
             .header("originator", "codex_cli_rs")
-            .header(reqwest::header::ACCEPT, "text/event-stream");
+            .header("Accept", "text/event-stream");
 
         if let Some(timeout) = self.request_timeout {
             builder = builder.timeout(timeout);
@@ -120,7 +131,7 @@ impl CodexBackendClient {
 
         let res = builder
             .json(&body)
-            .send()
+            .execute()
             .await
             .map_err(|source| request_failed("send request", source))?;
 
@@ -237,6 +248,13 @@ fn request_failed(stage: &'static str, source: reqwest::Error) -> BackendError {
         stage,
         message,
         source,
+    }
+}
+
+fn network_policy_failed(stage: &'static str, source: &NetworkPolicyError) -> BackendError {
+    BackendError::NetworkPolicy {
+        stage,
+        message: source.to_string(),
     }
 }
 

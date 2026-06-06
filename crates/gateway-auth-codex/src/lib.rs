@@ -14,6 +14,7 @@ mod persist;
 mod revoke;
 
 use gateway_core::Secret;
+use gateway_net::GatewayHttpClient;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -367,7 +368,7 @@ pub fn load_credentials(path: &Path) -> Result<CodexCredentials, CodexAuthError>
 pub struct CodexAuthManager {
     token_url: String,
     client_id: String,
-    http: reqwest::Client,
+    http: GatewayHttpClient,
     state: Arc<CodexAuthManagerState>,
 }
 
@@ -398,7 +399,7 @@ impl Default for CodexAuthManager {
             // Per plan Day 8.
             token_url: "https://auth.openai.com/oauth/token".to_string(),
             client_id: "app_EMoamEEZ73f0CkXaXp7hrann".to_string(),
-            http: reqwest::Client::new(),
+            http: GatewayHttpClient::default(),
             state: Arc::new(CodexAuthManagerState {
                 refresh_lock: tokio::sync::Mutex::new(()),
                 permanent_refresh_failure: tokio::sync::Mutex::new(None),
@@ -411,6 +412,12 @@ impl CodexAuthManager {
     #[must_use]
     pub fn with_token_url(mut self, token_url: &Url) -> Self {
         self.token_url = token_url.to_string();
+        self
+    }
+
+    #[must_use]
+    pub fn with_http_client(mut self, http: GatewayHttpClient) -> Self {
+        self.http = http;
         self
     }
 

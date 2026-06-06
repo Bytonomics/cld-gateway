@@ -23,6 +23,7 @@ use gateway_core::config::{
     GatewayConfig, ModelResolution, load_gateway_config_default_path, resolve_model,
     service_tier_for_config,
 };
+use gateway_net::{GatewayHttpClient, GatewayNetworkPolicy};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -45,6 +46,7 @@ use gateway_state::ToolCallStore;
 pub struct AppState {
     auth: gateway_auth_codex::CodexAuthManager,
     backend: gateway_backend_codex::client::CodexBackendClient,
+    http: GatewayHttpClient,
     openai_models_url: String,
     openai_api_key: Option<Secret<String>>,
     tool_calls: ToolCallStore,
@@ -67,9 +69,13 @@ impl AppState {
                     .ok()
                     .flatten()
             });
-        let backend = backend_client_from_env();
+        let http = http_client_for_config(&gateway_config);
+        let backend = backend_client_from_env(http.clone());
+        let auth = gateway_auth_codex::CodexAuthManager::default().with_http_client(http.clone());
         Ok(Self {
+            auth,
             backend,
+            http,
             openai_models_url: "https://api.openai.com/v1/models".to_string(),
             openai_api_key,
             gateway_config,
@@ -92,8 +98,17 @@ impl AppState {
     }
 }
 
-fn backend_client_from_env() -> gateway_backend_codex::client::CodexBackendClient {
-    let client = gateway_backend_codex::client::CodexBackendClient::default();
+fn http_client_for_config(config: &GatewayConfig) -> GatewayHttpClient {
+    let mut policy = GatewayNetworkPolicy::default();
+    policy.extend_allowed_hosts(&config.network.allowed_hosts);
+    GatewayHttpClient::new(policy)
+}
+
+fn backend_client_from_env(
+    http: GatewayHttpClient,
+) -> gateway_backend_codex::client::CodexBackendClient {
+    let client =
+        gateway_backend_codex::client::CodexBackendClient::default().with_http_client(http);
     match backend_request_timeout_from_env() {
         Some(timeout) => client.with_request_timeout(timeout),
         None => client,
@@ -188,9 +203,8 @@ fn auth_status_response(
     }
 }
 
-async fn auth_refresh() -> axum::response::Response {
-    let manager = gateway_auth_codex::CodexAuthManager::default();
-    match manager.refresh_and_persist_default_path().await {
+async fn auth_refresh(State(state): State<AppState>) -> axum::response::Response {
+    match state.auth.refresh_and_persist_default_path().await {
         Ok(snap) => Json(serde_json::json!({
             "ok": true,
             "account_id": snap.account_id,
@@ -225,15 +239,24 @@ async fn v1_models_with_state(State(state): State<AppState>) -> axum::response::
             .into_response();
     };
 
-    let http = reqwest::Client::new();
-    let res = http
-        .get(&state.openai_models_url)
-        .header(
-            reqwest::header::AUTHORIZATION,
-            format!("Bearer {}", api_key.expose()),
-        )
-        .send()
-        .await;
+    let res = match state.http.get(&state.openai_models_url) {
+        Ok(builder) => {
+            let authorization = format!("Bearer {}", api_key.expose());
+            builder
+                .header("Authorization", &authorization)
+                .execute()
+                .await
+        }
+        Err(err) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "error": { "type": "network_policy_error", "message": err.to_string() }
+                })),
+            )
+                .into_response();
+        }
+    };
 
     let Ok(res) = res else {
         return (
@@ -334,8 +357,23 @@ async fn v1_messages(
     };
 
     let usage = decoded.token_usage.map_or(
-        serde_json::json!({ "input_tokens": 0, "output_tokens": 0 }),
-        |u| serde_json::json!({ "input_tokens": u.input_tokens, "output_tokens": u.output_tokens }),
+        serde_json::json!({
+            "input_tokens": 0,
+            "output_tokens": 0
+        }),
+        |u| {
+            let mut value = serde_json::json!({
+                "input_tokens": u.input_tokens,
+                "output_tokens": u.output_tokens
+            });
+            if u.web_search_requests > 0 {
+                value["server_tool_use"] = serde_json::json!({
+                    "web_search_requests": u.web_search_requests,
+                    "web_fetch_requests": 0
+                });
+            }
+            value
+        },
     );
 
     let response = if decoded.tool_calls.is_empty() {

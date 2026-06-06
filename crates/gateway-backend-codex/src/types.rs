@@ -56,6 +56,7 @@ pub struct CodexTokenUsage {
     pub output_tokens: i64,
     pub reasoning_output_tokens: i64,
     pub total_tokens: i64,
+    pub web_search_requests: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

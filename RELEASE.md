@@ -392,7 +392,7 @@ Do not hand-edit formula checksums unless the workflows cannot be used.
 After the tap formula update lands:
 
 ```sh
-brew tap bytonomics/homebrew-tap
+brew tap bytonomics/tap
 brew fetch --dry-run cld-gateway
 ```
 
@@ -403,7 +403,7 @@ This confirms Homebrew can resolve the formula and fetch the published release a
 Install from the tap:
 
 ```sh
-brew tap bytonomics/homebrew-tap
+brew tap bytonomics/tap
 brew install cld-gateway
 cld-gateway invalid-command 2>&1 | grep -q "unknown command"
 ```

@@ -9,6 +9,7 @@ workspace = true
 [dependencies]
 gateway-auth-codex = { path = "../gateway-auth-codex" }
 gateway-core = { path = "../gateway-core" }
+gateway-net = { path = "../gateway-net" }
 bytes.workspace = true
 eventsource-stream.workspace = true
 futures-util.workspace = true

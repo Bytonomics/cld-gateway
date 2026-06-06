@@ -8,6 +8,10 @@ use crate::types::{
 use gateway_backend_codex::types::CodexToolCallKind;
 use std::collections::HashMap;
 
+const WEB_SEARCH_SOURCES_INCLUDE: &str = "web_search_call.action.sources";
+const ANTHROPIC_WEB_SEARCH_TYPE: &str = "web_search_20250305";
+const OPENAI_WEB_SEARCH_TYPE: &str = "web_search";
+
 pub struct TranslateResult {
     pub instructions: String,
     pub input: Vec<serde_json::Value>,
@@ -18,6 +22,11 @@ pub struct TranslateResult {
     pub reasoning: Option<serde_json::Value>,
     pub include: Vec<String>,
     pub client_metadata: Option<HashMap<String, String>>,
+}
+
+struct TranslatedTools {
+    tools: Vec<serde_json::Value>,
+    include: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -49,8 +58,16 @@ pub fn translate_request_with_context(
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "You are a helpful assistant.".to_string());
     let input = translate_messages_to_backend_items(&req.messages, tool_context)?;
-    let tools = translate_tools(&req.tools)?;
-    let tool_choice = translate_tool_choice(req.tool_choice.as_ref());
+    let hosted_web_search = req
+        .tools
+        .iter()
+        .any(|tool| tool.tool_type.as_deref() == Some(ANTHROPIC_WEB_SEARCH_TYPE));
+    let translated_tools = translate_tools(&req.tools)?;
+    let tool_choice = if hosted_web_search {
+        "required".to_string()
+    } else {
+        translate_tool_choice(req.tool_choice.as_ref())
+    };
     let text = translate_output_config(req.output_config.as_ref());
 
     let mut client_metadata: HashMap<String, String> = HashMap::new();
@@ -78,12 +95,12 @@ pub fn translate_request_with_context(
     Ok(TranslateResult {
         instructions,
         input,
-        tools,
+        tools: translated_tools.tools,
         tool_choice,
         parallel_tool_calls: true,
         text,
         reasoning,
-        include: Vec::new(),
+        include: translated_tools.include,
         client_metadata,
     })
 }
@@ -402,18 +419,93 @@ fn tool_result_output_value(block: &AnthropicContentBlock) -> serde_json::Value 
     }
 }
 
-fn translate_tools(tools: &[AnthropicToolDefinition]) -> Result<Vec<serde_json::Value>, String> {
+fn translate_tools(tools: &[AnthropicToolDefinition]) -> Result<TranslatedTools, String> {
     let mut out = Vec::with_capacity(tools.len());
+    let mut include = Vec::new();
     for t in tools {
-        let parameters = tool_schema_parameters_for_backend(&t.name, &t.input_schema)?;
-        out.push(serde_json::json!({
-            "type": "function",
-            "name": t.name,
-            "description": t.description,
-            "parameters": parameters
-        }));
+        match t.tool_type.as_deref() {
+            Some(ANTHROPIC_WEB_SEARCH_TYPE) => {
+                out.push(translate_hosted_web_search_tool(t)?);
+                if !include
+                    .iter()
+                    .any(|field| field == WEB_SEARCH_SOURCES_INCLUDE)
+                {
+                    include.push(WEB_SEARCH_SOURCES_INCLUDE.to_string());
+                }
+            }
+            Some(other) => {
+                return Err(format!(
+                    "unsupported Anthropic hosted tool type `{other}` for tool `{}`",
+                    t.name
+                ));
+            }
+            None => {
+                let parameters = tool_schema_parameters_for_backend(&t.name, &t.input_schema)?;
+                out.push(serde_json::json!({
+                    "type": "function",
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": parameters
+                }));
+            }
+        }
     }
-    Ok(out)
+    Ok(TranslatedTools {
+        tools: out,
+        include,
+    })
+}
+
+fn translate_hosted_web_search_tool(
+    tool: &AnthropicToolDefinition,
+) -> Result<serde_json::Value, String> {
+    if tool.name != OPENAI_WEB_SEARCH_TYPE {
+        return Err(format!(
+            "Anthropic `{ANTHROPIC_WEB_SEARCH_TYPE}` tool must be named `{OPENAI_WEB_SEARCH_TYPE}`, got `{}`",
+            tool.name
+        ));
+    }
+    if !tool.input_schema.is_null() {
+        return Err(format!(
+            "Anthropic `{ANTHROPIC_WEB_SEARCH_TYPE}` tool must not include `input_schema`"
+        ));
+    }
+    if !tool.blocked_domains.is_empty() {
+        return Err(format!(
+            "Anthropic `{ANTHROPIC_WEB_SEARCH_TYPE}` field `blocked_domains` is unsupported by OpenAI web_search translation; remove blocked_domains or use allowed_domains"
+        ));
+    }
+    if !tool.extra.is_empty() {
+        let fields = tool.extra.keys().cloned().collect::<Vec<_>>().join(", ");
+        return Err(format!(
+            "Anthropic `{ANTHROPIC_WEB_SEARCH_TYPE}` has unsupported field(s): {fields}"
+        ));
+    }
+    if tool.max_uses == Some(0) {
+        return Err(format!(
+            "Anthropic `{ANTHROPIC_WEB_SEARCH_TYPE}` field `max_uses` must be greater than 0"
+        ));
+    }
+
+    let mut obj = serde_json::Map::from_iter([
+        (
+            "type".to_string(),
+            serde_json::Value::String(OPENAI_WEB_SEARCH_TYPE.to_string()),
+        ),
+        (
+            "external_web_access".to_string(),
+            serde_json::Value::Bool(true),
+        ),
+    ]);
+
+    if !tool.allowed_domains.is_empty() {
+        obj.insert(
+            "filters".to_string(),
+            serde_json::json!({ "allowed_domains": tool.allowed_domains.clone() }),
+        );
+    }
+
+    Ok(serde_json::Value::Object(obj))
 }
 
 fn tool_schema_parameters_for_backend(
@@ -686,6 +778,7 @@ mod tests {
         let mut req = base_req();
         req.tools.push(AnthropicToolDefinition {
             name: "Agent".to_string(),
+            tool_type: None,
             description: Some("Launch a subagent".to_string()),
             input_schema: serde_json::json!({
                 "type": "object",
@@ -697,6 +790,10 @@ mod tests {
                 },
                 "required": ["description", "prompt", "isolation"]
             }),
+            allowed_domains: Vec::new(),
+            blocked_domains: Vec::new(),
+            max_uses: None,
+            extra: std::collections::BTreeMap::new(),
         });
 
         let translated = translate_request(&req).expect("translate");
@@ -716,6 +813,85 @@ mod tests {
                 .iter()
                 .any(|field| field.as_str() == Some("isolation"))
         );
+    }
+
+    #[test]
+    fn hosted_web_search_translates_to_openai_web_search() {
+        let mut req = base_req();
+        req.tools.push(AnthropicToolDefinition {
+            name: "web_search".to_string(),
+            tool_type: Some("web_search_20250305".to_string()),
+            description: None,
+            input_schema: serde_json::Value::Null,
+            allowed_domains: vec!["github.com".to_string(), "docs.brew.sh".to_string()],
+            blocked_domains: Vec::new(),
+            max_uses: Some(8),
+            extra: std::collections::BTreeMap::new(),
+        });
+
+        let translated = translate_request(&req).expect("translate");
+
+        assert_eq!(translated.tools.len(), 1);
+        assert_eq!(
+            translated.tools[0].get("type").and_then(|v| v.as_str()),
+            Some("web_search")
+        );
+        assert_eq!(
+            translated.tools[0]
+                .pointer("/filters/allowed_domains/0")
+                .and_then(|v| v.as_str()),
+            Some("github.com")
+        );
+        assert_eq!(
+            translated.include,
+            vec!["web_search_call.action.sources".to_string()]
+        );
+        assert_eq!(translated.tool_choice, "required");
+    }
+
+    #[test]
+    fn hosted_web_search_rejects_blocked_domains() {
+        let mut req = base_req();
+        req.tools.push(AnthropicToolDefinition {
+            name: "web_search".to_string(),
+            tool_type: Some("web_search_20250305".to_string()),
+            description: None,
+            input_schema: serde_json::Value::Null,
+            allowed_domains: Vec::new(),
+            blocked_domains: vec!["example.com".to_string()],
+            max_uses: Some(8),
+            extra: std::collections::BTreeMap::new(),
+        });
+
+        let Err(error) = translate_request(&req) else {
+            panic!("blocked_domains must fail");
+        };
+        assert!(error.contains("blocked_domains"));
+        assert!(error.contains("unsupported"));
+    }
+
+    #[test]
+    fn hosted_web_search_rejects_unknown_fields() {
+        let mut req = base_req();
+        req.tools.push(AnthropicToolDefinition {
+            name: "web_search".to_string(),
+            tool_type: Some("web_search_20250305".to_string()),
+            description: None,
+            input_schema: serde_json::Value::Null,
+            allowed_domains: Vec::new(),
+            blocked_domains: Vec::new(),
+            max_uses: Some(8),
+            extra: std::collections::BTreeMap::from_iter([(
+                "mystery".to_string(),
+                serde_json::Value::Bool(true),
+            )]),
+        });
+
+        let Err(error) = translate_request(&req) else {
+            panic!("unknown fields must fail");
+        };
+        assert!(error.contains("unsupported field"));
+        assert!(error.contains("mystery"));
     }
 
     #[test]

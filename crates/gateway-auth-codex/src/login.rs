@@ -12,6 +12,7 @@ use tiny_http::{Response, Server};
 
 use crate::auth_json::{AuthJson, Tokens};
 use crate::{CodexAuthError, jwt, paths, persist};
+use gateway_net::GatewayHttpClient;
 
 const DEFAULT_ISSUER: &str = "https://auth.openai.com";
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -131,7 +132,7 @@ async fn exchange_code_for_tokens(
         refresh: String,
     }
 
-    let http = reqwest::Client::new();
+    let http = GatewayHttpClient::default();
     let token_endpoint = format!("{DEFAULT_ISSUER}/oauth/token");
     let body = format!(
         "grant_type=authorization_code&code={}&redirect_uri={}&client_id={}&code_verifier={}",
@@ -142,10 +143,11 @@ async fn exchange_code_for_tokens(
     );
 
     let res = http
-        .post(token_endpoint)
+        .post(&token_endpoint)
+        .map_err(io::Error::other)?
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body(body)
-        .send()
+        .execute()
         .await
         .map_err(io::Error::other)?;
 

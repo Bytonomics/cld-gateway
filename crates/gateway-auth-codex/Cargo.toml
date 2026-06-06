@@ -10,6 +10,7 @@ workspace = true
 base64.workspace = true
 dirs.workspace = true
 gateway-core = { path = "../gateway-core" }
+gateway-net = { path = "../gateway-net" }
 rand.workspace = true
 reqwest.workspace = true
 serde.workspace = true

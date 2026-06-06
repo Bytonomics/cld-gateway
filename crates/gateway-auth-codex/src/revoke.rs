@@ -3,6 +3,7 @@
 use crate::auth_json::AuthJson;
 use crate::auth_json::Tokens;
 use crate::{CodexAuthError, load_auth_json};
+use gateway_net::GatewayHttpClient;
 use serde::Serialize;
 use std::path::Path;
 use std::time::Duration;
@@ -95,13 +96,14 @@ async fn revoke_oauth_token(
         client_id: kind.client_id(),
     };
 
-    let client = reqwest::Client::new();
+    let client = GatewayHttpClient::default();
     let response = client
         .post(endpoint)
+        .map_err(std::io::Error::other)?
         .header("Content-Type", "application/json")
         .timeout(REVOKE_HTTP_TIMEOUT)
         .json(&request)
-        .send()
+        .execute()
         .await
         .map_err(std::io::Error::other)?;
 

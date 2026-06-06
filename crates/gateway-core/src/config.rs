@@ -14,6 +14,7 @@ pub struct GatewayConfig {
     pub version: u32,
     pub workflow: WorkflowConfig,
     pub providers: ProviderConfigs,
+    pub network: NetworkConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -26,6 +27,12 @@ pub struct WorkflowConfig {
 #[serde(default)]
 pub struct ProviderConfigs {
     pub openai: OpenAiProviderConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct NetworkConfig {
+    pub allowed_hosts: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -58,6 +65,7 @@ impl Default for GatewayConfig {
             version: default_config_version(),
             workflow: WorkflowConfig::default(),
             providers: ProviderConfigs::default(),
+            network: NetworkConfig::default(),
         }
     }
 }

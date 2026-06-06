@@ -11,6 +11,7 @@ use futures_util::Stream;
 use futures_util::StreamExt as _;
 use gateway_core::format_error_chain;
 use serde::Deserialize;
+use std::collections::BTreeSet;
 use std::error::Error;
 
 #[derive(Debug, thiserror::Error)]
@@ -51,6 +52,7 @@ where
     let mut saw_output_text_delta = false;
     let mut tool_calls: Vec<CodexToolCall> = Vec::new();
     let mut last_usage: Option<CodexTokenUsage> = None;
+    let mut web_search_call_ids = BTreeSet::new();
     let mut seen_events = Vec::new();
 
     while let Some(item) = event_stream.next().await {
@@ -76,6 +78,7 @@ where
         {
             last_usage = Some(usage);
         }
+        record_completed_web_search_call_ids(&mut web_search_call_ids, &event.event, data);
         match event.event.as_str() {
             "response.output_text.delta" => {
                 if let Some(text) = extract_text_from_data(data) {
@@ -116,6 +119,9 @@ where
         return Err(SseDecodeError::NoFinalText {
             events: seen_events.join(","),
         });
+    }
+    if let Some(usage) = last_usage.as_mut() {
+        usage.web_search_requests = saturating_u32_len(web_search_call_ids.len());
     }
 
     Ok(CodexUnaryDecoded {
@@ -184,7 +190,90 @@ pub fn extract_usage_from_completed_event(data: &str) -> Option<CodexTokenUsage>
             .output_tokens_details
             .map_or(0, |d| d.reasoning_tokens),
         total_tokens,
+        web_search_requests: 0,
     })
+}
+
+pub fn record_completed_web_search_call_ids(
+    web_search_call_ids: &mut BTreeSet<String>,
+    event_name: &str,
+    data: &str,
+) {
+    for call_id in completed_web_search_call_ids(event_name, data) {
+        web_search_call_ids.insert(call_id);
+    }
+}
+
+#[must_use]
+pub fn completed_web_search_call_ids(event_name: &str, data: &str) -> Vec<String> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else {
+        return Vec::new();
+    };
+
+    match event_name {
+        "response.output_item.done" => value
+            .get("item")
+            .and_then(|item| completed_web_search_call_id(item, "output_item"))
+            .into_iter()
+            .collect(),
+        "response.web_search_call.completed" => event_web_search_call_id(&value, event_name)
+            .into_iter()
+            .collect(),
+        "response.completed" => value
+            .pointer("/response/output")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .filter_map(|(index, item)| {
+                completed_web_search_call_id(item, &format!("response_output_{index}"))
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn event_web_search_call_id(event: &serde_json::Value, fallback: &str) -> Option<String> {
+    if event.get("type").and_then(serde_json::Value::as_str) != Some(fallback) {
+        return None;
+    }
+    event
+        .get("id")
+        .or_else(|| event.get("call_id"))
+        .or_else(|| event.get("item_id"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            event
+                .get("output_index")
+                .and_then(serde_json::Value::as_u64)
+                .map(|index| format!("{fallback}:{index}"))
+        })
+        .or_else(|| Some(fallback.to_string()))
+}
+
+fn completed_web_search_call_id(item: &serde_json::Value, fallback: &str) -> Option<String> {
+    if item.get("type").and_then(serde_json::Value::as_str) != Some("web_search_call") {
+        return None;
+    }
+    if item
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|status| status != "completed")
+    {
+        return None;
+    }
+
+    item.get("id")
+        .or_else(|| item.get("call_id"))
+        .or_else(|| item.get("item_id"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .or_else(|| Some(fallback.to_string()))
+}
+
+fn saturating_u32_len(len: usize) -> u32 {
+    u32::try_from(len).unwrap_or(u32::MAX)
 }
 
 fn event_stream_decode_error<E>(source: EventStreamError<E>) -> SseDecodeError
@@ -232,8 +321,8 @@ fn record_seen_event(seen_events: &mut Vec<String>, event_name: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        SseDecodeError, extract_usage_from_completed_event, format_event_stream_error,
-        read_sse_to_completion,
+        SseDecodeError, completed_web_search_call_ids, extract_usage_from_completed_event,
+        format_event_stream_error, read_sse_to_completion,
     };
     use crate::types::CodexToolCallKind;
     use bytes::Bytes;
@@ -411,6 +500,40 @@ mod tests {
             .expect("json object");
         assert_eq!(args["status"], "completed");
         assert_eq!(args["action"]["command"][1], "hi");
+    }
+
+    #[tokio::test]
+    async fn sse_ignores_hosted_web_search_call_and_keeps_final_text() {
+        let sse = concat!(
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"web_search_call\",\"id\":\"ws_1\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"rust release\"}}}\n\n",
+            "event: response.output_text.delta\n",
+            "data: {\"delta\":\"Search complete.\"}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
+        );
+
+        let byte_stream = stream::iter(vec![Ok::<Bytes, std::io::Error>(Bytes::from(sse))]);
+        let decoded = read_sse_to_completion(byte_stream).await.unwrap();
+        assert_eq!(decoded.final_text, "Search complete.");
+        assert!(decoded.tool_calls.is_empty());
+        assert_eq!(decoded.token_usage.expect("usage").web_search_requests, 1);
+    }
+
+    #[test]
+    fn completed_web_search_ids_extract_from_streaming_event_and_completed_output() {
+        let streaming =
+            r#"{"type":"response.web_search_call.completed","item_id":"ws_1","output_index":0}"#;
+        assert_eq!(
+            completed_web_search_call_ids("response.web_search_call.completed", streaming),
+            vec!["ws_1".to_string()]
+        );
+
+        let completed = r#"{"type":"response.completed","response":{"output":[{"type":"web_search_call","id":"ws_2","status":"completed"}]}}"#;
+        assert_eq!(
+            completed_web_search_call_ids("response.completed", completed),
+            vec!["ws_2".to_string()]
+        );
     }
 
     #[test]

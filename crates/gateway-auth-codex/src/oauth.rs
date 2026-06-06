@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use crate::CodexAuthError;
+use gateway_net::GatewayHttpClient;
 
 #[derive(Debug, serde::Serialize)]
 struct RefreshRequest<'a> {
@@ -24,7 +25,7 @@ pub struct RefreshResponse {
 /// Returns an error if the HTTP request fails, the response status is not success, or the response
 /// body does not contain a usable `access_token`.
 pub async fn refresh_access_token(
-    http: &reqwest::Client,
+    http: &GatewayHttpClient,
     token_url: &str,
     client_id: &str,
     refresh_token: &str,
@@ -37,8 +38,11 @@ pub async fn refresh_access_token(
 
     let res = http
         .post(token_url)
+        .map_err(|source| CodexAuthError::RefreshTransportFailed {
+            message: source.to_string(),
+        })?
         .form(&payload)
-        .send()
+        .execute()
         .await
         .map_err(|source| CodexAuthError::RefreshTransportFailed {
             message: source.to_string(),

@@ -620,6 +620,7 @@ dependencies = [
  "base64",
  "dirs",
  "gateway-core",
+ "gateway-net",
  "rand 0.8.6",
  "reqwest",
  "serde",
@@ -646,6 +647,7 @@ dependencies = [
  "futures-util",
  "gateway-auth-codex",
  "gateway-core",
+ "gateway-net",
  "reqwest",
  "serde",
  "serde_json",
@@ -677,6 +679,7 @@ dependencies = [
  "gateway-auth-codex",
  "gateway-backend-codex",
  "gateway-core",
+ "gateway-net",
  "gateway-state",
  "reqwest",
  "serde",
@@ -688,6 +691,18 @@ dependencies = [
  "url",
  "uuid",
  "wiremock",
+]
+
+[[package]]
+name = "gateway-net"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "serde",
+ "thiserror",
+ "tiny_http",
+ "tokio",
+ "url",
 ]
 
 [[package]]

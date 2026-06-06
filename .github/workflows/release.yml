@@ -141,10 +141,12 @@ jobs:
           set -euo pipefail
           for target in aarch64-apple-darwin x86_64-apple-darwin aarch64-unknown-linux-musl x86_64-unknown-linux-musl; do
             archive="dist/cld-gateway-package-${target}.tar.gz"
+            listing="dist/cld-gateway-package-${target}.contents"
             echo "Verifying ${archive}"
             test -f "${archive}" || { echo "Missing: ${archive}"; exit 1; }
-            tar -tzf "${archive}" | grep -q "^bin/cld-gateway$" || { echo "Missing bin/cld-gateway in ${archive}"; exit 1; }
-            tar -tzf "${archive}" | grep -q "cld-gateway-package.json" || { echo "Missing cld-gateway-package.json in ${archive}"; exit 1; }
+            tar -tzf "${archive}" > "${listing}"
+            grep -q "^bin/cld-gateway$" "${listing}" || { echo "Missing bin/cld-gateway in ${archive}"; exit 1; }
+            grep -q "cld-gateway-package.json" "${listing}" || { echo "Missing cld-gateway-package.json in ${archive}"; exit 1; }
             echo "OK: ${archive}"
           done
 

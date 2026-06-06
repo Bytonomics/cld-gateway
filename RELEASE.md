@@ -270,6 +270,55 @@ What each job does:
 - `verify`: confirms each archive exists and contains `bin/cld-gateway` plus `cld-gateway-package.json`.
 - `release`: publishes GitHub Release assets, generates `cld-gateway-package_SHA256SUMS`, and dispatches the Homebrew tap update.
 
+### 6.a. If the release workflow fails before publishing assets
+
+If the release workflow fails before publishing GitHub Release assets, fix the code/workflow, commit the fix, push `main`, then move the same release tag to the fixed commit.
+
+Use one copy-paste block:
+
+```sh
+VERSION=X.Y.Z
+TAG="cld-gateway-v${VERSION}"
+
+git status
+git add .github/workflows/release.yml README.md RELEASE.md homebrew-tap Cargo.toml Cargo.lock
+git commit -m "fix(release): repair ${TAG} release workflow"
+git push origin main
+
+git tag -fa "${TAG}" -m "Release ${VERSION}"
+git push --force origin "${TAG}"
+
+git rev-parse HEAD
+git ls-remote --tags origin "${TAG}"
+```
+
+### 6.b. If the release workflow fails after publishing assets
+
+If GitHub Release assets already exist for the tag, do not blindly reuse the tag until you inspect whether a partial release was published. Delete or replace the partial GitHub Release only after confirming it is incomplete, then move the tag to the fixed commit.
+
+Use one copy-paste block:
+
+```sh
+VERSION=X.Y.Z
+TAG="cld-gateway-v${VERSION}"
+
+git status
+git add .github/workflows/release.yml README.md RELEASE.md homebrew-tap Cargo.toml Cargo.lock
+git commit -m "fix(release): repair ${TAG} release workflow"
+git push origin main
+
+gh release view "${TAG}"
+gh release delete "${TAG}" --yes --cleanup-tag
+
+git tag -fa "${TAG}" -m "Release ${VERSION}"
+git push --force origin "${TAG}"
+
+git rev-parse HEAD
+git ls-remote --tags origin "${TAG}"
+```
+
+Only use `gh release delete ... --cleanup-tag` for a failed/partial release that should be replaced. Do not use it for a release users may already have consumed.
+
 ### 7. Verify GitHub Release assets
 
 After the workflow completes, open:

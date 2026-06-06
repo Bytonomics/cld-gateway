@@ -652,15 +652,21 @@ fn anthropic_stream_start_events(msg_id: &str, model: &str) -> Vec<Event> {
     vec![
         Event::default().event("message_start").data(
             serde_json::json!({
-                "type": "message_start",
-                "message": {
-                    "id": msg_id,
-                    "type": "message",
-                    "role": "assistant",
+            "type": "message_start",
+            "message": {
+                "id": msg_id,
+                "type": "message",
+                "role": "assistant",
                     "content": [],
                     "model": model,
                     "stop_reason": null,
-                    "stop_sequence": null
+                    "stop_sequence": null,
+                    "usage": {
+                        "input_tokens": 0,
+                        "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": 0,
+                        "output_tokens": 0
+                    }
                 }
             })
             .to_string(),

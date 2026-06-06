@@ -18,18 +18,18 @@ brew install cld-gateway
 ### Shell installer
 
 ```sh
-curl -fsSL https://github.com/bytonomics/gateway/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/Bytonomics/cld-gateway/releases/latest/download/install.sh | sh
 ```
 
 Or with version pinning:
 
 ```sh
-curl -fsSL https://github.com/bytonomics/gateway/releases/latest/download/install.sh | sh -s -- --release 0.1.0
+curl -fsSL https://github.com/Bytonomics/cld-gateway/releases/latest/download/install.sh | sh -s -- --release 0.1.0
 ```
 
 ### Direct download
 
-Download pre-built binaries from the [GitHub Releases page](https://github.com/bytonomics/gateway/releases).
+Download pre-built binaries from the [GitHub Releases page](https://github.com/Bytonomics/cld-gateway/releases).
 
 Verify checksums using `cld-gateway-package_SHA256SUMS`, which is published alongside every release.
 

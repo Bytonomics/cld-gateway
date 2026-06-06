@@ -96,7 +96,7 @@ function Resolve-Version {
         return $normalizedVersion
     }
 
-    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/bytonomics/gateway/releases/latest"
+    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/Bytonomics/cld-gateway/releases/latest"
     if (-not $release.tag_name) {
         Write-Error "Failed to resolve the latest cld-gateway release version."
         exit 1
@@ -113,7 +113,7 @@ function Get-ReleaseAssetUrl {
         [string]$ResolvedVersion
     )
 
-    return "https://github.com/bytonomics/gateway/releases/download/cld-gateway-v$ResolvedVersion/$AssetName"
+    return "https://github.com/Bytonomics/cld-gateway/releases/download/cld-gateway-v$ResolvedVersion/$AssetName"
 }
 
 function Get-PackageArchiveDigest {
@@ -182,7 +182,7 @@ if ($env:OS -ne "Windows_NT") {
 # 1. Use WSL2 (Windows Subsystem for Linux) and run install.sh from there
 # 2. Build from source: clone the repo and run 'cargo build --release -p gatewayd'
 #
-# Check https://github.com/bytonomics/gateway/releases for future Windows binary
+# Check https://github.com/Bytonomics/cld-gateway/releases for future Windows binary
 # availability.
 # This placeholder is intentionally not part of the v1 release asset set.
 # This placeholder is intentionally not part of the v1 release asset set.
@@ -195,14 +195,14 @@ Write-Host "║  Windows binaries will be available in a future release.        
 Write-Host "║                                                                           ║"
 Write-Host "║  RECOMMENDED WORKAROUNDS:                                                 ║"
 Write-Host "║  1. Use WSL2: Install WSL2, then run:                                     ║"
-Write-Host "║     bash -c 'curl -fsSL github.com/bytonomics/gateway/releases/latest"
+Write-Host "║     bash -c 'curl -fsSL github.com/Bytonomics/cld-gateway/releases/latest"
 Write-Host "║     /download/install.sh | sh'"
 Write-Host "║                                                                           ║"
-Write-Host "║  2. Build from source: https://github.com/bytonomics/gateway              ║"
+Write-Host "║  2. Build from source: https://github.com/Bytonomics/cld-gateway          ║"
 Write-Host "║     git clone <repo> && cd gateway                                        ║"
 Write-Host "║     cargo build --release -p gatewayd                                     ║"
 Write-Host "║                                                                           ║"
-Write-Host "║  For updates, watch: https://github.com/bytonomics/gateway/releases       ║"
+Write-Host "║  For updates, watch: https://github.com/Bytonomics/cld-gateway/releases   ║"
 Write-Host "║                                                                           ║"
 Write-Host "╚═══════════════════════════════════════════════════════════════════════════╝"
 exit 1

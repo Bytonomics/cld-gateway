@@ -18,8 +18,8 @@ Maintainer-facing checklist for publishing a new `cld-gateway` release.
 
 ## Prerequisites
 
-- Push tag access to `bytonomics/gateway`
-- Ability to create GitHub Releases on `bytonomics/gateway`
+- Push tag access to `Bytonomics/cld-gateway`
+- Ability to create GitHub Releases on `Bytonomics/cld-gateway`
 - Python 3.9+ (for package builder scripts)
 - Rust stable toolchain (for building binaries locally if needed)
 - macOS or Linux (Windows support is planned for a future release)
@@ -81,7 +81,7 @@ The tag push triggers the release workflow automatically.
 
 ### 4. Monitor the release workflow
 
-Go to: `https://github.com/bytonomics/gateway/actions`
+Go to: `https://github.com/Bytonomics/cld-gateway/actions`
 
 Wait for the `release` workflow to complete. It runs four jobs in sequence:
 
@@ -96,7 +96,7 @@ The build matrix produces binaries for all supported targets. The workflow is co
 After the workflow completes, open the release at:
 
 ```
-https://github.com/bytonomics/gateway/releases/tag/cld-gateway-vX.Y.Z
+https://github.com/Bytonomics/cld-gateway/releases/tag/cld-gateway-vX.Y.Z
 ```
 
 Confirm the following assets are present:
@@ -144,7 +144,7 @@ Confirm the installed binary prints the deterministic `unknown command` parser e
 Verify the shell installer works from the published release:
 
 ```sh
-curl -fsSL https://github.com/bytonomics/gateway/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/Bytonomics/cld-gateway/releases/latest/download/install.sh | sh
 ```
 
 Then run the installed binary:

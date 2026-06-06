@@ -131,7 +131,7 @@ release_url_for_asset() {
   asset="$1"
   resolved_version="$2"
 
-  printf 'https://github.com/bytonomics/gateway/releases/download/cld-gateway-v%s/%s\n' "$resolved_version" "$asset"
+  printf 'https://github.com/Bytonomics/cld-gateway/releases/download/cld-gateway-v%s/%s\n' "$resolved_version" "$asset"
 }
 
 package_archive_digest() {

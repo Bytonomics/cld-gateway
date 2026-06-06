@@ -179,7 +179,16 @@ fn auth_status_from_parsed(auth: &auth_json::AuthJson) -> GatewayAuthStatus {
 /// Returns `AuthNotFound` if auth is missing, or parse/io errors otherwise.
 pub fn load_gateway_auth_status_default_path() -> Result<Option<GatewayAuthStatus>, CodexAuthError>
 {
-    match load_auth_json_default_path() {
+    load_gateway_auth_status(&paths::default_auth_json_path())
+}
+
+/// Loads gateway auth status from the provided `auth.json` path.
+///
+/// # Errors
+///
+/// Returns parse/io errors for malformed or unreadable auth files. Missing auth returns `Ok(None)`.
+pub fn load_gateway_auth_status(path: &Path) -> Result<Option<GatewayAuthStatus>, CodexAuthError> {
+    match load_auth_json(path) {
         Ok(auth) => Ok(Some(auth_status_from_parsed(&auth))),
         Err(CodexAuthError::AuthNotFound { .. }) => Ok(None),
         Err(err) => Err(err),

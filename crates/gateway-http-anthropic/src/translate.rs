@@ -405,7 +405,7 @@ fn tool_result_output_value(block: &AnthropicContentBlock) -> serde_json::Value 
 fn translate_tools(tools: &[AnthropicToolDefinition]) -> Result<Vec<serde_json::Value>, String> {
     let mut out = Vec::with_capacity(tools.len());
     for t in tools {
-        let parameters = normalize_json_schema_parameters(&t.input_schema)?;
+        let parameters = tool_schema_parameters_for_backend(&t.name, &t.input_schema)?;
         out.push(serde_json::json!({
             "type": "function",
             "name": t.name,
@@ -414,6 +414,39 @@ fn translate_tools(tools: &[AnthropicToolDefinition]) -> Result<Vec<serde_json::
         }));
     }
     Ok(out)
+}
+
+fn tool_schema_parameters_for_backend(
+    tool_name: &str,
+    schema: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let mut parameters = normalize_json_schema_parameters(schema)?;
+    apply_backend_tool_schema_policies(tool_name, &mut parameters);
+    Ok(parameters)
+}
+
+fn apply_backend_tool_schema_policies(tool_name: &str, parameters: &mut serde_json::Value) {
+    if tool_name != "Agent" {
+        return;
+    }
+
+    let Some(obj) = parameters.as_object_mut() else {
+        return;
+    };
+
+    if let Some(properties) = obj
+        .get_mut("properties")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        properties.remove("isolation");
+    }
+
+    if let Some(required) = obj
+        .get_mut("required")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        required.retain(|field| field.as_str() != Some("isolation"));
+    }
 }
 
 fn normalize_json_schema_parameters(
@@ -645,6 +678,43 @@ mod tests {
                 .get("additionalProperties")
                 .and_then(serde_json::Value::as_bool),
             Some(false)
+        );
+    }
+
+    #[test]
+    fn agent_tool_schema_hides_isolation_from_backend() {
+        let mut req = base_req();
+        req.tools.push(AnthropicToolDefinition {
+            name: "Agent".to_string(),
+            description: Some("Launch a subagent".to_string()),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "description": { "type": "string" },
+                    "prompt": { "type": "string" },
+                    "isolation": { "type": "string", "enum": ["worktree"] }
+                },
+                "required": ["description", "prompt", "isolation"]
+            }),
+        });
+
+        let translated = translate_request(&req).expect("translate");
+        let parameters = translated.tools[0].get("parameters").expect("parameters");
+        let properties = parameters
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .expect("properties object");
+        let required = parameters
+            .get("required")
+            .and_then(serde_json::Value::as_array)
+            .expect("required array");
+
+        assert!(properties.get("isolation").is_none());
+        assert!(
+            !required
+                .iter()
+                .any(|field| field.as_str() == Some("isolation"))
         );
     }
 

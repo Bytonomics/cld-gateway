@@ -144,8 +144,21 @@ async fn health() -> impl IntoResponse {
     Json(serde_json::json!({ "status": "ok" }))
 }
 
-async fn auth_status() -> impl IntoResponse {
-    match gateway_auth_codex::load_gateway_auth_status_default_path() {
+async fn auth_status(State(state): State<AppState>) -> impl IntoResponse {
+    let status = match auth_path_override(&state) {
+        Some(path) => gateway_auth_codex::load_gateway_auth_status(path),
+        None => gateway_auth_codex::load_gateway_auth_status_default_path(),
+    };
+    auth_status_response(status)
+}
+
+fn auth_status_response(
+    status: Result<
+        Option<gateway_auth_codex::GatewayAuthStatus>,
+        gateway_auth_codex::CodexAuthError,
+    >,
+) -> Json<serde_json::Value> {
+    match status {
         Ok(Some(status)) => Json(serde_json::json!({
             "logged_in": status.ready_for_messages(),
             "ready_for_messages": status.ready_for_messages(),
@@ -1101,6 +1114,32 @@ mod messages_tests {
     }
 
     #[test]
+    fn unary_tool_call_content_block_removes_agent_isolation() {
+        let block = tool_call_content_block(&CodexToolCall {
+            call_id: "call_agent".to_string(),
+            name: "Agent".to_string(),
+            arguments: serde_json::json!({
+                "description": "Research files",
+                "prompt": "Inspect relevant files",
+                "isolation": "worktree",
+                "subagent_type": "Explore"
+            })
+            .to_string(),
+            kind: CodexToolCallKind::Function,
+        });
+
+        let input = block
+            .get("input")
+            .and_then(|value| value.as_object())
+            .expect("input object");
+        assert_eq!(
+            input.get("description").and_then(|value| value.as_str()),
+            Some("Research files")
+        );
+        assert!(input.get("isolation").is_none());
+    }
+
+    #[test]
     fn translation_context_uses_stored_tool_kind_without_translator_io() {
         let tool_calls_path = std::env::temp_dir().join(format!(
             "gateway_tool_context_{}.sqlite",
@@ -1404,22 +1443,15 @@ mod messages_tests {
 
     #[tokio::test]
     async fn test_auth_status_missing_auth_returns_remediation() {
-        // Temporarily move the default auth file if it exists, to ensure we test the missing auth case
-        let default_auth_path = gateway_auth_codex::paths::default_auth_json_path();
-        let backup_path = default_auth_path.with_extension("json.backup");
-
-        // Move existing auth file to backup
-        let moved_backup = if default_auth_path.exists() {
-            let _ = std::fs::rename(&default_auth_path, &backup_path);
-            true
-        } else {
-            false
+        let auth_path = std::env::temp_dir().join(format!(
+            "gateway_missing_auth_{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        let state = super::AppState {
+            auth_json_path: Some(auth_path),
+            ..super::AppState::default()
         };
-
-        // Delete the auth file to ensure missing state
-        let _ = std::fs::remove_file(&default_auth_path);
-
-        let app = super::router(super::AppState::default());
+        let app = super::router(state);
         let res = app
             .oneshot(
                 Request::builder()
@@ -1443,11 +1475,6 @@ mod messages_tests {
             json.get("auth_remediation").and_then(|v| v.as_str()),
             Some("Please run: cld-gateway login claude")
         );
-
-        // Restore the backup if we moved one
-        if moved_backup {
-            let _ = std::fs::rename(&backup_path, &default_auth_path);
-        }
     }
 
     #[tokio::test]

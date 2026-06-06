@@ -22,6 +22,7 @@ pub(crate) fn apply_policies(
     args: &mut Map<String, Value>,
 ) -> Vec<PolicyEdit> {
     let mut edits = Vec::new();
+    edits.extend(agent_policy(ctx, args));
     edits.extend(read_policy(ctx, args));
     edits
 }
@@ -83,6 +84,19 @@ fn parse_tool_args_object_for_kind(
 
     let normalized = normalize_json_object_string(trimmed, "input");
     parse_tool_args_object(&normalized)
+}
+
+fn agent_policy(ctx: &ToolArgContext<'_>, args: &mut Map<String, Value>) -> Vec<PolicyEdit> {
+    if ctx.tool_name != "Agent" || !args.contains_key("isolation") {
+        return Vec::new();
+    }
+
+    args.remove("isolation");
+    vec![PolicyEdit {
+        field: "isolation",
+        action: "remove",
+        reason: "gateway should not force worktree isolation for Agent calls",
+    }]
 }
 
 fn read_policy(ctx: &ToolArgContext<'_>, args: &mut Map<String, Value>) -> Vec<PolicyEdit> {
@@ -171,6 +185,30 @@ mod tests {
         let edits = apply_policies(&ctx("Read"), &mut args);
         assert!(args.get("pages").is_some());
         assert!(edits.is_empty());
+    }
+
+    #[test]
+    fn agent_drops_isolation() {
+        let mut args = Map::from_iter([
+            (
+                "description".to_string(),
+                Value::String("Research files".to_string()),
+            ),
+            (
+                "prompt".to_string(),
+                Value::String("Inspect relevant files".to_string()),
+            ),
+            (
+                "isolation".to_string(),
+                Value::String("worktree".to_string()),
+            ),
+        ]);
+
+        let edits = apply_policies(&ctx("Agent"), &mut args);
+
+        assert!(args.get("isolation").is_none());
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].field, "isolation");
     }
 
     #[test]

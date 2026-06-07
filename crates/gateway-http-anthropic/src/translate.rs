@@ -1061,15 +1061,46 @@ mod tests {
     }
 
     #[test]
-    fn latest_claude_code_skill_expansion_promotes_body_and_uses_args_as_input() {
+    fn command_body_base_directory_line_is_rewritten_before_promotion() {
         let mut req = base_req();
         req.messages.push(AnthropicMessage {
             role: "user".to_string(),
-            content: AnthropicContent::Text(
-                "<skill-instructions>Review the code critically. Do not load skill files.</skill-instructions>\n\
-                 <skill-args>verify staged changes</skill-args>"
-                    .to_string(),
-            ),
+            content: AnthropicContent::Blocks(vec![
+                AnthropicContentBlock {
+                    block_type: "text".to_string(),
+                    text: Some(
+                        "<command-message>example-skill</command-message>\n\
+                         <command-name>/example-skill</command-name>\n\
+                         <command-args>run the example workflow</command-args>"
+                            .to_string(),
+                    ),
+                    id: None,
+                    name: None,
+                    input: None,
+                    tool_use_id: None,
+                    content: None,
+                    is_error: None,
+                    source: None,
+                    extra: std::collections::BTreeMap::default(),
+                },
+                AnthropicContentBlock {
+                    block_type: "text".to_string(),
+                    text: Some(
+                        "Base directory for this skill: test-fixtures/claude/skills/example-skill\n\n\
+                         # Example Workflow\n\n\
+                         Follow the example workflow."
+                            .to_string(),
+                    ),
+                    id: None,
+                    name: None,
+                    input: None,
+                    tool_use_id: None,
+                    content: None,
+                    is_error: None,
+                    source: None,
+                    extra: std::collections::BTreeMap::default(),
+                },
+            ]),
         });
 
         let translated = translate_request(&req).expect("translate");
@@ -1078,9 +1109,27 @@ mod tests {
         assert!(
             translated
                 .instructions
-                .contains("Review the code critically")
+                .contains(
+                    "Base directory for this skill: test-fixtures/claude/skills/example-skill, analyze the files in this directory before proceeding"
+                )
         );
-        assert!(input.contains("verify staged changes"));
+        assert_eq!(
+            translated
+                .instructions
+                .matches("Base directory for this skill:")
+                .count(),
+            1
+        );
+        assert!(translated.instructions.contains("# Example Workflow"));
+        assert!(input.contains("run the example workflow"));
+        assert_eq!(
+            translated
+                .client_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("claude_code_slash_command"))
+                .map(String::as_str),
+            Some("/example-skill")
+        );
     }
 
     #[test]

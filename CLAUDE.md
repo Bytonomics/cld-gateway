@@ -139,7 +139,6 @@ The workspace is organized as small crates with explicit â€œallowed/not allowedâ
     - `providers.openai.unsupported_models`
     - `workflow.fast_mode`
     - `workflow.claude_code.slash_commands`
-    - `workflow.claude_code.skills`
   - Details: `docs/gateway_config.md`
 
 - Exchange logs:

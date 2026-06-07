@@ -43,17 +43,13 @@ workflow:
     #   max_thinking_turns_to_keep: 3
 
   claude_code:
-    # Promote the latest expanded Claude Code slash command into backend
-    # instructions and pass only command arguments as user input.
+    # Promote the latest expanded Claude Code command envelope into backend
+    # instructions and pass only command arguments as user input. If the
+    # command body starts with "Base directory for this skill:", Gateway
+    # rewrites that line to request directory inspection before acting.
     slash_commands:
       enabled: true
       mode: promote_latest
-
-    # Promote explicitly expanded Claude Code skill instructions without asking
-    # the backend model to discover local ~/.claude skill files.
-    skills:
-      enabled: true
-      mode: promote_active
 
 providers:
   openai:

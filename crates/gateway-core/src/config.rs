@@ -40,7 +40,6 @@ pub struct ContextManagementConfig {
 #[serde(default)]
 pub struct ClaudeCodeWorkflowConfig {
     pub slash_commands: ClaudeCodeSlashCommandConfig,
-    pub skills: ClaudeCodeSkillConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -55,20 +54,6 @@ pub struct ClaudeCodeSlashCommandConfig {
 pub enum ClaudeCodeSlashCommandMode {
     #[default]
     PromoteLatest,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(default)]
-pub struct ClaudeCodeSkillConfig {
-    pub enabled: bool,
-    pub mode: ClaudeCodeSkillMode,
-}
-
-#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ClaudeCodeSkillMode {
-    #[default]
-    PromoteActive,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -152,15 +137,6 @@ impl Default for ClaudeCodeSlashCommandConfig {
         Self {
             enabled: true,
             mode: ClaudeCodeSlashCommandMode::PromoteLatest,
-        }
-    }
-}
-
-impl Default for ClaudeCodeSkillConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            mode: ClaudeCodeSkillMode::PromoteActive,
         }
     }
 }
@@ -342,11 +318,6 @@ mod tests {
             config.workflow.claude_code.slash_commands.mode,
             ClaudeCodeSlashCommandMode::PromoteLatest
         );
-        assert!(config.workflow.claude_code.skills.enabled);
-        assert_eq!(
-            config.workflow.claude_code.skills.mode,
-            ClaudeCodeSkillMode::PromoteActive
-        );
         assert_eq!(
             config.workflow.context_management.mode,
             ContextManagementMode::FollowRequest
@@ -524,10 +495,6 @@ mod tests {
                         "slash_commands": {
                             "enabled": false,
                             "mode": "promote_latest"
-                        },
-                        "skills": {
-                            "enabled": false,
-                            "mode": "promote_active"
                         }
                     }
                 }
@@ -539,11 +506,6 @@ mod tests {
         assert_eq!(
             config.workflow.claude_code.slash_commands.mode,
             ClaudeCodeSlashCommandMode::PromoteLatest
-        );
-        assert!(!config.workflow.claude_code.skills.enabled);
-        assert_eq!(
-            config.workflow.claude_code.skills.mode,
-            ClaudeCodeSkillMode::PromoteActive
         );
         std::fs::remove_file(path).expect("remove config");
     }

@@ -1,16 +1,15 @@
 use crate::types::{AnthropicContent, AnthropicMessage};
-use gateway_core::config::{
-    ClaudeCodeSkillMode, ClaudeCodeSlashCommandMode, ClaudeCodeWorkflowConfig,
-};
+use gateway_core::config::{ClaudeCodeSlashCommandMode, ClaudeCodeWorkflowConfig};
 use std::collections::HashMap;
 
 const COMMAND_MESSAGE_TAG: &str = "command-message";
 const COMMAND_NAME_TAG: &str = "command-name";
 const COMMAND_ARGS_TAG: &str = "command-args";
-const SKILL_INSTRUCTIONS_TAG: &str = "skill-instructions";
-const SKILL_ARGS_TAG: &str = "skill-args";
-const SKILL_TAG: &str = "skill";
-const STRICT_INSTRUCTION_DIRECTIVE: &str = "Follow these instructions strictly, while strictly following the order of statements, without ignoring or paraphrasing anything. Missing anything will cause catastrophic failure";
+const SKILL_BASE_DIRECTORY_PREFIX: &str = "Base directory for this skill:";
+const STRICT_INSTRUCTION_DIRECTIVE: &str =
+    "Follow these instructions strictly, without ignoring or paraphrasing anything.";
+const SKILL_DIRECTORY_ANALYSIS_SUFFIX: &str =
+    "analyze the files in this directory before proceeding";
 
 #[derive(Debug, Clone)]
 pub(crate) struct NormalizedClaudeCodeContext {
@@ -28,15 +27,7 @@ pub(crate) fn normalize_claude_code_context(
     let mut client_metadata = HashMap::new();
 
     if slash_commands_enabled(config) {
-        normalize_slash_commands(
-            &mut normalized,
-            &mut instruction_fragments,
-            &mut client_metadata,
-        );
-    }
-
-    if skills_enabled(config) && instruction_fragments.is_empty() {
-        normalize_active_skill(
+        normalize_claude_code_commands(
             &mut normalized,
             &mut instruction_fragments,
             &mut client_metadata,
@@ -50,7 +41,7 @@ pub(crate) fn normalize_claude_code_context(
     }
 }
 
-fn normalize_slash_commands(
+fn normalize_claude_code_commands(
     messages: &mut [AnthropicMessage],
     instruction_fragments: &mut Vec<String>,
     client_metadata: &mut HashMap<String, String>,
@@ -86,7 +77,6 @@ fn normalize_slash_commands(
     let Some((active_index, active_envelope)) = active else {
         return;
     };
-
     let active_user_input = active_command_user_input(&active_envelope);
     set_message_text_preserving_non_text(&mut messages[active_index], active_user_input);
     if let Some(instructions) = active_command_instructions(&active_envelope) {
@@ -98,36 +88,6 @@ fn normalize_slash_commands(
     );
 }
 
-fn normalize_active_skill(
-    messages: &mut [AnthropicMessage],
-    instruction_fragments: &mut Vec<String>,
-    client_metadata: &mut HashMap<String, String>,
-) {
-    let active_index = messages
-        .iter()
-        .enumerate()
-        .rev()
-        .find_map(|(index, message)| (message.role == "user").then_some(index))
-        .and_then(|index| {
-            parse_skill_envelope(&message_text(&messages[index])).map(|envelope| (index, envelope))
-        });
-
-    let Some((active_index, active_envelope)) = active_index else {
-        return;
-    };
-
-    let active_user_input = if active_envelope.args.trim().is_empty() {
-        active_envelope.remainder.trim().to_string()
-    } else {
-        active_envelope.args.trim().to_string()
-    };
-    set_message_text_preserving_non_text(&mut messages[active_index], active_user_input);
-    if let Some(instructions) = active_skill_instructions(&active_envelope) {
-        instruction_fragments.push(instructions);
-    }
-    client_metadata.insert("claude_code_skill".to_string(), "expanded".to_string());
-}
-
 fn slash_commands_enabled(config: &ClaudeCodeWorkflowConfig) -> bool {
     config.slash_commands.enabled
         && matches!(
@@ -136,23 +96,12 @@ fn slash_commands_enabled(config: &ClaudeCodeWorkflowConfig) -> bool {
         )
 }
 
-fn skills_enabled(config: &ClaudeCodeWorkflowConfig) -> bool {
-    config.skills.enabled && matches!(config.skills.mode, ClaudeCodeSkillMode::PromoteActive)
-}
-
 #[derive(Debug, Clone)]
 struct CommandEnvelope {
     command_message: String,
     command_name: String,
     command_args: String,
     body: String,
-}
-
-#[derive(Debug, Clone)]
-struct SkillEnvelope {
-    instructions: String,
-    args: String,
-    remainder: String,
 }
 
 fn parse_command_envelope(text: &str) -> Option<CommandEnvelope> {
@@ -186,22 +135,6 @@ fn parse_command_envelope(text: &str) -> Option<CommandEnvelope> {
     })
 }
 
-fn parse_skill_envelope(text: &str) -> Option<SkillEnvelope> {
-    let instructions =
-        tag_value(text, SKILL_INSTRUCTIONS_TAG).or_else(|| tag_value(text, SKILL_TAG))?;
-    let args = tag_value(text, SKILL_ARGS_TAG).unwrap_or_default();
-    let body_end = tag_end_index(text, SKILL_INSTRUCTIONS_TAG)
-        .or_else(|| tag_end_index(text, SKILL_TAG))
-        .unwrap_or_default();
-    let remainder = text.get(body_end..).unwrap_or_default().trim().to_string();
-
-    Some(SkillEnvelope {
-        instructions,
-        args,
-        remainder,
-    })
-}
-
 fn active_command_user_input(envelope: &CommandEnvelope) -> String {
     let args = envelope.command_args.trim();
     if !args.is_empty() {
@@ -221,16 +154,38 @@ fn active_command_user_input(envelope: &CommandEnvelope) -> String {
 
 fn active_command_instructions(envelope: &CommandEnvelope) -> Option<String> {
     let body = envelope.body.trim();
-    (!body.is_empty()).then(|| strict_instructions(body))
-}
-
-fn active_skill_instructions(envelope: &SkillEnvelope) -> Option<String> {
-    let body = envelope.instructions.trim();
-    (!body.is_empty()).then(|| strict_instructions(body))
+    if body.is_empty() {
+        return None;
+    }
+    Some(strict_instructions(&rewrite_base_directory_line(body)))
 }
 
 fn strict_instructions(body: &str) -> String {
     format!("{STRICT_INSTRUCTION_DIRECTIVE}\n\n{body}")
+}
+
+fn rewrite_base_directory_line(body: &str) -> String {
+    let mut lines = body.trim_start().lines();
+    let Some(first_line) = lines.next() else {
+        return String::new();
+    };
+    let Some(base_dir) = first_line
+        .trim()
+        .strip_prefix(SKILL_BASE_DIRECTORY_PREFIX)
+        .map(str::trim)
+        .filter(|base_dir| !base_dir.is_empty())
+    else {
+        return body.to_string();
+    };
+
+    let rewritten_first_line =
+        format!("{SKILL_BASE_DIRECTORY_PREFIX} {base_dir}, {SKILL_DIRECTORY_ANALYSIS_SUFFIX}");
+    let remaining_body = lines.collect::<Vec<_>>().join("\n");
+    if remaining_body.trim().is_empty() {
+        rewritten_first_line
+    } else {
+        format!("{rewritten_first_line}\n{remaining_body}")
+    }
 }
 
 fn message_text(message: &AnthropicMessage) -> String {
@@ -323,17 +278,4 @@ fn last_tag_match(text: &str, tag: &str) -> Option<TagMatch> {
     }
 
     latest
-}
-
-fn tag_value(text: &str, tag: &str) -> Option<String> {
-    let open = format!("<{tag}>");
-    let close = format!("</{tag}>");
-    let start = text.find(&open)? + open.len();
-    let end = text.get(start..)?.find(&close)? + start;
-    text.get(start..end).map(|value| value.trim().to_string())
-}
-
-fn tag_end_index(text: &str, tag: &str) -> Option<usize> {
-    let close = format!("</{tag}>");
-    text.find(&close).map(|index| index + close.len())
 }

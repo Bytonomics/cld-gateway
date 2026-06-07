@@ -15,10 +15,11 @@ brew install cld-gateway
 
 Homebrew installs:
 - the `cld-gateway` daemon binary
-- runtime support files at `$(brew --prefix)/etc/cld-gateway/config.json` and `$(brew --prefix)/etc/cld-gateway/settings.json`
 - wrapper commands `cldg` and `clddg`
+- runtime config at `~/.gateway/config.json`
+- Claude settings at `~/.claude_codex/settings.json`
 
-`cldg` and `clddg` shell out to `claude`, so the `claude` executable must already be available on your `PATH` before you use those wrappers.
+Before using the Homebrew wrappers, ensure the `claude` executable is already available on your `PATH` because `cldg` and `clddg` shell out to `claude`.
 
 > **Note:** Homebrew availability depends on the separate `bytonomics/homebrew-tap` repo being updated for the release you want to install. Stable releases are intended to flow there automatically from the gateway release workflow.
 
@@ -56,7 +57,7 @@ Select ChatGPT to authenticate via browser. Credentials are saved to `~/.gateway
 For ChatGPT login directly without the menu:
 
 ```sh
-cld-gateway login claude
+cld-gateway login openai
 ```
 
 ### 2. Start the daemon
@@ -77,7 +78,7 @@ If you see an auth error, run `cld-gateway login` again.
 |---|---|
 | `cld-gateway` or `cld-gateway serve` | Start the daemon |
 | `cld-gateway login` | Interactive login menu |
-| `cld-gateway login claude` | ChatGPT/Claude browser login |
+| `cld-gateway login openai` | ChatGPT browser login |
 | `cld-gateway login gemini` | Gemini login (not yet implemented) |
 
 ---
@@ -86,7 +87,7 @@ If you see an auth error, run `cld-gateway login` again.
 
 ### Gemini login
 
-`cld-gateway login gemini` is recognized but not yet implemented. Currently only ChatGPT/Claude OAuth is supported.
+`cld-gateway login gemini` is recognized but not yet implemented. Currently only ChatGPT OAuth is supported.
 
 ### Windows support
 
@@ -113,13 +114,13 @@ You can run a dev build and a release build simultaneously by pointing each at d
 
 ```sh
 # Release build — login first
-cld-gateway login claude
+cld-gateway login openai
 
 # Release build — start daemon (default ports/paths)
 cld-gateway serve
 
 # Dev build — login with custom paths
-GATEWAY_HOME=~/.gateway-dev cld-gateway-dev login claude
+GATEWAY_HOME=~/.gateway-dev cld-gateway-dev login openai
 
 # Dev build — start daemon (different config path and data directory)
 cat > ~/.gateway-dev/config.json <<'EOF'

@@ -152,13 +152,7 @@ The canonical version is in the root `Cargo.toml` under `[workspace.package]`:
 version = "X.Y.Z"
 ```
 
-For the current `0.1.1` release, keep:
-
-```toml
-version = "0.1.1"
-```
-
-If changing the version, update `Cargo.toml`, then run the validation step below. `make check` already runs the normal test suite and will surface whether `Cargo.lock` needs to be updated. If `Cargo.lock` changes, include it in the release-preparation commit.
+Update `Cargo.toml` to the intended release version, then run the validation step below. `make check` already runs the normal test suite and will surface whether `Cargo.lock` needs to be updated. If `Cargo.lock` changes, include it in the release-preparation commit.
 
 The release tag must match this version exactly:
 
@@ -191,12 +185,6 @@ Set the release version once in your shell:
 
 ```sh
 VERSION=X.Y.Z
-```
-
-For the current `0.1.1` release, use:
-
-```sh
-VERSION=0.1.1
 ```
 
 Verify that `Cargo.toml` contains the same version:
@@ -411,20 +399,20 @@ brew install cld-gateway
 cld-gateway invalid-command 2>&1 | grep -q "unknown command"
 ```
 
-Then confirm the packaged config assets and Homebrew wrapper commands were installed:
+Then confirm the installed binary and user-facing config paths are present:
 
 ```sh
-test -f "$(brew --prefix)/etc/cld-gateway/config.json"
-test -f "$(brew --prefix)/etc/cld-gateway/settings.json"
-test -x "$(brew --prefix)/bin/cldg"
-test -x "$(brew --prefix)/bin/clddg"
+cld-gateway invalid-command 2>&1 | grep -q "unknown command"
+test -f ~/.gateway/config.json
+test -f ~/.claude_codex/settings.json
 ```
 
-The current formula installs:
+The current Homebrew install should leave users with:
 
 - the `cld-gateway` binary
-- `config.json` and `settings.json` under `$(brew --prefix)/etc/cld-gateway`
 - wrapper commands `cldg` and `clddg`
+- gateway runtime config at `~/.gateway/config.json`
+- Claude settings for wrappers at `~/.claude_codex/settings.json`
 
 The `cldg` and `clddg` wrappers shell out to `claude`, so they are only expected to work when `claude` is already installed separately and available on `PATH`. The binary-level `invalid-command` check remains the deterministic validation for the packaged executable itself.
 
@@ -438,7 +426,7 @@ curl -fsSL http://127.0.0.1:8080/health
 brew services stop cld-gateway
 ```
 
-The current formula runs `cld-gateway serve` and sets `GATEWAY_CONFIG_PATH` to the installed `$(brew --prefix)/etc/cld-gateway/config.json`, so `brew services` validation should use the Homebrew-managed config path rather than an ad hoc manual environment override.
+The current formula runs `cld-gateway serve` and sets `GATEWAY_CONFIG_PATH` to `~/.gateway/config.json`, so `brew services` validation should use the user-home config path rather than a Homebrew-managed `etc` path.
 
 ### 13. Validate shell installer
 
@@ -448,10 +436,10 @@ Verify the latest-release installer:
 curl -fsSL https://github.com/Bytonomics/cld-gateway/releases/latest/download/install.sh | sh
 ```
 
-For the current release example, pin `0.1.1` explicitly:
+To pin a specific release explicitly:
 
 ```sh
-curl -fsSL https://github.com/Bytonomics/cld-gateway/releases/latest/download/install.sh | sh -s -- --release 0.1.1
+curl -fsSL https://github.com/Bytonomics/cld-gateway/releases/latest/download/install.sh | sh -s -- --release X.Y.Z
 ```
 
 Then verify the installed binary executes:
@@ -488,11 +476,14 @@ Run the installed binary login flow:
 cld-gateway login
 ```
 
-If testing direct vendor login with a version that supports it:
+The current CLI also supports explicit vendor selection:
 
 ```sh
-cld-gateway login claude
+cld-gateway login openai
+cld-gateway login gemini
 ```
+
+`cld-gateway login` and `cld-gateway login openai` are equivalent today because the CLI defaults `login` to the OpenAI flow.
 
 Then start the daemon:
 

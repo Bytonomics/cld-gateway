@@ -649,6 +649,7 @@ mod tests {
             tools: Vec::new(),
             tool_choice: None,
             thinking: None,
+            context_management: None,
             output_config: None,
         }
     }

@@ -47,6 +47,7 @@ pub(crate) struct StreamState {
 
     // Backend usage snapshot (emitted on `response.completed`).
     completed_usage: Option<CodexTokenUsage>,
+    context_management: Option<serde_json::Value>,
     completed_web_search_call_ids: BTreeSet<String>,
     emitted_web_search_call_ids: BTreeSet<String>,
 
@@ -70,10 +71,19 @@ impl StreamState {
             tool_args_buf_by_call_id: HashMap::new(),
             last_tool_call_id: None,
             completed_usage: None,
+            context_management: None,
             completed_web_search_call_ids: BTreeSet::new(),
             emitted_web_search_call_ids: BTreeSet::new(),
             completed: false,
         }
+    }
+
+    pub(crate) fn with_context_management(
+        mut self,
+        context_management: Option<serde_json::Value>,
+    ) -> Self {
+        self.context_management = context_management;
+        self
     }
 
     fn add_block(&mut self) -> u32 {
@@ -213,13 +223,20 @@ fn content_block_stop(index: u32) -> Event {
         .data(serde_json::json!({"type":"content_block_stop","index":index}).to_string())
 }
 
-fn message_delta(stop_reason: &str, usage: Option<CodexTokenUsage>) -> Event {
+fn message_delta(
+    stop_reason: &str,
+    usage: Option<CodexTokenUsage>,
+    context_management: Option<serde_json::Value>,
+) -> Event {
     let mut payload = serde_json::json!({
             "type":"message_delta",
             "delta":{"stop_reason":stop_reason,"stop_sequence":null}
     });
     if let Some(token_usage) = usage {
         payload["usage"] = anthropic_usage_value(token_usage);
+    }
+    if let Some(context_management) = context_management {
+        payload["context_management"] = context_management;
     }
     Event::default()
         .event("message_delta")
@@ -284,7 +301,11 @@ pub(crate) fn finalize_message(st: &mut StreamState) -> Vec<Event> {
     } else {
         "tool_use"
     };
-    out.push(message_delta(stop_reason, st.completed_usage));
+    out.push(message_delta(
+        stop_reason,
+        st.completed_usage,
+        st.context_management.clone(),
+    ));
     out.push(message_stop());
     out
 }

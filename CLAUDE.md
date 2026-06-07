@@ -121,10 +121,10 @@ The workspace is organized as small crates with explicit â€œallowed/not allowedâ
     - `GATEWAY_HOME` (directory; auth.json is under it)
 
 - Gateway config:
-  - Default: `~/.gateway/config.json`
+  - Default: `~/.gateway/config.yaml`
   - Override via env:
     - `GATEWAY_CONFIG_PATH` (full path)
-    - `GATEWAY_HOME` (directory; config.json is under it)
+    - `GATEWAY_HOME` (directory; config.yaml is under it)
   - Current fields:
     - `providers.openai.default_model`
     - `providers.openai.unsupported_models`

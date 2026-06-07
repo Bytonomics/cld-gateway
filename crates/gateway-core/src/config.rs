@@ -8,7 +8,7 @@ use crate::{DEFAULT_BACKEND_MODEL, UNSUPPORTED_BACKEND_MODELS};
 
 pub const FAST_SERVICE_TIER: &str = "priority";
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct GatewayConfig {
     #[serde(default = "default_config_version")]
@@ -18,19 +18,45 @@ pub struct GatewayConfig {
     pub network: NetworkConfig,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[serde(default)]
 pub struct WorkflowConfig {
     pub fast_mode: bool,
+    pub context_management: ContextManagementConfig,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct ContextManagementConfig {
+    pub enabled: bool,
+    pub mode: ContextManagementMode,
+    pub default_edits: Vec<serde_json::Value>,
+    pub override_edits: Option<Vec<serde_json::Value>>,
+    pub hard_limits: ContextManagementHardLimits,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextManagementMode {
+    FollowRequest,
+    OverrideRequest,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(default)]
+pub struct ContextManagementHardLimits {
+    pub max_tool_result_chars: Option<usize>,
+    pub max_tool_uses_to_keep: Option<usize>,
+    pub max_thinking_turns_to_keep: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[serde(default)]
 pub struct ProviderConfigs {
     pub openai: OpenAiProviderConfig,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct NetworkConfig {
     #[serde(default = "default_listen_addr")]
@@ -38,7 +64,7 @@ pub struct NetworkConfig {
     pub allowed_hosts: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct OpenAiProviderConfig {
     #[serde(default = "default_openai_model")]
@@ -59,7 +85,7 @@ pub enum GatewayConfigError {
     #[error("failed to read gateway config")]
     Io(#[from] std::io::Error),
     #[error("failed to parse gateway config")]
-    Json(#[from] serde_json::Error),
+    Yaml(#[from] serde_yaml::Error),
 }
 
 impl Default for GatewayConfig {
@@ -69,6 +95,18 @@ impl Default for GatewayConfig {
             workflow: WorkflowConfig::default(),
             providers: ProviderConfigs::default(),
             network: NetworkConfig::default(),
+        }
+    }
+}
+
+impl Default for ContextManagementConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            mode: ContextManagementMode::FollowRequest,
+            default_edits: Vec::new(),
+            override_edits: None,
+            hard_limits: ContextManagementHardLimits::default(),
         }
     }
 }
@@ -121,21 +159,21 @@ pub fn default_gateway_config_path() -> PathBuf {
     }
 
     if let Ok(gateway_home) = std::env::var("GATEWAY_HOME") {
-        return PathBuf::from(gateway_home).join("config.json");
+        return PathBuf::from(gateway_home).join("config.yaml");
     }
 
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join(".gateway").join("config.json")
+    home.join(".gateway").join("config.yaml")
 }
 
 /// Loads gateway runtime configuration from disk.
 ///
 /// # Errors
 ///
-/// Returns an error if the config file exists but cannot be read or parsed as JSON.
+/// Returns an error if the config file exists but cannot be read or parsed as YAML.
 pub fn load_gateway_config(path: &Path) -> Result<GatewayConfig, GatewayConfigError> {
     match std::fs::read(path) {
-        Ok(bytes) => Ok(serde_json::from_slice::<GatewayConfig>(&bytes)?),
+        Ok(bytes) => Ok(serde_yaml::from_slice::<GatewayConfig>(&bytes)?),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(GatewayConfig::default()),
         Err(error) => Err(GatewayConfigError::Io(error)),
     }
@@ -145,7 +183,7 @@ pub fn load_gateway_config(path: &Path) -> Result<GatewayConfig, GatewayConfigEr
 ///
 /// # Errors
 ///
-/// Returns an error if the config file exists but cannot be read or parsed as JSON.
+/// Returns an error if the config file exists but cannot be read or parsed as YAML.
 pub fn load_gateway_config_default_path() -> Result<GatewayConfig, GatewayConfigError> {
     load_gateway_config(&default_gateway_config_path())
 }
@@ -189,7 +227,12 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        std::env::temp_dir().join(format!("gateway_config_{name}_{nanos}.json"))
+        std::env::temp_dir().join(format!("gateway_config_{name}_{nanos}.yaml"))
+    }
+
+    fn write_yaml<T: Serialize>(path: &Path, value: &T) {
+        let text = serde_yaml::to_string(value).expect("serialize config yaml");
+        std::fs::write(path, text).expect("write config");
     }
 
     #[test]
@@ -198,6 +241,13 @@ mod tests {
         let config = load_gateway_config(&path).expect("load missing config");
         assert_eq!(config.version, 1);
         assert!(!config.workflow.fast_mode);
+        assert!(config.workflow.context_management.enabled);
+        assert_eq!(
+            config.workflow.context_management.mode,
+            ContextManagementMode::FollowRequest
+        );
+        assert!(config.workflow.context_management.default_edits.is_empty());
+        assert!(config.workflow.context_management.override_edits.is_none());
         assert_eq!(config.network.listen_addr, default_listen_addr());
         assert!(config.network.allowed_hosts.is_empty());
         assert_eq!(config.providers.openai.default_model, DEFAULT_BACKEND_MODEL);
@@ -210,20 +260,20 @@ mod tests {
     #[test]
     fn valid_config_overrides_defaults() {
         let path = temp_config_path("valid");
-        std::fs::write(
-            &path,
-            r#"{
-                "version": 1,
-                "workflow": { "fast_mode": true },
-                "providers": {
-                    "openai": {
-                        "default_model": "gpt-test-default",
-                        "unsupported_models": ["gpt-test-old"]
-                    }
-                }
-            }"#,
-        )
-        .expect("write config");
+        let config = GatewayConfig {
+            workflow: WorkflowConfig {
+                fast_mode: true,
+                ..WorkflowConfig::default()
+            },
+            providers: ProviderConfigs {
+                openai: OpenAiProviderConfig {
+                    default_model: "gpt-test-default".to_string(),
+                    unsupported_models: vec!["gpt-test-old".to_string()],
+                },
+            },
+            ..GatewayConfig::default()
+        };
+        write_yaml(&path, &config);
 
         let config = load_gateway_config(&path).expect("load config");
         assert!(config.workflow.fast_mode);
@@ -239,18 +289,13 @@ mod tests {
     #[test]
     fn partial_config_preserves_nested_defaults() {
         let path = temp_config_path("partial");
-        std::fs::write(
+        write_yaml(
             &path,
-            r#"{
+            &serde_json::json!({
                 "workflow": { "fast_mode": true },
-                "providers": {
-                    "openai": {
-                        "default_model": "gpt-test-default"
-                    }
-                }
-            }"#,
-        )
-        .expect("write config");
+                "providers": { "openai": { "default_model": "gpt-test-default" } }
+            }),
+        );
 
         let config = load_gateway_config(&path).expect("load config");
         assert_eq!(config.version, 1);
@@ -265,18 +310,17 @@ mod tests {
     }
 
     #[test]
-    fn explicit_listen_addr_parses_from_json() {
+    fn explicit_listen_addr_parses_from_yaml() {
         let path = temp_config_path("listen_addr");
-        std::fs::write(
+        write_yaml(
             &path,
-            r#"{
+            &serde_json::json!({
                 "network": {
                     "listen_addr": "0.0.0.0:9090",
                     "allowed_hosts": ["example.com"]
                 }
-            }"#,
-        )
-        .expect("write config");
+            }),
+        );
 
         let config = load_gateway_config(&path).expect("load config");
         assert_eq!(
@@ -293,11 +337,83 @@ mod tests {
     }
 
     #[test]
-    fn invalid_json_errors_clearly() {
+    fn context_management_config_parses_from_yaml() {
+        let path = temp_config_path("context_management");
+        let config = GatewayConfig {
+            workflow: WorkflowConfig {
+                context_management: ContextManagementConfig {
+                    mode: ContextManagementMode::OverrideRequest,
+                    default_edits: vec![serde_json::json!({
+                        "type": "clear_tool_uses_20250919"
+                    })],
+                    override_edits: Some(vec![serde_json::json!({
+                        "type": "clear_thinking_20251015",
+                        "keep": {
+                            "type": "thinking_turns",
+                            "value": 2
+                        }
+                    })]),
+                    hard_limits: ContextManagementHardLimits {
+                        max_tool_result_chars: Some(1000),
+                        max_tool_uses_to_keep: Some(10),
+                        max_thinking_turns_to_keep: Some(3),
+                    },
+                    ..ContextManagementConfig::default()
+                },
+                ..WorkflowConfig::default()
+            },
+            ..GatewayConfig::default()
+        };
+        write_yaml(&path, &config);
+
+        let config = load_gateway_config(&path).expect("load config");
+        assert_eq!(
+            config.workflow.context_management.mode,
+            ContextManagementMode::OverrideRequest
+        );
+        assert_eq!(config.workflow.context_management.default_edits.len(), 1);
+        assert_eq!(
+            config
+                .workflow
+                .context_management
+                .override_edits
+                .as_ref()
+                .map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            config
+                .workflow
+                .context_management
+                .hard_limits
+                .max_tool_result_chars,
+            Some(1000)
+        );
+        assert_eq!(
+            config
+                .workflow
+                .context_management
+                .hard_limits
+                .max_tool_uses_to_keep,
+            Some(10)
+        );
+        assert_eq!(
+            config
+                .workflow
+                .context_management
+                .hard_limits
+                .max_thinking_turns_to_keep,
+            Some(3)
+        );
+        std::fs::remove_file(path).expect("remove config");
+    }
+
+    #[test]
+    fn invalid_yaml_errors_clearly() {
         let path = temp_config_path("invalid");
-        std::fs::write(&path, "{").expect("write config");
+        std::fs::write(&path, [0x80]).expect("write config");
         let error = load_gateway_config(&path).expect_err("invalid config should error");
-        assert!(matches!(error, GatewayConfigError::Json(_)));
+        assert!(matches!(error, GatewayConfigError::Yaml(_)));
         std::fs::remove_file(path).expect("remove config");
     }
 
@@ -333,7 +449,10 @@ mod tests {
     #[test]
     fn fast_mode_uses_priority_service_tier() {
         let config = GatewayConfig {
-            workflow: WorkflowConfig { fast_mode: true },
+            workflow: WorkflowConfig {
+                fast_mode: true,
+                ..WorkflowConfig::default()
+            },
             ..GatewayConfig::default()
         };
 

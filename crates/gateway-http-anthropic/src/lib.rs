@@ -24,6 +24,7 @@ use gateway_core::config::{
     service_tier_for_config,
 };
 use gateway_net::{GatewayHttpClient, GatewayNetworkPolicy};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -33,11 +34,13 @@ use uuid::Uuid;
 #[cfg(test)]
 use std::path::PathBuf;
 
+mod context_management;
 mod sse_bridge;
 mod tool_arg_policy;
 mod translate;
 mod types;
 
+use crate::context_management::{ContextManagementReport, ContextManager};
 use crate::translate::{ToolTranslationContext, translate_request_with_context};
 use crate::types::AnthropicMessagesRequest;
 use gateway_state::ToolCallStore;
@@ -319,17 +322,19 @@ async fn v1_messages(
         Err(resp) => return resp,
     };
 
-    let req: AnthropicMessagesRequest = match deserialize_with_path(&body) {
+    let mut req: AnthropicMessagesRequest = match deserialize_with_path(&body) {
         Ok(v) => v,
         Err(err) => return bad_request(&err),
     };
 
     log_ignored_stop_sequences(&req.stop_sequences, request_id.as_ref());
     log_ignored_request_controls(&req, request_id.as_ref());
+    let context_management_report =
+        apply_context_management(&state.gateway_config, &mut req, request_id.as_ref());
     validate_tool_results(&state, &req);
 
     if req.stream {
-        return stream_messages(state, request_id, req)
+        return stream_messages(state, request_id, req, context_management_report)
             .await
             .into_response();
     }
@@ -341,10 +346,11 @@ async fn v1_messages(
         "resolved model for /v1/messages",
     );
     let tool_context = build_tool_translation_context(&state, &req);
-    let translated = match translate_request_with_context(&req, &tool_context) {
+    let mut translated = match translate_request_with_context(&req, &tool_context) {
         Ok(t) => t,
         Err(err) => return bad_request(&err),
     };
+    attach_context_management_metadata(&mut translated, &context_management_report);
 
     let creds = match load_codex_credentials(auth_path_override(&state)) {
         Ok(c) => c,
@@ -356,6 +362,22 @@ async fn v1_messages(
         Err(resp) => return resp,
     };
 
+    let mut response = build_unary_messages_response(&state, &req, request_id.as_ref(), &decoded);
+    if let Some(context_management) = context_management_report.response_value() {
+        response["context_management"] = context_management;
+    }
+
+    let mut http_res = Json(response).into_response();
+    http_res.extensions_mut().insert(resolution);
+    http_res
+}
+
+fn build_unary_messages_response(
+    state: &AppState,
+    req: &AnthropicMessagesRequest,
+    request_id: Option<&axum::extract::Extension<RequestId>>,
+    decoded: &gateway_backend_codex::types::CodexUnaryDecoded,
+) -> serde_json::Value {
     let usage = decoded.token_usage.map_or(
         serde_json::json!({
             "input_tokens": 0,
@@ -376,49 +398,44 @@ async fn v1_messages(
         },
     );
 
-    let response = if decoded.tool_calls.is_empty() {
-        serde_json::json!({
-        "id": format!("msg_{}", Uuid::new_v4()),
-        "type": "message",
-        "role": "assistant",
-        "model": req.model,
-        "content": [{ "type": "text", "text": decoded.final_text }],
-        "stop_reason": "end_turn",
-        "stop_sequence": null,
-        "usage": usage
-        })
-    } else {
-        let request_id_str = request_id
-            .as_ref()
-            .map(|axum::extract::Extension(r)| r.0.as_str());
-        let mut content = Vec::new();
-        if !decoded.final_text.is_empty() {
-            content.push(serde_json::json!({ "type": "text", "text": decoded.final_text }));
-        }
-        for tool_call in &decoded.tool_calls {
-            let _ = state.tool_calls.record_tool_call(
-                &tool_call.call_id,
-                &tool_call.name,
-                tool_call.kind.as_str(),
-                request_id_str,
-            );
-            content.push(tool_call_content_block(tool_call));
-        }
-        serde_json::json!({
+    if decoded.tool_calls.is_empty() {
+        return serde_json::json!({
             "id": format!("msg_{}", Uuid::new_v4()),
             "type": "message",
             "role": "assistant",
             "model": req.model,
-            "content": content,
-            "stop_reason": "tool_use",
+            "content": [{ "type": "text", "text": decoded.final_text.clone() }],
+            "stop_reason": "end_turn",
             "stop_sequence": null,
             "usage": usage
-        })
-    };
+        });
+    }
 
-    let mut http_res = Json(response).into_response();
-    http_res.extensions_mut().insert(resolution);
-    http_res
+    let request_id_str = request_id.map(|axum::extract::Extension(r)| r.0.as_str());
+    let mut content = Vec::new();
+    if !decoded.final_text.is_empty() {
+        content.push(serde_json::json!({ "type": "text", "text": decoded.final_text.clone() }));
+    }
+    for tool_call in &decoded.tool_calls {
+        let _ = state.tool_calls.record_tool_call(
+            &tool_call.call_id,
+            &tool_call.name,
+            tool_call.kind.as_str(),
+            request_id_str,
+        );
+        content.push(tool_call_content_block(tool_call));
+    }
+
+    serde_json::json!({
+        "id": format!("msg_{}", Uuid::new_v4()),
+        "type": "message",
+        "role": "assistant",
+        "model": req.model,
+        "content": content,
+        "stop_reason": "tool_use",
+        "stop_sequence": null,
+        "usage": usage
+    })
 }
 
 fn tool_call_content_block(tool_call: &CodexToolCall) -> serde_json::Value {
@@ -491,6 +508,44 @@ fn build_backend_request(
         service_tier: service_tier_for_config(config),
         client_metadata: translated.client_metadata,
     }
+}
+
+fn apply_context_management(
+    config: &GatewayConfig,
+    req: &mut AnthropicMessagesRequest,
+    request_id: Option<&axum::extract::Extension<RequestId>>,
+) -> ContextManagementReport {
+    let report = ContextManager::new(&config.workflow.context_management)
+        .apply(req.context_management.as_ref(), &mut req.messages);
+    if let Some(metadata) = report.metadata_value() {
+        if let Some(axum::extract::Extension(rid)) = request_id {
+            info!(
+                request_id = %rid.0,
+                context_management = %metadata,
+                "applied gateway context management"
+            );
+        } else {
+            info!(
+                context_management = %metadata,
+                "applied gateway context management"
+            );
+        }
+    }
+    report
+}
+
+fn attach_context_management_metadata(
+    translated: &mut crate::translate::TranslateResult,
+    report: &ContextManagementReport,
+) {
+    let Some(metadata) = report.metadata_value() else {
+        return;
+    };
+    let encoded = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
+    translated
+        .client_metadata
+        .get_or_insert_with(HashMap::new)
+        .insert("gateway_context_management".to_string(), encoded);
 }
 
 async fn run_backend_unary(
@@ -724,6 +779,7 @@ async fn stream_messages(
     state: AppState,
     request_id: Option<axum::extract::Extension<RequestId>>,
     req: AnthropicMessagesRequest,
+    context_management_report: ContextManagementReport,
 ) -> Sse<futures_util::stream::BoxStream<'static, Result<Event, std::convert::Infallible>>> {
     let resolution = resolve_and_log_model(
         &state.gateway_config,
@@ -732,10 +788,11 @@ async fn stream_messages(
         "resolved model for /v1/messages (streaming)",
     );
     let tool_context = build_tool_translation_context(&state, &req);
-    let translated = match translate_request_with_context(&req, &tool_context) {
+    let mut translated = match translate_request_with_context(&req, &tool_context) {
         Ok(t) => t,
         Err(err) => return sse_error("invalid_request_error", &err),
     };
+    attach_context_management_metadata(&mut translated, &context_management_report);
     let creds = match load_codex_credentials(auth_path_override(&state)) {
         Ok(c) => c,
         Err(err) => return sse_auth_error(&err),
@@ -770,7 +827,12 @@ async fn stream_messages(
 
     let tail: futures_util::stream::BoxStream<'static, Result<Event, std::convert::Infallible>> =
         match backend_response {
-            Ok(res) => backend_sse_to_anthropic_events(res, tool_calls, rid_str),
+            Ok(res) => backend_sse_to_anthropic_events(
+                res,
+                tool_calls,
+                rid_str,
+                context_management_report.response_value(),
+            ),
             Err(err) => {
                 match err {
                     BackendError::AuthFailed { stage: _, message } => {
@@ -806,10 +868,12 @@ fn backend_sse_to_anthropic_events(
     res: reqwest::Response,
     tool_calls: ToolCallStore,
     request_id: Option<String>,
+    context_management: Option<serde_json::Value>,
 ) -> futures_util::stream::BoxStream<'static, Result<Event, std::convert::Infallible>> {
     let backend_events = res.bytes_stream().eventsource();
     let state = Arc::new(Mutex::new(
-        crate::sse_bridge::StreamState::new_with_text_block0_started(),
+        crate::sse_bridge::StreamState::new_with_text_block0_started()
+            .with_context_management(context_management),
     ));
     let tool_calls = Arc::new(tool_calls);
     let request_id = Arc::new(request_id);
@@ -1053,6 +1117,7 @@ mod messages_tests {
             tools: Vec::new(),
             tool_choice: None,
             thinking: None,
+            context_management: None,
             output_config: None,
         };
 
@@ -1217,6 +1282,7 @@ mod messages_tests {
             tools: Vec::new(),
             tool_choice: None,
             thinking: None,
+            context_management: None,
             output_config: None,
         };
         req.messages.push(AnthropicMessage {

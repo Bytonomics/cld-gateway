@@ -16,8 +16,9 @@ brew install cld-gateway
 Homebrew installs:
 - the `cld-gateway` daemon binary
 - wrapper commands `cldg` and `clddg`
-- runtime config at `~/.gateway/config.json`
+- runtime config at `~/.gateway/config.yaml`
 - Claude settings at `~/.claude_codex/settings.json`
+- symlinks from `~/.claude_codex` to existing shared Claude Code entries under `~/.claude`
 
 Before using the Homebrew wrappers, ensure the `claude` executable is already available on your `PATH` because `cldg` and `clddg` shell out to `claude`.
 
@@ -66,7 +67,7 @@ cld-gateway login openai
 cld-gateway serve
 ```
 
-The daemon listens on the address configured in `~/.gateway/config.json` (or `GATEWAY_CONFIG_PATH`/`GATEWAY_HOME`), defaulting to `127.0.0.1:8080` when no listen address is configured, and automatically handles token refresh.
+The daemon listens on the address configured in `~/.gateway/config.yaml` (or `GATEWAY_CONFIG_PATH`/`GATEWAY_HOME`), defaulting to `127.0.0.1:8080` when no listen address is configured, and automatically handles token refresh.
 
 If you see an auth error, run `cld-gateway login` again.
 
@@ -104,7 +105,7 @@ The gateway currently runs on Linux and macOS. Windows support is planned for a 
 | `CLD_GATEWAY_AUTH_PORT` | `1455` | OAuth callback port (see Authentication section) |
 | `CLD_GATEWAY_LOG_PATH` | `~/.gateway/logs/http-exchange.jsonl` | Exchange log file path |
 | `CLD_GATEWAY_STATE_DB_PATH` | `~/.gateway/state/tool_calls.sqlite` | Tool-call state DB path |
-| `GATEWAY_CONFIG_PATH` | `~/.gateway/config.json` | Gateway config file path (including `network.listen_addr`) |
+| `GATEWAY_CONFIG_PATH` | `~/.gateway/config.yaml` | Gateway config file path (including `network.listen_addr`) |
 
 ---
 
@@ -123,10 +124,11 @@ cld-gateway serve
 GATEWAY_HOME=~/.gateway-dev cld-gateway-dev login openai
 
 # Dev build — start daemon (different config path and data directory)
-cat > ~/.gateway-dev/config.json <<'EOF'
-{"network":{"listen_addr":"127.0.0.1:8081"}}
+cat > ~/.gateway-dev/config.yaml <<'EOF'
+network:
+  listen_addr: 127.0.0.1:8081
 EOF
-GATEWAY_CONFIG_PATH=~/.gateway-dev/config.json \
+GATEWAY_CONFIG_PATH=~/.gateway-dev/config.yaml \
 GATEWAY_HOME=~/.gateway-dev \
 cld-gateway-dev serve
 ```

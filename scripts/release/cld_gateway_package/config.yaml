@@ -1,0 +1,54 @@
+version: 1
+
+workflow:
+  fast_mode: true
+
+  context_management:
+    # Master switch for gateway-side context pruning.
+    enabled: true
+
+    # follow_request: use Claude Code's context_management edits when present.
+    # override_request: ignore Claude Code's edits and use override_edits below.
+    mode: follow_request
+
+    # Gateway-default edits used only when Claude Code sends no context_management edits.
+    default_edits: []
+
+    # Example: uncomment to prune older tool results by default when Claude Code sends no edits.
+    # default_edits:
+    #   - type: clear_tool_uses_20250919
+    #     trigger:
+    #       type: tool_uses
+    #       value: 20
+    #     keep:
+    #       type: tool_uses
+    #       value: 5
+    #     clear_tool_inputs: false
+
+    # Example: uncomment to force gateway policy even when Claude Code sends its own edits.
+    # mode: override_request
+    # override_edits:
+    #   - type: clear_thinking_20251015
+    #     keep:
+    #       type: thinking_turns
+    #       value: 1
+
+    # Optional safety caps. Empty means no gateway hard limits.
+    hard_limits: {}
+
+    # Example hard limits:
+    # hard_limits:
+    #   max_tool_result_chars: 20000
+    #   max_tool_uses_to_keep: 30
+    #   max_thinking_turns_to_keep: 3
+
+providers:
+  openai:
+    default_model: gpt-5.4
+    unsupported_models:
+      - gpt-5.2
+
+# Optional network overrides:
+# network:
+#   listen_addr: 127.0.0.1:8080
+#   allowed_hosts: []

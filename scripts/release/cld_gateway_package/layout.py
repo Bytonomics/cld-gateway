@@ -11,7 +11,7 @@ from .targets import TargetSpec
 LAYOUT_VERSION = 1
 BIN_NAME = "cld-gateway"
 METADATA_FILENAME = "cld-gateway-package.json"
-PACKAGE_ASSET_FILENAMES = ("config.json", "settings.json")
+PACKAGE_ASSET_FILENAMES = ("config.yaml", "settings.json")
 
 
 def prepare_package_dir(package_dir: Path, *, force: bool) -> None:

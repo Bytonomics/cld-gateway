@@ -27,7 +27,38 @@ pub struct AnthropicMessagesRequest {
     #[serde(default)]
     pub thinking: Option<serde_json::Value>,
     #[serde(default)]
+    pub context_management: Option<AnthropicContextManagement>,
+    #[serde(default)]
     pub output_config: Option<AnthropicOutputConfig>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct AnthropicContextManagement {
+    #[serde(default)]
+    pub edits: Vec<AnthropicContextEdit>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct AnthropicContextEdit {
+    #[serde(rename = "type")]
+    pub edit_type: String,
+    #[serde(default)]
+    pub trigger: Option<AnthropicContextThreshold>,
+    #[serde(default)]
+    pub keep: Option<serde_json::Value>,
+    #[serde(default)]
+    pub clear_at_least: Option<AnthropicContextThreshold>,
+    #[serde(default)]
+    pub exclude_tools: Vec<String>,
+    #[serde(default)]
+    pub clear_tool_inputs: bool,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct AnthropicContextThreshold {
+    #[serde(rename = "type")]
+    pub threshold_type: String,
+    pub value: u64,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]

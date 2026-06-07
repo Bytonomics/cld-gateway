@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use crate::{DEFAULT_BACKEND_MODEL, UNSUPPORTED_BACKEND_MODELS};
@@ -29,9 +30,11 @@ pub struct ProviderConfigs {
     pub openai: OpenAiProviderConfig,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct NetworkConfig {
+    #[serde(default = "default_listen_addr")]
+    pub listen_addr: SocketAddr,
     pub allowed_hosts: Vec<String>,
 }
 
@@ -70,6 +73,15 @@ impl Default for GatewayConfig {
     }
 }
 
+impl Default for NetworkConfig {
+    fn default() -> Self {
+        Self {
+            listen_addr: default_listen_addr(),
+            allowed_hosts: Vec::default(),
+        }
+    }
+}
+
 impl Default for OpenAiProviderConfig {
     fn default() -> Self {
         Self {
@@ -82,6 +94,11 @@ impl Default for OpenAiProviderConfig {
 #[must_use]
 fn default_config_version() -> u32 {
     1
+}
+
+#[must_use]
+fn default_listen_addr() -> SocketAddr {
+    SocketAddr::from(([127, 0, 0, 1], 8080))
 }
 
 #[must_use]
@@ -181,6 +198,8 @@ mod tests {
         let config = load_gateway_config(&path).expect("load missing config");
         assert_eq!(config.version, 1);
         assert!(!config.workflow.fast_mode);
+        assert_eq!(config.network.listen_addr, default_listen_addr());
+        assert!(config.network.allowed_hosts.is_empty());
         assert_eq!(config.providers.openai.default_model, DEFAULT_BACKEND_MODEL);
         assert_eq!(
             config.providers.openai.unsupported_models,
@@ -208,6 +227,7 @@ mod tests {
 
         let config = load_gateway_config(&path).expect("load config");
         assert!(config.workflow.fast_mode);
+        assert_eq!(config.network.listen_addr, default_listen_addr());
         assert_eq!(config.providers.openai.default_model, "gpt-test-default");
         assert_eq!(
             config.providers.openai.unsupported_models,
@@ -235,10 +255,39 @@ mod tests {
         let config = load_gateway_config(&path).expect("load config");
         assert_eq!(config.version, 1);
         assert!(config.workflow.fast_mode);
+        assert_eq!(config.network.listen_addr, default_listen_addr());
         assert_eq!(config.providers.openai.default_model, "gpt-test-default");
         assert_eq!(
             config.providers.openai.unsupported_models,
             vec!["gpt-5.2".to_string()]
+        );
+        std::fs::remove_file(path).expect("remove config");
+    }
+
+    #[test]
+    fn explicit_listen_addr_parses_from_json() {
+        let path = temp_config_path("listen_addr");
+        std::fs::write(
+            &path,
+            r#"{
+                "network": {
+                    "listen_addr": "0.0.0.0:9090",
+                    "allowed_hosts": ["example.com"]
+                }
+            }"#,
+        )
+        .expect("write config");
+
+        let config = load_gateway_config(&path).expect("load config");
+        assert_eq!(
+            config.network.listen_addr,
+            "0.0.0.0:9090"
+                .parse::<SocketAddr>()
+                .expect("parse socket addr")
+        );
+        assert_eq!(
+            config.network.allowed_hosts,
+            vec!["example.com".to_string()]
         );
         std::fs::remove_file(path).expect("remove config");
     }

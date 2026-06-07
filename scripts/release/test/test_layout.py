@@ -15,6 +15,7 @@ from cld_gateway_package.layout import (
     validate_package_dir,
     BIN_NAME,
     METADATA_FILENAME,
+    PACKAGE_ASSET_FILENAMES,
 )
 from cld_gateway_package.targets import TARGET_SPECS
 
@@ -41,6 +42,11 @@ def test_build_and_validate_package_dir() -> None:
         bin_path = package_dir / "bin" / BIN_NAME
         assert bin_path.is_file(), f"Binary not found: {bin_path}"
         assert bool(bin_path.stat().st_mode & stat.S_IXUSR), "Binary not executable"
+
+        # Check package assets.
+        for asset_filename in PACKAGE_ASSET_FILENAMES:
+            asset_path = package_dir / asset_filename
+            assert asset_path.is_file(), f"Package asset not found: {asset_path}"
 
         # Check metadata.
         meta_path = package_dir / METADATA_FILENAME
@@ -91,6 +97,29 @@ def test_build_package_dir_with_custom_cargo_profile() -> None:
         assert meta["target"] == "aarch64-apple-darwin"
         assert meta["cargoProfile"] == "debug"
         assert meta["entrypoint"] == f"bin/{BIN_NAME}"
+
+
+def test_validate_package_dir_missing_package_asset() -> None:
+    spec = TARGET_SPECS["aarch64-apple-darwin"]
+    for missing_asset in PACKAGE_ASSET_FILENAMES:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            package_dir = tmp_path / "pkg"
+            entrypoint = tmp_path / "cld-gateway"
+            make_fake_executable(entrypoint)
+
+            prepare_package_dir(package_dir, force=False)
+            build_package_dir(package_dir, "0.3.0", spec, entrypoint)
+
+            (package_dir / missing_asset).unlink()
+
+            try:
+                validate_package_dir(package_dir, spec)
+                assert False, f"Expected RuntimeError for missing package asset {missing_asset}"
+            except RuntimeError as e:
+                assert missing_asset in str(e), (
+                    f"Error message should mention missing asset {missing_asset}: {e}"
+                )
 
 
 def test_validate_package_dir_missing_cargo_profile() -> None:
@@ -154,6 +183,7 @@ if __name__ == "__main__":
     test_prepare_package_dir_force_replaces()
     test_prepare_package_dir_no_force_raises_on_non_empty()
     test_build_package_dir_with_custom_cargo_profile()
+    test_validate_package_dir_missing_package_asset()
     test_validate_package_dir_missing_cargo_profile()
     test_validate_package_dir_invalid_cargo_profile()
     print("All tests passed.")

@@ -615,7 +615,7 @@ dependencies = [
 
 [[package]]
 name = "gateway-auth-codex"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64",
  "dirs",
@@ -640,7 +640,7 @@ dependencies = [
 
 [[package]]
 name = "gateway-backend-codex"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "eventsource-stream",
@@ -660,7 +660,7 @@ dependencies = [
 
 [[package]]
 name = "gateway-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dirs",
  "serde",
@@ -670,7 +670,7 @@ dependencies = [
 
 [[package]]
 name = "gateway-http-anthropic"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "bytes",
@@ -695,7 +695,7 @@ dependencies = [
 
 [[package]]
 name = "gateway-net"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "reqwest",
  "serde",
@@ -707,7 +707,7 @@ dependencies = [
 
 [[package]]
 name = "gateway-observability"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "bytes",
@@ -725,7 +725,7 @@ dependencies = [
 
 [[package]]
 name = "gateway-state"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dirs",
  "rusqlite",
@@ -734,11 +734,12 @@ dependencies = [
 
 [[package]]
 name = "gatewayd"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "crossterm 0.29.0",
  "gateway-auth-codex",
+ "gateway-core",
  "gateway-http-anthropic",
  "gateway-observability",
  "ratatui",

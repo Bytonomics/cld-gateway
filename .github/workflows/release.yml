@@ -146,7 +146,9 @@ jobs:
             test -f "${archive}" || { echo "Missing: ${archive}"; exit 1; }
             tar -tzf "${archive}" > "${listing}"
             grep -q "^bin/cld-gateway$" "${listing}" || { echo "Missing bin/cld-gateway in ${archive}"; exit 1; }
-            grep -q "cld-gateway-package.json" "${listing}" || { echo "Missing cld-gateway-package.json in ${archive}"; exit 1; }
+            grep -q "^cld-gateway-package.json$" "${listing}" || { echo "Missing cld-gateway-package.json in ${archive}"; exit 1; }
+            grep -q "^config.json$" "${listing}" || { echo "Missing config.json in ${archive}"; exit 1; }
+            grep -q "^settings.json$" "${listing}" || { echo "Missing settings.json in ${archive}"; exit 1; }
             echo "OK: ${archive}"
           done
 

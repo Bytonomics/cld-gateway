@@ -16,6 +16,7 @@ from cld_gateway_package.archive import write_archive
 from cld_gateway_package.layout import (
     BIN_NAME,
     METADATA_FILENAME,
+    PACKAGE_ASSET_FILENAMES,
     build_package_dir,
     prepare_package_dir,
 )
@@ -129,7 +130,7 @@ class TestPackageMetadataValidation:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
             assert meta["cargoProfile"] == "debug"
 
-    def test_archive_contains_binary_and_metadata(self) -> None:
+    def test_archive_contains_binary_metadata_and_package_assets(self) -> None:
         spec = TARGET_SPECS["x86_64-apple-darwin"]
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -145,8 +146,12 @@ class TestPackageMetadataValidation:
             with tarfile.open(archive_out, "r:gz") as tar:
                 names = tar.getnames()
 
-            assert f"bin/{BIN_NAME}" in names
-            assert METADATA_FILENAME in names
+            expected_names = {
+                f"bin/{BIN_NAME}",
+                METADATA_FILENAME,
+                *PACKAGE_ASSET_FILENAMES,
+            }
+            assert expected_names.issubset(set(names))
 
 
 class TestWorkspaceVersionConsistency:

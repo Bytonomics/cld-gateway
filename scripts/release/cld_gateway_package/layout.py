@@ -11,6 +11,7 @@ from .targets import TargetSpec
 LAYOUT_VERSION = 1
 BIN_NAME = "cld-gateway"
 METADATA_FILENAME = "cld-gateway-package.json"
+PACKAGE_ASSET_FILENAMES = ("config.json", "settings.json")
 
 
 def prepare_package_dir(package_dir: Path, *, force: bool) -> None:
@@ -54,6 +55,13 @@ def build_package_dir(
     }
     _write_json(package_dir / METADATA_FILENAME, metadata)
 
+    package_source_dir = _package_source_dir()
+    for asset_filename in PACKAGE_ASSET_FILENAMES:
+        shutil.copyfile(
+            package_source_dir / asset_filename,
+            package_dir / asset_filename,
+        )
+
 
 def validate_package_dir(package_dir: Path, spec: TargetSpec) -> None:
     bin_dir = package_dir / "bin"
@@ -93,6 +101,11 @@ def validate_package_dir(package_dir: Path, spec: TargetSpec) -> None:
     if not _is_executable(bin_path):
         raise RuntimeError(f"Binary is not executable: bin/{BIN_NAME}")
 
+    for asset_filename in PACKAGE_ASSET_FILENAMES:
+        asset_path = package_dir / asset_filename
+        if not asset_path.is_file():
+            raise RuntimeError(f"Missing package asset: {asset_filename}")
+
 
 def _write_json(path: Path, value: object) -> None:
     with open(path, "w", encoding="utf-8") as out:
@@ -102,3 +115,7 @@ def _write_json(path: Path, value: object) -> None:
 
 def _is_executable(path: Path) -> bool:
     return bool(path.stat().st_mode & stat.S_IXUSR)
+
+
+def _package_source_dir() -> Path:
+    return Path(__file__).resolve().parent

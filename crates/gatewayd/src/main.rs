@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+use gateway_core::config::load_gateway_config_default_path;
 use gateway_http_anthropic::AppState;
 use gateway_observability::middleware::{CaptureConfig, capture_http_exchange};
 use tracing::info;
@@ -90,6 +91,7 @@ async fn run_serve() -> Result<(), Box<dyn std::error::Error>> {
     // For now, OpenAI is the default vendor in serve mode.
     auth_preflight_for_serve(Vendor::OpenAI).await;
 
+    let gateway_config = load_gateway_config_default_path()?;
     let config = CaptureConfig::default();
     let app = gateway_http_anthropic::router(AppState::from_env()?).layer(
         axum::middleware::from_fn(move |req, next| {
@@ -98,9 +100,8 @@ async fn run_serve() -> Result<(), Box<dyn std::error::Error>> {
         }),
     );
 
-    let listen_addr =
-        std::env::var("CLD_GATEWAY_LISTEN_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
-    let listener = tokio::net::TcpListener::bind(&listen_addr).await?;
+    let listen_addr = gateway_config.network.listen_addr;
+    let listener = tokio::net::TcpListener::bind(listen_addr).await?;
     info!("Listening on {listen_addr}");
     axum::serve(listener, app).await?;
     Ok(())

@@ -20,6 +20,8 @@ Every published package archive must contain:
 
 - `bin/cld-gateway`
 - `cld-gateway-package.json`
+- `config.json`
+- `settings.json`
 
 ---
 
@@ -150,10 +152,10 @@ The canonical version is in the root `Cargo.toml` under `[workspace.package]`:
 version = "X.Y.Z"
 ```
 
-For the first release, if publishing `0.1.0`, keep:
+For the current `0.1.1` release, keep:
 
 ```toml
-version = "0.1.0"
+version = "0.1.1"
 ```
 
 If changing the version, update `Cargo.toml`, then run the validation step below. `make check` already runs the normal test suite and will surface whether `Cargo.lock` needs to be updated. If `Cargo.lock` changes, include it in the release-preparation commit.
@@ -191,10 +193,10 @@ Set the release version once in your shell:
 VERSION=X.Y.Z
 ```
 
-For the first `0.1.0` release, use:
+For the current `0.1.1` release, use:
 
 ```sh
-VERSION=0.1.0
+VERSION=0.1.1
 ```
 
 Verify that `Cargo.toml` contains the same version:
@@ -267,7 +269,7 @@ What each job does:
 
 - `tag-check`: validates tag format and confirms tag version equals `Cargo.toml` version.
 - `build`: builds all four target binaries and packages archives.
-- `verify`: confirms each archive exists and contains `bin/cld-gateway` plus `cld-gateway-package.json`.
+- `verify`: confirms each archive exists and contains `bin/cld-gateway`, `cld-gateway-package.json`, `config.json`, and `settings.json`.
 - `release`: publishes GitHub Release assets, generates `cld-gateway-package_SHA256SUMS`, and dispatches the Homebrew tap update.
 
 ### 6.a. If the release workflow fails before publishing assets
@@ -387,18 +389,19 @@ The manual workflow uses the same renderer and checksum manifest as the automate
 
 Do not hand-edit formula checksums unless the workflows cannot be used.
 
-### 10. Validate Homebrew formula fetch
+### 10. Validate Homebrew formula fetch and audit
 
 After the tap formula update lands:
 
 ```sh
 brew tap bytonomics/tap
-brew fetch --dry-run cld-gateway
+brew fetch --force --formula cld-gateway
+HOMEBREW_NO_INSTALL_FROM_API=1 brew audit --strict --online bytonomics/tap/cld-gateway
 ```
 
-This confirms Homebrew can resolve the formula and fetch the published release artifact for the current platform.
+This matches the current tap workflow behavior: Homebrew must be able to resolve the formula, fetch the published release artifact for the current platform, and pass the strict online audit that runs in `homebrew-tap` CI.
 
-### 11. Validate Homebrew install
+### 11. Validate Homebrew install and wrappers
 
 Install from the tap:
 
@@ -408,9 +411,36 @@ brew install cld-gateway
 cld-gateway invalid-command 2>&1 | grep -q "unknown command"
 ```
 
-The current binary does not rely on a stable `--version` or `--help` contract for release validation. The `invalid-command` check verifies that the installed binary executes and reaches the deterministic CLI parser error path.
+Then confirm the packaged config assets and Homebrew wrapper commands were installed:
 
-### 12. Validate shell installer
+```sh
+test -f "$(brew --prefix)/etc/cld-gateway/config.json"
+test -f "$(brew --prefix)/etc/cld-gateway/settings.json"
+test -x "$(brew --prefix)/bin/cldg"
+test -x "$(brew --prefix)/bin/clddg"
+```
+
+The current formula installs:
+
+- the `cld-gateway` binary
+- `config.json` and `settings.json` under `$(brew --prefix)/etc/cld-gateway`
+- wrapper commands `cldg` and `clddg`
+
+The `cldg` and `clddg` wrappers shell out to `claude`, so they are only expected to work when `claude` is already installed separately and available on `PATH`. The binary-level `invalid-command` check remains the deterministic validation for the packaged executable itself.
+
+### 12. Validate Homebrew service support
+
+Confirm the formula exposes the daemon through Homebrew Services:
+
+```sh
+brew services start cld-gateway
+curl -fsSL http://127.0.0.1:8080/health
+brew services stop cld-gateway
+```
+
+The current formula runs `cld-gateway serve` and sets `GATEWAY_CONFIG_PATH` to the installed `$(brew --prefix)/etc/cld-gateway/config.json`, so `brew services` validation should use the Homebrew-managed config path rather than an ad hoc manual environment override.
+
+### 13. Validate shell installer
 
 Verify the latest-release installer:
 
@@ -418,10 +448,10 @@ Verify the latest-release installer:
 curl -fsSL https://github.com/Bytonomics/cld-gateway/releases/latest/download/install.sh | sh
 ```
 
-For a pinned version:
+For the current release example, pin `0.1.1` explicitly:
 
 ```sh
-curl -fsSL https://github.com/Bytonomics/cld-gateway/releases/latest/download/install.sh | sh -s -- --release X.Y.Z
+curl -fsSL https://github.com/Bytonomics/cld-gateway/releases/latest/download/install.sh | sh -s -- --release 0.1.1
 ```
 
 Then verify the installed binary executes:
@@ -430,7 +460,7 @@ Then verify the installed binary executes:
 ~/.local/bin/cld-gateway invalid-command 2>&1 | grep -q "unknown command"
 ```
 
-### 13. Validate daemon startup
+### 14. Validate daemon startup
 
 Run:
 
@@ -450,7 +480,7 @@ In another shell, verify health:
 curl -fsSL http://127.0.0.1:8080/health
 ```
 
-### 14. Validate login/auth flow
+### 15. Validate login/auth flow
 
 Run the installed binary login flow:
 
@@ -472,7 +502,7 @@ cld-gateway serve
 
 Send a real client request through the gateway and verify it succeeds.
 
-### 15. Auth callback port verification
+### 16. Auth callback port verification
 
 During installation testing, verify OAuth callback port fallback behavior:
 

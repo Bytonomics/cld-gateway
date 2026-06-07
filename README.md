@@ -13,6 +13,13 @@ brew tap bytonomics/tap
 brew install cld-gateway
 ```
 
+Homebrew installs:
+- the `cld-gateway` daemon binary
+- runtime support files at `$(brew --prefix)/etc/cld-gateway/config.json` and `$(brew --prefix)/etc/cld-gateway/settings.json`
+- wrapper commands `cldg` and `clddg`
+
+`cldg` and `clddg` shell out to `claude`, so the `claude` executable must already be available on your `PATH` before you use those wrappers.
+
 > **Note:** Homebrew availability depends on the separate `bytonomics/homebrew-tap` repo being updated for the release you want to install. Stable releases are intended to flow there automatically from the gateway release workflow.
 
 ### Shell installer
@@ -24,7 +31,7 @@ curl -fsSL https://github.com/Bytonomics/cld-gateway/releases/latest/download/in
 Or with version pinning:
 
 ```sh
-curl -fsSL https://github.com/Bytonomics/cld-gateway/releases/latest/download/install.sh | sh -s -- --release 0.1.0
+curl -fsSL https://github.com/Bytonomics/cld-gateway/releases/latest/download/install.sh | sh -s -- --release 0.1.1
 ```
 
 ### Direct download
@@ -58,7 +65,7 @@ cld-gateway login claude
 cld-gateway serve
 ```
 
-The daemon runs on `127.0.0.1:8080` and automatically handles token refresh.
+The daemon listens on the address configured in `~/.gateway/config.json` (or `GATEWAY_CONFIG_PATH`/`GATEWAY_HOME`), defaulting to `127.0.0.1:8080` when no listen address is configured, and automatically handles token refresh.
 
 If you see an auth error, run `cld-gateway login` again.
 
@@ -91,13 +98,12 @@ The gateway currently runs on Linux and macOS. Windows support is planned for a 
 
 | Variable | Default | Description |
 |---|---|---|
-| `CLD_GATEWAY_LISTEN_ADDR` | `127.0.0.1:8080` | Listen address and port |
 | `GATEWAY_HOME` | `~/.gateway` | Override all default `~/.gateway` paths at once |
 | `GATEWAY_AUTH_JSON_PATH` | `~/.gateway/auth.json` | Auth credentials file path |
 | `CLD_GATEWAY_AUTH_PORT` | `1455` | OAuth callback port (see Authentication section) |
 | `CLD_GATEWAY_LOG_PATH` | `~/.gateway/logs/http-exchange.jsonl` | Exchange log file path |
 | `CLD_GATEWAY_STATE_DB_PATH` | `~/.gateway/state/tool_calls.sqlite` | Tool-call state DB path |
-| `GATEWAY_CONFIG_PATH` | `~/.gateway/config.json` | Gateway config file path |
+| `GATEWAY_CONFIG_PATH` | `~/.gateway/config.json` | Gateway config file path (including `network.listen_addr`) |
 
 ---
 
@@ -115,8 +121,11 @@ cld-gateway serve
 # Dev build — login with custom paths
 GATEWAY_HOME=~/.gateway-dev cld-gateway-dev login claude
 
-# Dev build — start daemon (different port and paths)
-CLD_GATEWAY_LISTEN_ADDR=127.0.0.1:8081 \
+# Dev build — start daemon (different config path and data directory)
+cat > ~/.gateway-dev/config.json <<'EOF'
+{"network":{"listen_addr":"127.0.0.1:8081"}}
+EOF
+GATEWAY_CONFIG_PATH=~/.gateway-dev/config.json \
 GATEWAY_HOME=~/.gateway-dev \
 cld-gateway-dev serve
 ```

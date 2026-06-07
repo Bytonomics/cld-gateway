@@ -48,7 +48,6 @@ providers:
     unsupported_models:
       - gpt-5.2
 
-# Optional network overrides:
-# network:
-#   listen_addr: 127.0.0.1:8080
-#   allowed_hosts: []
+network:
+  listen_addr: 127.0.0.1:6473
+  allowed_hosts: []

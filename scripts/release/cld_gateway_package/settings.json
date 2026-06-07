@@ -1,6 +1,6 @@
 {
   "env": {
-    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8080",
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:6473",
     "ANTHROPIC_AUTH_TOKEN": "dummy",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL": "gpt-5.4-mini",
     "ANTHROPIC_DEFAULT_SONNET_MODEL": "gpt-5.4",

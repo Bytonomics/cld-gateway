@@ -20,7 +20,7 @@ Every published package archive must contain:
 
 - `bin/cld-gateway`
 - `cld-gateway-package.json`
-- `config.yaml`
+- `config.yml`
 - `settings.json`
 
 ---
@@ -257,7 +257,7 @@ What each job does:
 
 - `tag-check`: validates tag format and confirms tag version equals `Cargo.toml` version.
 - `build`: builds all four target binaries and packages archives.
-- `verify`: confirms each archive exists and contains `bin/cld-gateway`, `cld-gateway-package.json`, `config.yaml`, and `settings.json`.
+- `verify`: confirms each archive exists and contains `bin/cld-gateway`, `cld-gateway-package.json`, `config.yml`, and `settings.json`.
 - `release`: publishes GitHub Release assets, generates `cld-gateway-package_SHA256SUMS`, and dispatches the Homebrew tap update.
 
 ### 6.a. If the release workflow fails before publishing assets
@@ -403,7 +403,7 @@ Then confirm the installed binary and user-facing config paths are present:
 
 ```sh
 cld-gateway invalid-command 2>&1 | grep -q "unknown command"
-test -f ~/.gateway/config.yaml
+test -f ~/.gateway/config.yml
 test -f ~/.claude_codex/settings.json
 ```
 
@@ -411,7 +411,7 @@ The current Homebrew install should leave users with:
 
 - the `cld-gateway` binary
 - wrapper commands `cldg` and `clddg`
-- gateway runtime config at `~/.gateway/config.yaml`
+- gateway runtime config at `~/.gateway/config.yml`
 - Claude settings for wrappers at `~/.claude_codex/settings.json`
 
 The `cldg` and `clddg` wrappers shell out to `claude`, so they are only expected to work when `claude` is already installed separately and available on `PATH`. The binary-level `invalid-command` check remains the deterministic validation for the packaged executable itself.
@@ -426,7 +426,7 @@ curl -fsSL http://127.0.0.1:8080/health
 brew services stop cld-gateway
 ```
 
-The current formula runs `cld-gateway serve` and sets `GATEWAY_CONFIG_PATH` to `~/.gateway/config.yaml`, so `brew services` validation should use the user-home config path rather than a Homebrew-managed `etc` path.
+The current formula runs `cld-gateway serve` and sets `GATEWAY_CONFIG_PATH` to `~/.gateway/config.yml`, so `brew services` validation should use the user-home config path rather than a Homebrew-managed `etc` path.
 
 ### 13. Validate shell installer
 
@@ -460,6 +460,7 @@ Expected behavior:
 
 - listens on `127.0.0.1:8080` by default
 - does not require Homebrew after installation
+- when neither `GATEWAY_CONFIG_PATH` nor `GATEWAY_HOME` is set, runtime falls back to `~/.gateway/config-dev.yml`
 - auth/login can be tested separately
 
 In another shell, verify health:

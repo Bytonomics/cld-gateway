@@ -152,18 +152,30 @@ fn default_unsupported_models() -> Vec<String> {
         .collect()
 }
 
-#[must_use]
-pub fn default_gateway_config_path() -> PathBuf {
-    if let Ok(path) = std::env::var("GATEWAY_CONFIG_PATH") {
+fn gateway_config_path_from_sources(
+    config_path: Option<String>,
+    gateway_home: Option<String>,
+    home_dir: Option<PathBuf>,
+) -> PathBuf {
+    if let Some(path) = config_path {
         return PathBuf::from(path);
     }
 
-    if let Ok(gateway_home) = std::env::var("GATEWAY_HOME") {
-        return PathBuf::from(gateway_home).join("config.yaml");
+    if let Some(gateway_home) = gateway_home {
+        return PathBuf::from(gateway_home).join("config.yml");
     }
 
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join(".gateway").join("config.yaml")
+    let home = home_dir.unwrap_or_else(|| PathBuf::from("."));
+    home.join(".gateway").join("config-dev.yml")
+}
+
+#[must_use]
+pub fn default_gateway_config_path() -> PathBuf {
+    gateway_config_path_from_sources(
+        std::env::var("GATEWAY_CONFIG_PATH").ok(),
+        std::env::var("GATEWAY_HOME").ok(),
+        dirs::home_dir(),
+    )
 }
 
 /// Loads gateway runtime configuration from disk.
@@ -233,6 +245,35 @@ mod tests {
     fn write_yaml<T: Serialize>(path: &Path, value: &T) {
         let text = serde_yaml::to_string(value).expect("serialize config yaml");
         std::fs::write(path, text).expect("write config");
+    }
+
+    #[test]
+    fn default_gateway_config_path_prefers_explicit_env_path() {
+        let path = gateway_config_path_from_sources(
+            Some("/tmp/explicit-config.yml".to_string()),
+            Some("/tmp/gateway-home".to_string()),
+            Some(PathBuf::from("/tmp/home")),
+        );
+
+        assert_eq!(path, PathBuf::from("/tmp/explicit-config.yml"));
+    }
+
+    #[test]
+    fn default_gateway_config_path_uses_gateway_home_when_explicit_path_missing() {
+        let path = gateway_config_path_from_sources(
+            None,
+            Some("/tmp/gateway-home".to_string()),
+            Some(PathBuf::from("/tmp/home")),
+        );
+
+        assert_eq!(path, PathBuf::from("/tmp/gateway-home").join("config.yml"));
+    }
+
+    #[test]
+    fn default_gateway_config_path_falls_back_to_dev_config_in_gateway_dir() {
+        let path = gateway_config_path_from_sources(None, None, Some(PathBuf::from("/tmp/home")));
+
+        assert_eq!(path, PathBuf::from("/tmp/home/.gateway/config-dev.yml"));
     }
 
     #[test]

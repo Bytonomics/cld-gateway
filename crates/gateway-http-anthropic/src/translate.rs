@@ -1,11 +1,13 @@
 #![forbid(unsafe_code)]
 
+use crate::claude_code_context::normalize_claude_code_context;
 use crate::types::{
     AnthropicContent, AnthropicContentBlock, AnthropicMessage, AnthropicMessagesRequest,
     AnthropicSystemBlock, AnthropicToolDefinition,
 };
 
 use gateway_backend_codex::types::CodexToolCallKind;
+use gateway_core::config::ClaudeCodeWorkflowConfig;
 use std::collections::HashMap;
 
 const WEB_SEARCH_SOURCES_INCLUDE: &str = "web_search_call.action.sources";
@@ -32,6 +34,7 @@ struct TranslatedTools {
 #[derive(Debug, Clone, Default)]
 pub struct ToolTranslationContext {
     tool_kinds_by_call_id: HashMap<String, CodexToolCallKind>,
+    claude_code_config: ClaudeCodeWorkflowConfig,
 }
 
 impl ToolTranslationContext {
@@ -39,7 +42,14 @@ impl ToolTranslationContext {
     pub fn new(tool_kinds_by_call_id: HashMap<String, CodexToolCallKind>) -> Self {
         Self {
             tool_kinds_by_call_id,
+            claude_code_config: ClaudeCodeWorkflowConfig::default(),
         }
+    }
+
+    #[must_use]
+    pub fn with_claude_code_config(mut self, config: ClaudeCodeWorkflowConfig) -> Self {
+        self.claude_code_config = config;
+        self
     }
 
     fn kind_for_call(&self, call_id: &str) -> CodexToolCallKind {
@@ -54,10 +64,15 @@ pub fn translate_request_with_context(
     req: &AnthropicMessagesRequest,
     tool_context: &ToolTranslationContext,
 ) -> Result<TranslateResult, String> {
-    let instructions = extract_system_text(&req.system)
+    let normalized = normalize_claude_code_context(&req.messages, &tool_context.claude_code_config);
+    let mut instructions = extract_system_text(&req.system)
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "You are a helpful assistant.".to_string());
-    let input = translate_messages_to_backend_items(&req.messages, tool_context)?;
+    for fragment in &normalized.instruction_fragments {
+        instructions.push_str("\n\n");
+        instructions.push_str(fragment);
+    }
+    let input = translate_messages_to_backend_items(&normalized.messages, tool_context)?;
     let hosted_web_search = req
         .tools
         .iter()
@@ -90,6 +105,7 @@ pub fn translate_request_with_context(
             .map_err(|e| format!("metadata must be JSON-serializable: {e}"))?;
         client_metadata.insert("anthropic_metadata".to_string(), encoded);
     }
+    client_metadata.extend(normalized.client_metadata);
     let client_metadata = (!client_metadata.is_empty()).then_some(client_metadata);
 
     Ok(TranslateResult {
@@ -662,11 +678,409 @@ mod tests {
         translate_request_with_context(req, &ToolTranslationContext::default())
     }
 
+    fn serialized_input(translated: &TranslateResult) -> String {
+        serde_json::to_string(&translated.input).expect("serialize input")
+    }
+
     #[test]
     fn defaults_instructions_when_system_empty() {
         let req = base_req();
         let translated = translate_request(&req).expect("translate");
         assert_eq!(translated.instructions, "You are a helpful assistant.");
+    }
+
+    #[test]
+    fn latest_claude_code_slash_command_promotes_body_and_uses_args_as_input() {
+        let mut req = base_req();
+        req.messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Text(
+                "<command-message>review_agent</command-message>\n\
+                 <command-name>/review_agent</command-name>\n\
+                 <command-args>verify if these tasks are implemented by another agent</command-args>\n\
+                 another agent continued your session and implemented most of the tasks.\n\
+                 Generate the report as 2 markdown tables.\n\
+                 ARGUMENTS: verify if these tasks are implemented by another agent"
+                    .to_string(),
+            ),
+        });
+
+        let translated = translate_request(&req).expect("translate");
+        let input = serialized_input(&translated);
+
+        assert!(
+            translated
+                .instructions
+                .contains("implemented most of the tasks")
+        );
+        assert!(input.contains("verify if these tasks are implemented by another agent"));
+        assert_eq!(
+            translated
+                .client_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("claude_code_slash_command"))
+                .map(String::as_str),
+            Some("/review_agent")
+        );
+    }
+
+    #[test]
+    fn older_claude_code_slash_commands_are_historical_not_active() {
+        let mut req = base_req();
+        req.messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Text(
+                "<command-message>review_agent</command-message>\n\
+                 <command-name>/review_agent</command-name>\n\
+                 <command-args>old review</command-args>\n\
+                 OLD COMMAND BODY SHOULD NOT SURVIVE"
+                    .to_string(),
+            ),
+        });
+        req.messages.push(AnthropicMessage {
+            role: "assistant".to_string(),
+            content: AnthropicContent::Text("ack".to_string()),
+        });
+        req.messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Text("answer only the new question".to_string()),
+        });
+
+        let translated = translate_request(&req).expect("translate");
+        let input = serialized_input(&translated);
+
+        assert!(
+            !translated
+                .instructions
+                .contains("OLD COMMAND BODY SHOULD NOT SURVIVE")
+        );
+        assert!(input.contains("answer only the new question"));
+    }
+
+    #[test]
+    fn historical_slash_command_scrubbing_preserves_tool_results() {
+        let mut req = base_req();
+        req.messages.push(AnthropicMessage {
+            role: "assistant".to_string(),
+            content: AnthropicContent::Blocks(vec![AnthropicContentBlock {
+                block_type: "tool_use".to_string(),
+                text: None,
+                id: Some("call_preserved".to_string()),
+                name: Some("Bash".to_string()),
+                input: Some(serde_json::json!({ "command": "echo hi" })),
+                tool_use_id: None,
+                content: None,
+                is_error: None,
+                source: None,
+                extra: std::collections::BTreeMap::default(),
+            }]),
+        });
+        req.messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Blocks(vec![
+                AnthropicContentBlock {
+                    block_type: "tool_result".to_string(),
+                    text: None,
+                    id: None,
+                    name: None,
+                    input: None,
+                    tool_use_id: Some("call_preserved".to_string()),
+                    content: Some(serde_json::json!("completed")),
+                    is_error: None,
+                    source: None,
+                    extra: std::collections::BTreeMap::default(),
+                },
+                AnthropicContentBlock {
+                    block_type: "text".to_string(),
+                    text: Some(
+                        "<command-name>/model</command-name>\n\
+                         <command-message>model</command-message>\n\
+                         <command-args></command-args>\n\
+                         <local-command-stdout>Set model to gpt-5.4</local-command-stdout>"
+                            .to_string(),
+                    ),
+                    id: None,
+                    name: None,
+                    input: None,
+                    tool_use_id: None,
+                    content: None,
+                    is_error: None,
+                    source: None,
+                    extra: std::collections::BTreeMap::default(),
+                },
+            ]),
+        });
+        req.messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Text("answer the current question".to_string()),
+        });
+
+        let translated = translate_request(&req).expect("translate");
+        let input = serialized_input(&translated);
+
+        assert!(input.contains("\"type\":\"function_call\""));
+        assert!(input.contains("\"type\":\"function_call_output\""));
+        assert!(input.contains("\"call_id\":\"call_preserved\""));
+        assert!(input.contains("answer the current question"));
+    }
+
+    #[test]
+    fn active_claude_code_slash_command_does_not_promote_older_command() {
+        let mut req = base_req();
+        req.messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Text(
+                "<command-message>old_command</command-message>\n\
+                 <command-name>/old_command</command-name>\n\
+                 <command-args>old args</command-args>\n\
+                 OLD COMMAND BODY"
+                    .to_string(),
+            ),
+        });
+        req.messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Text(
+                "<command-message>make_tasks</command-message>\n\
+                 <command-name>/make-tasks-for-plan</command-name>\n\
+                 <command-args>make tasks from the existing approved plan</command-args>\n\
+                 Create tasks from the existing approved plan. Do not rewrite the plan."
+                    .to_string(),
+            ),
+        });
+
+        let translated = translate_request(&req).expect("translate");
+        let input = serialized_input(&translated);
+
+        assert!(translated.instructions.contains("Do not rewrite the plan"));
+        assert!(input.contains("make tasks from the existing approved plan"));
+    }
+
+    #[test]
+    fn active_slash_command_uses_latest_envelope_inside_same_user_message() {
+        let mut req = base_req();
+        req.messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Blocks(vec![
+                AnthropicContentBlock {
+                    block_type: "text".to_string(),
+                    text: Some(
+                        "<command-name>/skills</command-name>\n\
+                         <command-message>skills</command-message>\n\
+                         <command-args></command-args>"
+                            .to_string(),
+                    ),
+                    id: None,
+                    name: None,
+                    input: None,
+                    tool_use_id: None,
+                    content: None,
+                    is_error: None,
+                    source: None,
+                    extra: std::collections::BTreeMap::default(),
+                },
+                AnthropicContentBlock {
+                    block_type: "text".to_string(),
+                    text: Some(
+                        "<local-command-stdout>Skills dialog dismissed</local-command-stdout>"
+                            .to_string(),
+                    ),
+                    id: None,
+                    name: None,
+                    input: None,
+                    tool_use_id: None,
+                    content: None,
+                    is_error: None,
+                    source: None,
+                    extra: std::collections::BTreeMap::default(),
+                },
+                AnthropicContentBlock {
+                    block_type: "text".to_string(),
+                    text: Some(
+                        "<command-message>explain-feature</command-message>\n\
+                         <command-name>/explain-feature</command-name>\n\
+                         <command-args>explain the currently unstaged feature in this repo</command-args>"
+                            .to_string(),
+                    ),
+                    id: None,
+                    name: None,
+                    input: None,
+                    tool_use_id: None,
+                    content: None,
+                    is_error: None,
+                    source: None,
+                    extra: std::collections::BTreeMap::default(),
+                },
+                AnthropicContentBlock {
+                    block_type: "text".to_string(),
+                    text: Some(
+                        "You are a code explainer for this repository.\n\
+                         Do not dump everything at once."
+                            .to_string(),
+                    ),
+                    id: None,
+                    name: None,
+                    input: None,
+                    tool_use_id: None,
+                    content: None,
+                    is_error: None,
+                    source: None,
+                    extra: std::collections::BTreeMap::default(),
+                },
+            ]),
+        });
+
+        let translated = translate_request(&req).expect("translate");
+        let input = serialized_input(&translated);
+
+        assert!(!translated.input.is_empty());
+        assert!(
+            translated
+                .instructions
+                .contains("You are a code explainer for this repository.")
+        );
+        assert!(input.contains("explain the currently unstaged feature in this repo"));
+        assert_eq!(
+            translated
+                .client_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("claude_code_slash_command"))
+                .map(String::as_str),
+            Some("/explain-feature")
+        );
+    }
+
+    #[test]
+    fn active_slash_command_stays_active_after_tool_result_turns() {
+        let mut req = base_req();
+        req.messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Blocks(vec![
+                AnthropicContentBlock {
+                    block_type: "text".to_string(),
+                    text: Some(
+                        "<command-message>explain-feature</command-message>\n\
+                         <command-name>/explain-feature</command-name>\n\
+                         <command-args>explain the currently unstaged feature in this repo</command-args>"
+                            .to_string(),
+                    ),
+                    id: None,
+                    name: None,
+                    input: None,
+                    tool_use_id: None,
+                    content: None,
+                    is_error: None,
+                    source: None,
+                    extra: std::collections::BTreeMap::default(),
+                },
+                AnthropicContentBlock {
+                    block_type: "text".to_string(),
+                    text: Some(
+                        "You are a code explainer for this repository.\n\
+                         Use the requested structure."
+                            .to_string(),
+                    ),
+                    id: None,
+                    name: None,
+                    input: None,
+                    tool_use_id: None,
+                    content: None,
+                    is_error: None,
+                    source: None,
+                    extra: std::collections::BTreeMap::default(),
+                },
+            ]),
+        });
+        req.messages.push(AnthropicMessage {
+            role: "assistant".to_string(),
+            content: AnthropicContent::Blocks(vec![AnthropicContentBlock {
+                block_type: "tool_use".to_string(),
+                text: None,
+                id: Some("call_task".to_string()),
+                name: Some("TaskCreate".to_string()),
+                input: Some(serde_json::json!({ "subject": "Inspect unstaged diff" })),
+                tool_use_id: None,
+                content: None,
+                is_error: None,
+                source: None,
+                extra: std::collections::BTreeMap::default(),
+            }]),
+        });
+        req.messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Blocks(vec![AnthropicContentBlock {
+                block_type: "tool_result".to_string(),
+                text: None,
+                id: None,
+                name: None,
+                input: None,
+                tool_use_id: Some("call_task".to_string()),
+                content: Some(serde_json::json!("Task #1 created successfully")),
+                is_error: None,
+                source: None,
+                extra: std::collections::BTreeMap::default(),
+            }]),
+        });
+
+        let translated = translate_request(&req).expect("translate");
+        let input = serialized_input(&translated);
+
+        assert!(
+            translated
+                .instructions
+                .contains("Use the requested structure.")
+        );
+        assert!(input.contains("explain the currently unstaged feature in this repo"));
+        assert!(input.contains("\"type\":\"function_call\""));
+        assert!(input.contains("\"type\":\"function_call_output\""));
+    }
+
+    #[test]
+    fn active_claude_code_slash_command_can_be_disabled_by_config() {
+        let mut req = base_req();
+        req.messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Text(
+                "<command-message>review_agent</command-message>\n\
+                 <command-name>/review_agent</command-name>\n\
+                 <command-args>verify implementation</command-args>\n\
+                 Expanded command body"
+                    .to_string(),
+            ),
+        });
+        let mut claude_code_config = gateway_core::config::ClaudeCodeWorkflowConfig::default();
+        claude_code_config.slash_commands.enabled = false;
+        let tool_context =
+            ToolTranslationContext::default().with_claude_code_config(claude_code_config);
+
+        let translated = translate_request_with_context(&req, &tool_context).expect("translate");
+        let input = serialized_input(&translated);
+
+        assert!(!translated.instructions.contains("Expanded command body"));
+        assert!(input.contains("/review_agent"));
+        assert!(input.contains("Expanded command body"));
+    }
+
+    #[test]
+    fn latest_claude_code_skill_expansion_promotes_body_and_uses_args_as_input() {
+        let mut req = base_req();
+        req.messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Text(
+                "<skill-instructions>Review the code critically. Do not load skill files.</skill-instructions>\n\
+                 <skill-args>verify staged changes</skill-args>"
+                    .to_string(),
+            ),
+        });
+
+        let translated = translate_request(&req).expect("translate");
+        let input = serialized_input(&translated);
+
+        assert!(
+            translated
+                .instructions
+                .contains("Review the code critically")
+        );
+        assert!(input.contains("verify staged changes"));
     }
 
     #[test]

@@ -23,6 +23,7 @@ pub struct GatewayConfig {
 pub struct WorkflowConfig {
     pub fast_mode: bool,
     pub context_management: ContextManagementConfig,
+    pub claude_code: ClaudeCodeWorkflowConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -33,6 +34,41 @@ pub struct ContextManagementConfig {
     pub default_edits: Vec<serde_json::Value>,
     pub override_edits: Option<Vec<serde_json::Value>>,
     pub hard_limits: ContextManagementHardLimits,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(default)]
+pub struct ClaudeCodeWorkflowConfig {
+    pub slash_commands: ClaudeCodeSlashCommandConfig,
+    pub skills: ClaudeCodeSkillConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct ClaudeCodeSlashCommandConfig {
+    pub enabled: bool,
+    pub mode: ClaudeCodeSlashCommandMode,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaudeCodeSlashCommandMode {
+    #[default]
+    PromoteLatest,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct ClaudeCodeSkillConfig {
+    pub enabled: bool,
+    pub mode: ClaudeCodeSkillMode,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaudeCodeSkillMode {
+    #[default]
+    PromoteActive,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -107,6 +143,24 @@ impl Default for ContextManagementConfig {
             default_edits: Vec::new(),
             override_edits: None,
             hard_limits: ContextManagementHardLimits::default(),
+        }
+    }
+}
+
+impl Default for ClaudeCodeSlashCommandConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            mode: ClaudeCodeSlashCommandMode::PromoteLatest,
+        }
+    }
+}
+
+impl Default for ClaudeCodeSkillConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            mode: ClaudeCodeSkillMode::PromoteActive,
         }
     }
 }
@@ -283,6 +337,16 @@ mod tests {
         assert_eq!(config.version, 1);
         assert!(!config.workflow.fast_mode);
         assert!(config.workflow.context_management.enabled);
+        assert!(config.workflow.claude_code.slash_commands.enabled);
+        assert_eq!(
+            config.workflow.claude_code.slash_commands.mode,
+            ClaudeCodeSlashCommandMode::PromoteLatest
+        );
+        assert!(config.workflow.claude_code.skills.enabled);
+        assert_eq!(
+            config.workflow.claude_code.skills.mode,
+            ClaudeCodeSkillMode::PromoteActive
+        );
         assert_eq!(
             config.workflow.context_management.mode,
             ContextManagementMode::FollowRequest
@@ -445,6 +509,41 @@ mod tests {
                 .hard_limits
                 .max_thinking_turns_to_keep,
             Some(3)
+        );
+        std::fs::remove_file(path).expect("remove config");
+    }
+
+    #[test]
+    fn claude_code_config_parses_from_yaml() {
+        let path = temp_config_path("claude_code");
+        write_yaml(
+            &path,
+            &serde_json::json!({
+                "workflow": {
+                    "claude_code": {
+                        "slash_commands": {
+                            "enabled": false,
+                            "mode": "promote_latest"
+                        },
+                        "skills": {
+                            "enabled": false,
+                            "mode": "promote_active"
+                        }
+                    }
+                }
+            }),
+        );
+
+        let config = load_gateway_config(&path).expect("load config");
+        assert!(!config.workflow.claude_code.slash_commands.enabled);
+        assert_eq!(
+            config.workflow.claude_code.slash_commands.mode,
+            ClaudeCodeSlashCommandMode::PromoteLatest
+        );
+        assert!(!config.workflow.claude_code.skills.enabled);
+        assert_eq!(
+            config.workflow.claude_code.skills.mode,
+            ClaudeCodeSkillMode::PromoteActive
         );
         std::fs::remove_file(path).expect("remove config");
     }

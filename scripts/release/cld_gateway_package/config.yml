@@ -42,6 +42,19 @@ workflow:
     #   max_tool_uses_to_keep: 30
     #   max_thinking_turns_to_keep: 3
 
+  claude_code:
+    # Promote the latest expanded Claude Code slash command into backend
+    # instructions and pass only command arguments as user input.
+    slash_commands:
+      enabled: true
+      mode: promote_latest
+
+    # Promote explicitly expanded Claude Code skill instructions without asking
+    # the backend model to discover local ~/.claude skill files.
+    skills:
+      enabled: true
+      mode: promote_active
+
 providers:
   openai:
     default_model: gpt-5.4

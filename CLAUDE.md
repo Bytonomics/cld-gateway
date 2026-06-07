@@ -45,6 +45,15 @@ Pre-commit is configured in `.pre-commit-config.yaml` and runs:
 
 If a commit fails because a hook modified files, re-stage the hook-changed files and re-run `git commit`.
 
+## README editing discipline
+
+- Treat `README.md` and `homebrew-tap/README.md` as intentionally curated docs with a fixed detail level.
+- Do not add new sections, new categories of information, or a deeper level of implementation detail unless the user explicitly asks for that expansion.
+- When updating a README, preserve its existing information architecture and tone; make the smallest change that keeps it correct.
+- Keep end-user README content focused on setup, usage, and user-visible behavior.
+- Keep maintainer/release-engineering details out of README files unless the user explicitly asks for them there.
+- If a README needs more detail than its current structure can support, stop and ask the user before expanding it.
+
 ## Codebase structure (big picture)
 
 ### Runtime topology
@@ -129,6 +138,8 @@ The workspace is organized as small crates with explicit â€œallowed/not allowedâ
     - `providers.openai.default_model`
     - `providers.openai.unsupported_models`
     - `workflow.fast_mode`
+    - `workflow.claude_code.slash_commands`
+    - `workflow.claude_code.skills`
   - Details: `docs/gateway_config.md`
 
 - Exchange logs:

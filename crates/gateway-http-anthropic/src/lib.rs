@@ -34,6 +34,7 @@ use uuid::Uuid;
 #[cfg(test)]
 use std::path::PathBuf;
 
+mod claude_code_context;
 mod context_management;
 mod sse_bridge;
 mod tool_arg_policy;
@@ -699,6 +700,7 @@ fn build_tool_translation_context(
         }
     }
     ToolTranslationContext::new(tool_kinds)
+        .with_claude_code_config(state.gateway_config.workflow.claude_code.clone())
 }
 
 fn sse_error(

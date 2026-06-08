@@ -382,6 +382,12 @@ Do not hand-edit formula checksums unless the workflows cannot be used.
 After the tap formula update lands:
 
 ```sh
+sh scripts/install/homebrew-reinstall.sh
+```
+
+If you only want the low-level formula fetch/audit checks without reinstalling:
+
+```sh
 brew tap bytonomics/tap
 brew fetch --force --formula cld-gateway
 HOMEBREW_NO_INSTALL_FROM_API=1 brew audit --strict --online bytonomics/tap/cld-gateway
@@ -391,42 +397,36 @@ This matches the current tap workflow behavior: Homebrew must be able to resolve
 
 ### 11. Validate Homebrew install and wrappers
 
-Install from the tap:
+Run the installed verification helper from the main repo:
 
 ```sh
-brew tap bytonomics/tap
-brew install cld-gateway
-cld-gateway invalid-command 2>&1 | grep -q "unknown command"
+sh scripts/install/homebrew-verify.sh
 ```
 
-Then confirm the installed binary and user-facing config paths are present:
+This verifies:
 
-```sh
-cld-gateway invalid-command 2>&1 | grep -q "unknown command"
-test -f ~/.gateway/config.yml
-test -f ~/.claude_codex/settings.json
-```
+- the `cld-gateway` binary is installed
+- wrapper commands `cldg` and `clddg` exist
+- gateway runtime config exists at `~/.gateway/config.yml`
+- Claude settings for wrappers exist at `~/.claude_codex/settings.json`
+- wrapper script contents point at the runtime settings path
+- the health endpoint responds using the address read from the installed config file
 
-The current Homebrew install should leave users with:
-
-- the `cld-gateway` binary
-- wrapper commands `cldg` and `clddg`
-- gateway runtime config at `~/.gateway/config.yml`
-- Claude settings for wrappers at `~/.claude_codex/settings.json`
-
-The `cldg` and `clddg` wrappers shell out to `claude`, so they are only expected to work when `claude` is already installed separately and available on `PATH`. The binary-level `invalid-command` check remains the deterministic validation for the packaged executable itself.
+The `cldg` and `clddg` wrappers shell out to `claude`. The verification helper always inspects the wrapper script contents, and will also try executing them only when `claude` is available on `PATH`.
 
 ### 12. Validate Homebrew service support
 
-Confirm the formula exposes the daemon through Homebrew Services:
+The verification helper already checks the installed health endpoint by reading `~/.gateway/config.yml`.
+
+If you want to validate Homebrew Services explicitly:
 
 ```sh
 brew services start cld-gateway
-curl -fsSL http://127.0.0.1:8080/health
+curl -fsSL http://127.0.0.1:6473/health
 brew services stop cld-gateway
 ```
 
-The current formula runs `cld-gateway serve` and sets `GATEWAY_CONFIG_PATH` to `~/.gateway/config.yml`, so `brew services` validation should use the user-home config path rather than a Homebrew-managed `etc` path.
+The current packaged Homebrew config uses `127.0.0.1:6473`, and the formula service sets `GATEWAY_CONFIG_PATH` to the installed user-home config path.
 
 ### 13. Validate shell installer
 

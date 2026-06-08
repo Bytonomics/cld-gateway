@@ -133,7 +133,7 @@ The workspace is organized as small crates with explicit â€œallowed/not allowedâ
   - Default: `~/.gateway/config-dev.yml`
   - Override via env:
     - `GATEWAY_CONFIG_PATH` (full path)
-    - `GATEWAY_HOME` (directory; config.yml is under it)
+    - `GATEWAY_HOME` (directory; config-dev.yml is under it)
   - Current fields:
     - `providers.openai.default_model`
     - `providers.openai.unsupported_models`

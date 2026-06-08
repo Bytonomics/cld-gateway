@@ -5,7 +5,7 @@
 
 #![forbid(unsafe_code)]
 
-use gateway_core::config::load_gateway_config_default_path;
+use gateway_core::config::{default_gateway_config_path, load_gateway_config};
 use gateway_http_anthropic::AppState;
 use gateway_observability::middleware::{CaptureConfig, capture_http_exchange};
 use tracing::info;
@@ -91,7 +91,12 @@ async fn run_serve() -> Result<(), Box<dyn std::error::Error>> {
     // For now, OpenAI is the default vendor in serve mode.
     auth_preflight_for_serve(Vendor::OpenAI).await;
 
-    let gateway_config = load_gateway_config_default_path()?;
+    let gateway_config_path = default_gateway_config_path();
+    info!(
+        config_path = %gateway_config_path.display(),
+        "Using gateway config file"
+    );
+    let gateway_config = load_gateway_config(&gateway_config_path)?;
     let config = CaptureConfig::default();
     let app = gateway_http_anthropic::router(AppState::from_env()?).layer(
         axum::middleware::from_fn(move |req, next| {

@@ -5,6 +5,7 @@ use std::collections::HashMap;
 const COMMAND_MESSAGE_TAG: &str = "command-message";
 const COMMAND_NAME_TAG: &str = "command-name";
 const COMMAND_ARGS_TAG: &str = "command-args";
+const CURRENT_INSTRUCTION_CONTEXT_DIRECTIVE: &str = "everything before this latest instruction is just for context, but you have to immediately follow the current instruction below this:";
 const SKILL_BASE_DIRECTORY_PREFIX: &str = "Base directory for this skill:";
 const STRICT_INSTRUCTION_DIRECTIVE: &str =
     "Follow these instructions strictly, without ignoring or paraphrasing anything.";
@@ -161,7 +162,7 @@ fn active_command_instructions(envelope: &CommandEnvelope) -> Option<String> {
 }
 
 fn strict_instructions(body: &str) -> String {
-    format!("{STRICT_INSTRUCTION_DIRECTIVE}\n\n{body}")
+    format!("{CURRENT_INSTRUCTION_CONTEXT_DIRECTIVE}\n\n{STRICT_INSTRUCTION_DIRECTIVE}\n\n{body}")
 }
 
 fn rewrite_base_directory_line(body: &str) -> String {

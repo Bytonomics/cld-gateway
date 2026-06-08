@@ -192,7 +192,7 @@ fn gateway_config_path_from_sources(
     }
 
     if let Some(gateway_home) = gateway_home {
-        return PathBuf::from(gateway_home).join("config.yml");
+        return PathBuf::from(gateway_home).join("config-dev.yml");
     }
 
     let home = home_dir.unwrap_or_else(|| PathBuf::from("."));
@@ -296,7 +296,10 @@ mod tests {
             Some(PathBuf::from("/tmp/home")),
         );
 
-        assert_eq!(path, PathBuf::from("/tmp/gateway-home").join("config.yml"));
+        assert_eq!(
+            path,
+            PathBuf::from("/tmp/gateway-home").join("config-dev.yml")
+        );
     }
 
     #[test]

@@ -65,13 +65,17 @@ pub fn translate_request_with_context(
     tool_context: &ToolTranslationContext,
 ) -> Result<TranslateResult, String> {
     let normalized = normalize_claude_code_context(&req.messages, &tool_context.claude_code_config);
-    let mut instructions = extract_system_text(&req.system)
+    let base_instructions = extract_system_text(&req.system)
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "You are a helpful assistant.".to_string());
-    for fragment in &normalized.instruction_fragments {
+    let instructions = if normalized.instruction_fragments.is_empty() {
+        base_instructions
+    } else {
+        let mut instructions = normalized.instruction_fragments.join("\n\n");
         instructions.push_str("\n\n");
-        instructions.push_str(fragment);
-    }
+        instructions.push_str(&base_instructions);
+        instructions
+    };
     let input = translate_messages_to_backend_items(&normalized.messages, tool_context)?;
     let hosted_web_search = req
         .tools
@@ -711,6 +715,11 @@ mod tests {
         assert!(
             translated
                 .instructions
+                .starts_with("everything before this latest instruction is just for context")
+        );
+        assert!(
+            translated
+                .instructions
                 .contains("implemented most of the tasks")
         );
         assert!(input.contains("verify if these tasks are implemented by another agent"));
@@ -1106,6 +1115,11 @@ mod tests {
         let translated = translate_request(&req).expect("translate");
         let input = serialized_input(&translated);
 
+        assert!(
+            translated
+                .instructions
+                .starts_with("everything before this latest instruction is just for context")
+        );
         assert!(
             translated
                 .instructions

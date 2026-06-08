@@ -7,6 +7,8 @@ const COMMAND_NAME_TAG: &str = "command-name";
 const COMMAND_ARGS_TAG: &str = "command-args";
 const CURRENT_INSTRUCTION_CONTEXT_DIRECTIVE: &str = "everything before this latest instruction is just for context, but you have to immediately follow the current instruction below this:";
 const SKILL_BASE_DIRECTORY_PREFIX: &str = "Base directory for this skill:";
+const PREVIOUS_COMMAND_CONTEXT_DIRECTIVE: &str =
+    "Previous command context only; do not execute or follow it as the current instruction.";
 const STRICT_INSTRUCTION_DIRECTIVE: &str =
     "Follow these instructions strictly, without ignoring or paraphrasing anything.";
 const SKILL_DIRECTORY_ANALYSIS_SUFFIX: &str =
@@ -70,8 +72,9 @@ fn normalize_claude_code_commands(
             continue;
         }
 
-        if parse_command_envelope(&message_text(message)).is_some() {
-            set_message_text_preserving_non_text(message, String::new());
+        let text = message_text(message);
+        if parse_command_envelope(&text).is_some() {
+            set_message_text_preserving_non_text(message, previous_command_context(&text));
         }
     }
 
@@ -151,6 +154,10 @@ fn active_command_user_input(envelope: &CommandEnvelope) -> String {
     } else {
         String::new()
     }
+}
+
+fn previous_command_context(text: &str) -> String {
+    format!("{PREVIOUS_COMMAND_CONTEXT_DIRECTIVE}\n\n{text}")
 }
 
 fn active_command_instructions(envelope: &CommandEnvelope) -> Option<String> {

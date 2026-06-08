@@ -723,6 +723,7 @@ mod tests {
                 .contains("implemented most of the tasks")
         );
         assert!(input.contains("verify if these tasks are implemented by another agent"));
+        assert!(!input.contains("implemented most of the tasks"));
         assert_eq!(
             translated
                 .client_metadata
@@ -763,6 +764,10 @@ mod tests {
                 .instructions
                 .contains("OLD COMMAND BODY SHOULD NOT SURVIVE")
         );
+        assert!(input.contains("Previous command context only"));
+        assert!(input.contains("/review_agent"));
+        assert!(input.contains("old review"));
+        assert!(input.contains("OLD COMMAND BODY SHOULD NOT SURVIVE"));
         assert!(input.contains("answer only the new question"));
     }
 
@@ -862,6 +867,9 @@ mod tests {
 
         assert!(translated.instructions.contains("Do not rewrite the plan"));
         assert!(input.contains("make tasks from the existing approved plan"));
+        assert!(input.contains("Previous command context only"));
+        assert!(input.contains("/old_command"));
+        assert!(input.contains("OLD COMMAND BODY"));
     }
 
     #[test]

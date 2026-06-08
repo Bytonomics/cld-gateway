@@ -694,6 +694,25 @@ mod tests {
     }
 
     #[test]
+    fn latest_user_message_gets_priority_directive() {
+        let mut req = base_req();
+        req.messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Text("explain the current diff".to_string()),
+        });
+
+        let translated = translate_request(&req).expect("translate");
+        let input = serialized_input(&translated);
+
+        assert!(
+            translated
+                .instructions
+                .starts_with("Everything before the latest user message or slash command")
+        );
+        assert!(input.contains("explain the current diff"));
+    }
+
+    #[test]
     fn latest_claude_code_slash_command_promotes_body_and_uses_args_as_input() {
         let mut req = base_req();
         req.messages.push(AnthropicMessage {
@@ -715,7 +734,7 @@ mod tests {
         assert!(
             translated
                 .instructions
-                .starts_with("everything before this latest instruction is just for context")
+                .starts_with("Everything before the latest user message or slash command")
         );
         assert!(
             translated
@@ -1126,7 +1145,7 @@ mod tests {
         assert!(
             translated
                 .instructions
-                .starts_with("everything before this latest instruction is just for context")
+                .starts_with("Everything before the latest user message or slash command")
         );
         assert!(
             translated

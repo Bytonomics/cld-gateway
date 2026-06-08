@@ -5,10 +5,12 @@ use std::collections::HashMap;
 const COMMAND_MESSAGE_TAG: &str = "command-message";
 const COMMAND_NAME_TAG: &str = "command-name";
 const COMMAND_ARGS_TAG: &str = "command-args";
-const CURRENT_INSTRUCTION_CONTEXT_DIRECTIVE: &str = "everything before this latest instruction is just for context, but you have to immediately follow the current instruction below this:";
+const CURRENT_TURN_PRIORITY_DIRECTIVE: &str = "Everything before the latest user message or slash command is just context. You must immediately follow the latest user message or slash command; do not continue older tasks unless the latest turn explicitly asks for that.";
 const SKILL_BASE_DIRECTORY_PREFIX: &str = "Base directory for this skill:";
 const PREVIOUS_COMMAND_CONTEXT_DIRECTIVE: &str =
     "Previous command context only; do not execute or follow it as the current instruction.";
+const ACTIVE_COMMAND_INPUT_DIRECTIVE: &str =
+    "Execute the current slash command now, using the promoted command instructions.";
 const STRICT_INSTRUCTION_DIRECTIVE: &str =
     "Follow these instructions strictly, without ignoring or paraphrasing anything.";
 const SKILL_DIRECTORY_ANALYSIS_SUFFIX: &str =
@@ -35,6 +37,9 @@ pub(crate) fn normalize_claude_code_context(
             &mut instruction_fragments,
             &mut client_metadata,
         );
+    }
+    if instruction_fragments.is_empty() && has_latest_user_text_instruction(&normalized) {
+        instruction_fragments.push(CURRENT_TURN_PRIORITY_DIRECTIVE.to_string());
     }
 
     NormalizedClaudeCodeContext {
@@ -100,6 +105,13 @@ fn slash_commands_enabled(config: &ClaudeCodeWorkflowConfig) -> bool {
         )
 }
 
+fn has_latest_user_text_instruction(messages: &[AnthropicMessage]) -> bool {
+    messages
+        .iter()
+        .rev()
+        .any(|message| message.role == "user" && !message_text(message).trim().is_empty())
+}
+
 #[derive(Debug, Clone)]
 struct CommandEnvelope {
     command_message: String,
@@ -140,20 +152,21 @@ fn parse_command_envelope(text: &str) -> Option<CommandEnvelope> {
 }
 
 fn active_command_user_input(envelope: &CommandEnvelope) -> String {
+    let command_name = envelope.command_name.trim();
     let args = envelope.command_args.trim();
+    let command_message = envelope.command_message.trim();
+
+    let mut lines = vec![ACTIVE_COMMAND_INPUT_DIRECTIVE.to_string()];
+    if !command_name.is_empty() {
+        lines.push(format!("Command: {command_name}"));
+    } else if !command_message.is_empty() {
+        lines.push(format!("Command: {command_message}"));
+    }
     if !args.is_empty() {
-        return args.to_string();
+        lines.push(format!("Arguments: {args}"));
     }
 
-    let command_message = envelope.command_message.trim();
-    let command_name = envelope.command_name.trim();
-    if !command_message.is_empty() {
-        command_message.to_string()
-    } else if !command_name.is_empty() {
-        command_name.to_string()
-    } else {
-        String::new()
-    }
+    lines.join("\n")
 }
 
 fn previous_command_context(text: &str) -> String {
@@ -169,7 +182,7 @@ fn active_command_instructions(envelope: &CommandEnvelope) -> Option<String> {
 }
 
 fn strict_instructions(body: &str) -> String {
-    format!("{CURRENT_INSTRUCTION_CONTEXT_DIRECTIVE}\n\n{STRICT_INSTRUCTION_DIRECTIVE}\n\n{body}")
+    format!("{CURRENT_TURN_PRIORITY_DIRECTIVE}\n\n{STRICT_INSTRUCTION_DIRECTIVE}\n\n{body}")
 }
 
 fn rewrite_base_directory_line(body: &str) -> String {

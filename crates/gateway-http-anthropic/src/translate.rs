@@ -756,6 +756,11 @@ mod tests {
                 .instructions
                 .contains("implemented most of the tasks")
         );
+        assert!(
+            translated
+                .instructions
+                .contains("The slash command instructions below are complete")
+        );
         assert!(input.contains("verify if these tasks are implemented by another agent"));
         assert!(!input.contains("implemented most of the tasks"));
         assert_eq!(
@@ -1272,6 +1277,11 @@ mod tests {
                 .contains(
                     "Base directory for this skill: test-fixtures/claude/skills/example-skill, analyze the files in this directory before proceeding"
                 )
+        );
+        assert!(
+            !translated
+                .instructions
+                .contains("The slash command instructions below are complete")
         );
         assert_eq!(
             translated

@@ -184,6 +184,30 @@ else
   warn "claude is not on PATH; wrapper execution checks skipped after verifying script contents"
 fi
 
+step "Verifying symlinks created by Python helper"
+CODEX_HOME="${HOME}/.claude_codex"
+CLAUDE_HOME="${HOME}/.claude"
+
+if [ ! -d "${CODEX_HOME}" ]; then
+  echo "Warning: ${CODEX_HOME} not found; cannot verify symlinks" >&2
+fi
+
+# Representative entries from SHARED_CLAUDE_ENTRIES in post_install.py
+# We check a few key entries that commonly exist
+for entry in agents commands skills; do
+  source_path="${CLAUDE_HOME}/${entry}"
+  target_path="${CODEX_HOME}/${entry}"
+
+  # Only verify symlink if source exists
+  if [ -d "$source_path" ]; then
+    if [ ! -L "$target_path" ]; then
+      echo "ERROR: Expected symlink not found: $target_path (source exists at $source_path)" >&2
+      exit 1
+    fi
+  fi
+done
+echo "✓ Symlink verification passed"
+
 step "Checking binary behavior"
 cld-gateway invalid-command >/dev/null 2>&1 || true
 

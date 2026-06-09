@@ -22,6 +22,9 @@ Every published package archive must contain:
 - `cld-gateway-package.json`
 - `config.yml`
 - `settings.json`
+- `homebrew/post_install.py` (Homebrew post-install helper)
+- `bin/cldg` (Claude wrapper script)
+- `bin/clddg` (Dangerously-skip-permissions variant wrapper)
 
 ---
 
@@ -58,6 +61,10 @@ Formula/cld-gateway.rb
 The formula is generated from the checksum manifest published by `Bytonomics/cld-gateway`.
 
 Before the first release exists, `Formula/cld-gateway.rb` may be a bootstrap placeholder because there are no release archives or SHA256 values yet. It becomes installable only after the first release publishes `cld-gateway-package_SHA256SUMS` and the tap workflow renders the real formula.
+
+#### Homebrew formula architecture
+
+The formula is now minimal DSL only: it installs the binary, configuration files, wrapper scripts, and the Python helper. The post-install hook delegates all user-home directory setup and symlink creation to the packaged Python helper at `homebrew/post_install.py`, which is invoked with appropriate paths. Wrapper scripts (`cldg` and `clddg`) are packaged as assets rather than Ruby-generated.
 
 ---
 
@@ -257,7 +264,7 @@ What each job does:
 
 - `tag-check`: validates tag format and confirms tag version equals `Cargo.toml` version.
 - `build`: builds all four target binaries and packages archives.
-- `verify`: confirms each archive exists and contains `bin/cld-gateway`, `cld-gateway-package.json`, `config.yml`, and `settings.json`.
+- `verify`: confirms each archive exists and contains `bin/cld-gateway`, `cld-gateway-package.json`, `config.yml`, `settings.json`, `homebrew/post_install.py`, `bin/cldg`, and `bin/clddg`.
 - `release`: publishes GitHub Release assets, generates `cld-gateway-package_SHA256SUMS`, and dispatches the Homebrew tap update.
 
 ### 6.a. If the release workflow fails before publishing assets

@@ -13,6 +13,7 @@ const ACTIVE_COMMAND_INPUT_DIRECTIVE: &str =
     "Execute the current slash command now, using the promoted command instructions.";
 const STRICT_INSTRUCTION_DIRECTIVE: &str =
     "Follow these instructions strictly, without ignoring or paraphrasing anything.";
+const COMPLETE_COMMAND_BODY_DIRECTIVE: &str = "The slash command instructions below are complete. Do not search for or load any command file, command directory, skill file, or skill directory unless these instructions explicitly tell you to do so.";
 const SKILL_DIRECTORY_ANALYSIS_SUFFIX: &str =
     "analyze the files in this directory before proceeding";
 
@@ -142,11 +143,28 @@ fn active_command_instructions(envelope: &CommandEnvelope) -> Option<String> {
     if body.is_empty() {
         return None;
     }
-    Some(strict_instructions(&rewrite_base_directory_line(body)))
+    Some(strict_instructions(&command_body_instructions(body)))
 }
 
 fn strict_instructions(body: &str) -> String {
     format!("{CURRENT_TURN_PRIORITY_DIRECTIVE}\n\n{STRICT_INSTRUCTION_DIRECTIVE}\n\n{body}")
+}
+
+fn command_body_instructions(body: &str) -> String {
+    if is_skill_body(body) {
+        rewrite_base_directory_line(body)
+    } else {
+        format!("{COMPLETE_COMMAND_BODY_DIRECTIVE}\n\n{body}")
+    }
+}
+
+fn is_skill_body(body: &str) -> bool {
+    body.trim_start()
+        .lines()
+        .next()
+        .and_then(|line| line.trim().strip_prefix(SKILL_BASE_DIRECTORY_PREFIX))
+        .map(str::trim)
+        .is_some_and(|base_dir| !base_dir.is_empty())
 }
 
 fn rewrite_base_directory_line(body: &str) -> String {

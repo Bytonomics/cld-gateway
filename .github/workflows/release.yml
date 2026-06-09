@@ -149,6 +149,9 @@ jobs:
             grep -q "^cld-gateway-package.json$" "${listing}" || { echo "Missing cld-gateway-package.json in ${archive}"; exit 1; }
             grep -q "^config.yml$" "${listing}" || { echo "Missing config.yml in ${archive}"; exit 1; }
             grep -q "^settings.json$" "${listing}" || { echo "Missing settings.json in ${archive}"; exit 1; }
+            grep -q "^homebrew/post_install.py$" "${listing}" || { echo "Missing homebrew/post_install.py in ${archive}"; exit 1; }
+            grep -q "^bin/cldg$" "${listing}" || { echo "Missing bin/cldg in ${archive}"; exit 1; }
+            grep -q "^bin/clddg$" "${listing}" || { echo "Missing bin/clddg in ${archive}"; exit 1; }
             echo "OK: ${archive}"
           done
 

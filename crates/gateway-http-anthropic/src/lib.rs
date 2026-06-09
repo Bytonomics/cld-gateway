@@ -35,6 +35,7 @@ use uuid::Uuid;
 use std::path::PathBuf;
 
 mod claude_code_context;
+mod claude_code_inclusion;
 mod context_management;
 mod sse_bridge;
 mod tool_arg_policy;

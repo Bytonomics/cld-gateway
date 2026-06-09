@@ -1,10 +1,10 @@
+use crate::claude_code_inclusion::{
+    CommandEnvelope, apply_conversation_inclusion_policy, parse_command_envelope,
+};
 use crate::types::{AnthropicContent, AnthropicMessage};
 use gateway_core::config::{ClaudeCodeSlashCommandMode, ClaudeCodeWorkflowConfig};
 use std::collections::HashMap;
 
-const COMMAND_MESSAGE_TAG: &str = "command-message";
-const COMMAND_NAME_TAG: &str = "command-name";
-const COMMAND_ARGS_TAG: &str = "command-args";
 const CURRENT_TURN_PRIORITY_DIRECTIVE: &str = "Everything before the latest user message or slash command is just context. You must immediately follow the latest user message or slash command; do not continue older tasks unless the latest turn explicitly asks for that.";
 const SKILL_BASE_DIRECTORY_PREFIX: &str = "Base directory for this skill:";
 const PREVIOUS_COMMAND_CONTEXT_DIRECTIVE: &str =
@@ -30,6 +30,9 @@ pub(crate) fn normalize_claude_code_context(
     let mut normalized = messages.to_vec();
     let mut instruction_fragments = Vec::new();
     let mut client_metadata = HashMap::new();
+
+    let inclusion_report = apply_conversation_inclusion_policy(&mut normalized);
+    inclusion_report.extend_client_metadata(&mut client_metadata);
 
     if slash_commands_enabled(config) {
         normalize_claude_code_commands(
@@ -110,45 +113,6 @@ fn has_latest_user_text_instruction(messages: &[AnthropicMessage]) -> bool {
         .iter()
         .rev()
         .any(|message| message.role == "user" && !message_text(message).trim().is_empty())
-}
-
-#[derive(Debug, Clone)]
-struct CommandEnvelope {
-    command_message: String,
-    command_name: String,
-    command_args: String,
-    body: String,
-}
-
-fn parse_command_envelope(text: &str) -> Option<CommandEnvelope> {
-    let command_name_match = last_tag_match(text, COMMAND_NAME_TAG)?;
-    let command_name = command_name_match.value;
-    let command_message = text
-        .get(..command_name_match.start)
-        .and_then(|prefix| last_tag_match(prefix, COMMAND_MESSAGE_TAG))
-        .map_or_else(String::new, |tag| tag.value);
-    let command_args_match = text
-        .get(command_name_match.end..)
-        .and_then(|suffix| first_tag_match(suffix, COMMAND_ARGS_TAG))
-        .map(|tag| tag.with_offset(command_name_match.end));
-    let command_args = command_args_match
-        .as_ref()
-        .map_or_else(String::new, |tag| tag.value.clone());
-    let body_start = command_args_match
-        .as_ref()
-        .map_or(command_name_match.end, |tag| tag.end);
-    let body = text
-        .get(body_start..)
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-
-    Some(CommandEnvelope {
-        command_message,
-        command_name,
-        command_args,
-        body,
-    })
 }
 
 fn active_command_user_input(envelope: &CommandEnvelope) -> String {
@@ -253,50 +217,4 @@ fn text_block(text: String) -> crate::types::AnthropicContentBlock {
         source: None,
         extra: std::collections::BTreeMap::default(),
     }
-}
-
-#[derive(Debug, Clone)]
-struct TagMatch {
-    start: usize,
-    end: usize,
-    value: String,
-}
-
-impl TagMatch {
-    fn with_offset(self, offset: usize) -> Self {
-        Self {
-            start: self.start + offset,
-            end: self.end + offset,
-            value: self.value,
-        }
-    }
-}
-
-fn first_tag_match(text: &str, tag: &str) -> Option<TagMatch> {
-    let open = format!("<{tag}>");
-    let close = format!("</{tag}>");
-    let start = text.find(&open)?;
-    let value_start = start + open.len();
-    let value_end = text.get(value_start..)?.find(&close)? + value_start;
-    let end = value_end + close.len();
-    Some(TagMatch {
-        start,
-        end,
-        value: text.get(value_start..value_end)?.trim().to_string(),
-    })
-}
-
-fn last_tag_match(text: &str, tag: &str) -> Option<TagMatch> {
-    let mut remaining = text;
-    let mut offset = 0;
-    let mut latest = None;
-
-    while let Some(tag_match) = first_tag_match(remaining, tag) {
-        let absolute = tag_match.with_offset(offset);
-        offset = absolute.end;
-        remaining = text.get(offset..).unwrap_or_default();
-        latest = Some(absolute);
-    }
-
-    latest
 }

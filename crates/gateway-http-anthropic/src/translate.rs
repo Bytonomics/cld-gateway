@@ -686,6 +686,21 @@ mod tests {
         serde_json::to_string(&translated.input).expect("serialize input")
     }
 
+    fn test_text_block(text: impl Into<String>) -> AnthropicContentBlock {
+        AnthropicContentBlock {
+            block_type: "text".to_string(),
+            text: Some(text.into()),
+            id: None,
+            name: None,
+            input: None,
+            tool_use_id: None,
+            content: None,
+            is_error: None,
+            source: None,
+            extra: std::collections::BTreeMap::default(),
+        }
+    }
+
     #[test]
     fn defaults_instructions_when_system_empty() {
         let req = base_req();
@@ -982,6 +997,110 @@ mod tests {
                 .and_then(|metadata| metadata.get("claude_code_slash_command"))
                 .map(String::as_str),
             Some("/explain-feature")
+        );
+    }
+
+    #[test]
+    fn local_only_branch_command_is_removed_before_latest_prompt() {
+        let mut req = base_req();
+        req.messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Blocks(vec![
+                test_text_block(
+                    "<system-reminder>\n\
+                     SessionStart:resume hook success.\n\
+                     </system-reminder>",
+                ),
+                test_text_block(
+                    "<command-name>/branch</command-name>\n\
+                     <command-message>branch</command-message>\n\
+                     <command-args></command-args>",
+                ),
+                test_text_block(
+                    "<local-command-stdout>Branched conversation. You are now in the branch.\n\
+                     To resume the original: claude -r test-session-id</local-command-stdout>",
+                ),
+                test_text_block(
+                    "Failure reason\n\
+                     Resource handler returned message: \"Your service failed to create.\"\n\n\
+                     The deployment just failed. Check the logs and tell me why it failed.",
+                ),
+            ]),
+        });
+
+        let translated = translate_request(&req).expect("translate");
+        let input = serialized_input(&translated);
+        let metadata = translated.client_metadata.as_ref().expect("metadata");
+
+        assert!(
+            translated
+                .instructions
+                .starts_with("Everything before the latest user message or slash command")
+        );
+        assert!(!translated.instructions.contains("/branch"));
+        assert!(!translated.instructions.contains("Branched conversation"));
+        assert!(input.contains("The deployment just failed"));
+        assert!(!input.contains("/branch"));
+        assert!(!input.contains("Branched conversation"));
+        assert!(!input.contains("claude -r"));
+        assert!(
+            !metadata.contains_key("claude_code_slash_command"),
+            "local-only commands must not be promoted as slash commands"
+        );
+        assert_eq!(
+            metadata
+                .get("gateway_local_only_commands")
+                .map(String::as_str),
+            Some("/branch")
+        );
+    }
+
+    #[test]
+    fn read_only_side_question_is_marked_without_using_literal_btw() {
+        let mut req = base_req();
+        req.messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Blocks(vec![
+                test_text_block(
+                    "<system-reminder>\n\
+                     This is a side question from the user.\n\
+                     You are a separate, lightweight agent spawned to answer this one question.\n\
+                     The main agent is NOT interrupted by this request.\n\
+                     </system-reminder>",
+                ),
+                test_text_block("tell me about simpsons"),
+            ]),
+        });
+
+        let translated = translate_request(&req).expect("translate");
+        let input = serialized_input(&translated);
+        let metadata = translated.client_metadata.as_ref().expect("metadata");
+
+        assert!(input.contains("tell me about simpsons"));
+        assert_eq!(
+            metadata
+                .get("gateway_conversation_inclusion")
+                .map(String::as_str),
+            Some("read_only")
+        );
+        assert!(!metadata.contains_key("gateway_local_only_commands"));
+    }
+
+    #[test]
+    fn literal_btw_in_normal_message_is_not_read_only() {
+        let mut req = base_req();
+        req.messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Text("next message after /btw".to_string()),
+        });
+
+        let translated = translate_request(&req).expect("translate");
+        let metadata = translated.client_metadata.as_ref();
+
+        assert!(
+            metadata.is_none_or(|metadata| {
+                !metadata.contains_key("gateway_conversation_inclusion")
+            })
         );
     }
 

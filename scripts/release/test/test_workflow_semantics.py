@@ -131,6 +131,7 @@ class TestPackageMetadataValidation:
             assert meta["cargoProfile"] == "debug"
 
     def test_archive_contains_binary_metadata_and_package_assets(self) -> None:
+        """Test that the release archive contains all required assets including Python helper and wrapper scripts."""
         spec = TARGET_SPECS["x86_64-apple-darwin"]
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -152,6 +153,50 @@ class TestPackageMetadataValidation:
                 *PACKAGE_ASSET_FILENAMES,
             }
             assert expected_names.issubset(set(names))
+
+            # Explicitly verify the packaged Python helper and wrapper scripts
+            assert "homebrew/post_install.py" in names, "Python helper missing from archive"
+            assert "bin/cldg" in names, "cldg wrapper missing from archive"
+            assert "bin/clddg" in names, "clddg wrapper missing from archive"
+
+    def test_archive_wrapper_scripts_are_executable(self) -> None:
+        """Test that wrapper scripts in the archive are executable."""
+        spec = TARGET_SPECS["aarch64-apple-darwin"]
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            package_dir = tmp_path / "pkg"
+            entrypoint = tmp_path / "cld-gateway"
+            archive_out = tmp_path / f"package-{spec.target}.tar.gz"
+            _make_fake_executable(entrypoint)
+
+            prepare_package_dir(package_dir, force=False)
+            build_package_dir(package_dir, "0.1.0", spec, entrypoint, cargo_profile="release")
+            write_archive(package_dir, archive_out, force=False)
+
+            with tarfile.open(archive_out, "r:gz") as tar:
+                for wrapper in ["bin/cldg", "bin/clddg"]:
+                    member = tar.getmember(wrapper)
+                    # Check executable bit is set in tarfile mode
+                    assert member.mode & stat.S_IXUSR, f"Wrapper {wrapper} not executable in archive"
+
+    def test_archive_post_install_helper_is_executable(self) -> None:
+        """Test that post_install.py helper script in the archive is executable."""
+        spec = TARGET_SPECS["x86_64-apple-darwin"]
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            package_dir = tmp_path / "pkg"
+            entrypoint = tmp_path / "cld-gateway"
+            archive_out = tmp_path / f"package-{spec.target}.tar.gz"
+            _make_fake_executable(entrypoint)
+
+            prepare_package_dir(package_dir, force=False)
+            build_package_dir(package_dir, "0.1.0", spec, entrypoint, cargo_profile="release")
+            write_archive(package_dir, archive_out, force=False)
+
+            with tarfile.open(archive_out, "r:gz") as tar:
+                member = tar.getmember("homebrew/post_install.py")
+                # Check executable bit is set in tarfile mode
+                assert member.mode & stat.S_IXUSR, "post_install.py not executable in archive"
 
 
 class TestWorkspaceVersionConsistency:

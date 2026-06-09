@@ -48,6 +48,16 @@ def test_build_and_validate_package_dir() -> None:
             asset_path = package_dir / asset_filename
             assert asset_path.is_file(), f"Package asset not found: {asset_path}"
 
+        # Check wrapper scripts are executable
+        for wrapper in ["bin/cldg", "bin/clddg"]:
+            wrapper_path = package_dir / wrapper
+            assert wrapper_path.is_file(), f"Wrapper not found: {wrapper_path}"
+            assert bool(wrapper_path.stat().st_mode & stat.S_IXUSR), f"Wrapper not executable: {wrapper}"
+
+        # Check that the Python post-install helper is included
+        helper_path = package_dir / "homebrew/post_install.py"
+        assert helper_path.is_file(), f"Helper not found: {helper_path}"
+
         # Check metadata.
         meta_path = package_dir / METADATA_FILENAME
         meta = json.loads(meta_path.read_text())
@@ -178,6 +188,53 @@ def test_validate_package_dir_invalid_cargo_profile() -> None:
             assert "cargoProfile" in str(e), f"Error message should mention cargoProfile: {e}"
 
 
+def test_validate_package_dir_wrapper_not_executable() -> None:
+    """Test that validation fails if wrapper scripts are not executable."""
+    spec = TARGET_SPECS["aarch64-apple-darwin"]
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        package_dir = tmp_path / "pkg"
+        entrypoint = tmp_path / "cld-gateway"
+        make_fake_executable(entrypoint)
+
+        prepare_package_dir(package_dir, force=False)
+        build_package_dir(package_dir, "0.2.0", spec, entrypoint)
+
+        # Remove executable bit from a wrapper script
+        wrapper_path = package_dir / "bin/cldg"
+        wrapper_path.chmod(0o644)  # Not executable
+
+        try:
+            validate_package_dir(package_dir, spec)
+            assert False, "Expected RuntimeError for non-executable wrapper script"
+        except RuntimeError as e:
+            assert "executable" in str(e).lower(), f"Error should mention executable: {e}"
+
+
+def test_validate_package_dir_post_install_not_executable() -> None:
+    """Test that validation fails if post_install.py is not executable."""
+    spec = TARGET_SPECS["aarch64-apple-darwin"]
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        package_dir = tmp_path / "pkg"
+        entrypoint = tmp_path / "cld-gateway"
+        make_fake_executable(entrypoint)
+
+        prepare_package_dir(package_dir, force=False)
+        build_package_dir(package_dir, "0.2.0", spec, entrypoint)
+
+        # Remove executable bit from post_install.py
+        helper_path = package_dir / "homebrew/post_install.py"
+        helper_path.chmod(0o644)  # Not executable
+
+        try:
+            validate_package_dir(package_dir, spec)
+            assert False, "Expected RuntimeError for non-executable post_install.py"
+        except RuntimeError as e:
+            assert "executable" in str(e).lower(), f"Error should mention executable: {e}"
+            assert "post_install.py" in str(e), f"Error should mention post_install.py: {e}"
+
+
 if __name__ == "__main__":
     test_build_and_validate_package_dir()
     test_prepare_package_dir_force_replaces()
@@ -186,4 +243,5 @@ if __name__ == "__main__":
     test_validate_package_dir_missing_package_asset()
     test_validate_package_dir_missing_cargo_profile()
     test_validate_package_dir_invalid_cargo_profile()
+    test_validate_package_dir_wrapper_not_executable()
     print("All tests passed.")

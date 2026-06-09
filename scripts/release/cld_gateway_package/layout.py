@@ -11,7 +11,13 @@ from .targets import TargetSpec
 LAYOUT_VERSION = 1
 BIN_NAME = "cld-gateway"
 METADATA_FILENAME = "cld-gateway-package.json"
-PACKAGE_ASSET_FILENAMES = ("config.yml", "settings.json")
+PACKAGE_ASSET_FILENAMES = (
+    "config.yml",
+    "settings.json",
+    "homebrew/post_install.py",
+    "bin/cldg",
+    "bin/clddg",
+)
 
 
 def prepare_package_dir(package_dir: Path, *, force: bool) -> None:
@@ -57,10 +63,14 @@ def build_package_dir(
 
     package_source_dir = _package_source_dir()
     for asset_filename in PACKAGE_ASSET_FILENAMES:
-        shutil.copyfile(
-            package_source_dir / asset_filename,
-            package_dir / asset_filename,
-        )
+        src = package_source_dir / asset_filename
+        dst = package_dir / asset_filename
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, dst)
+        # Preserve execute bits for executable assets
+        if asset_filename in ("bin/cldg", "bin/clddg", "homebrew/post_install.py"):
+            mode = src.stat().st_mode
+            dst.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
 def validate_package_dir(package_dir: Path, spec: TargetSpec) -> None:
@@ -105,6 +115,10 @@ def validate_package_dir(package_dir: Path, spec: TargetSpec) -> None:
         asset_path = package_dir / asset_filename
         if not asset_path.is_file():
             raise RuntimeError(f"Missing package asset: {asset_filename}")
+        # Wrapper scripts and post-install helper must be executable
+        if asset_filename in ("bin/cldg", "bin/clddg", "homebrew/post_install.py"):
+            if not _is_executable(asset_path):
+                raise RuntimeError(f"Script is not executable: {asset_filename}")
 
 
 def _write_json(path: Path, value: object) -> None:

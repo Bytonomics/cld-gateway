@@ -15,6 +15,9 @@ An Anthropic-compatible HTTP proxy that routes requests through the ChatGPT/Code
 ```sh
 brew tap bytonomics/tap
 brew install cld-gateway
+
+cld-gateway-sh setup
+cld-gateway-sh doctor
 ```
 
 ### Shell installer
@@ -48,7 +51,7 @@ Verify checksums using `cld-gateway-package_SHA256SUMS`, which is published alon
 
 After installation, complete the user-home configuration:
 
-This is a mandatory step to be able to use the `cld-gateway` daemon. I had to make it a separate step,because  I needed to make changes outside the homebrew sandbox, and brew post install makes it really difficult.
+This is a mandatory step to be able to use the `cld-gateway` daemon. I had to make it a separate step, because I needed to make changes outside the homebrew sandbox, and brew post install makes it really difficult.
 
 ```sh
 cld-gateway-sh setup

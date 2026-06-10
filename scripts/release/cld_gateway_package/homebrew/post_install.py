@@ -111,9 +111,8 @@ def get_claude_gateway_home(user_home: Path) -> Path:
 def get_packaged_config_path() -> Path:
     """Get the path to the packaged config.yml file.
 
-    The packaged config is located relative to this script's installation
-    directory. Assumes layout: homebrew/post_install.py and config.yml
-    are siblings under the package.
+    The packaged config is located under the formula's pkgshare directory,
+    derived from this installed helper path.
 
     Returns:
         Path to packaged config.yml.
@@ -121,8 +120,8 @@ def get_packaged_config_path() -> Path:
     Raises:
         SystemExit: If packaged config cannot be located.
     """
-    script_dir = Path(__file__).parent.parent
-    config_path = script_dir / 'config.yml'
+    formula_prefix = Path(__file__).resolve().parents[3]
+    config_path = formula_prefix / 'share' / 'cld-gateway' / 'config.yml'
     if not config_path.exists():
         sys.exit(f'Packaged config.yml not found at {config_path}')
     return config_path
@@ -131,9 +130,8 @@ def get_packaged_config_path() -> Path:
 def get_packaged_settings_path() -> Path:
     """Get the path to the packaged settings.json file.
 
-    The packaged settings is located relative to this script's installation
-    directory. Assumes layout: homebrew/post_install.py and settings.json
-    are siblings under the package.
+    The packaged settings is located under the formula's pkgshare directory,
+    derived from this installed helper path.
 
     Returns:
         Path to packaged settings.json.
@@ -141,8 +139,8 @@ def get_packaged_settings_path() -> Path:
     Raises:
         SystemExit: If packaged settings cannot be located.
     """
-    script_dir = Path(__file__).parent.parent
-    settings_path = script_dir / 'settings.json'
+    formula_prefix = Path(__file__).resolve().parents[3]
+    settings_path = formula_prefix / 'share' / 'cld-gateway' / 'settings.json'
     if not settings_path.exists():
         sys.exit(f'Packaged settings.json not found at {settings_path}')
     return settings_path

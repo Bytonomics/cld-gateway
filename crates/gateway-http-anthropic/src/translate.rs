@@ -1006,6 +1006,135 @@ mod tests {
     }
 
     #[test]
+    fn local_only_model_command_is_removed_before_latest_prompt() {
+        let mut req = base_req();
+        req.messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Blocks(vec![
+                test_text_block(
+                    "<command-name>/model</command-name>\n\
+                     <command-message>model</command-message>\n\
+                     <command-args>claude-sonnet-4-6</command-args>",
+                ),
+                test_text_block(
+                    "Investigate the current release workflow failure and summarize the root cause.",
+                ),
+            ]),
+        });
+
+        let translated = translate_request(&req).expect("translate");
+        let input = serialized_input(&translated);
+        let metadata = translated.client_metadata.as_ref().expect("metadata");
+
+        assert!(input.contains("Investigate the current release workflow failure"));
+        assert!(!translated.instructions.contains("/model"));
+        assert!(!input.contains("/model"));
+        assert!(!input.contains("claude-sonnet-4-6"));
+        assert!(
+            !metadata.contains_key("claude_code_slash_command"),
+            "local-only commands must not be promoted as slash commands"
+        );
+        assert_eq!(
+            metadata
+                .get("gateway_local_only_commands")
+                .map(String::as_str),
+            Some("/model")
+        );
+    }
+
+    #[test]
+    fn multiple_local_only_commands_are_recorded_in_metadata() {
+        let mut req = base_req();
+        req.messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Blocks(vec![
+                test_text_block(
+                    "<command-name>/model</command-name>\n\
+                     <command-message>model</command-message>\n\
+                     <command-args>claude-opus-4-6</command-args>",
+                ),
+                test_text_block(
+                    "<command-name>/permissions</command-name>\n\
+                     <command-message>permissions</command-message>\n\
+                     <command-args></command-args>",
+                ),
+                test_text_block("Explain the latest packaged setup changes."),
+            ]),
+        });
+
+        let translated = translate_request(&req).expect("translate");
+        let input = serialized_input(&translated);
+        let metadata = translated.client_metadata.as_ref().expect("metadata");
+
+        assert!(input.contains("Explain the latest packaged setup changes."));
+        assert!(!input.contains("/model"));
+        assert!(!input.contains("/permissions"));
+        assert_eq!(
+            metadata
+                .get("gateway_local_only_commands")
+                .map(String::as_str),
+            Some("/model,/permissions")
+        );
+    }
+
+    #[test]
+    fn local_only_turn_with_only_command_is_marked_local_only() {
+        let mut req = base_req();
+        req.messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Blocks(vec![test_text_block(
+                "<command-name>/model</command-name>\n\
+                 <command-message>model</command-message>\n\
+                 <command-args>claude-sonnet-4-6</command-args>",
+            )]),
+        });
+
+        let translated = translate_request(&req).expect("translate");
+        let input = serialized_input(&translated);
+        let metadata = translated.client_metadata.as_ref().expect("metadata");
+
+        assert!(!input.contains("/model"));
+        assert_eq!(
+            metadata
+                .get("gateway_conversation_inclusion")
+                .map(String::as_str),
+            Some("local_only")
+        );
+        assert_eq!(
+            metadata
+                .get("gateway_local_only_commands")
+                .map(String::as_str),
+            Some("/model")
+        );
+    }
+
+    #[test]
+    fn local_only_command_without_stdout_does_not_strip_unrelated_stdout() {
+        let mut req = base_req();
+        req.messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Blocks(vec![
+                test_text_block(
+                    "<command-name>/model</command-name>\n\
+                     <command-message>model</command-message>\n\
+                     <command-args>claude-sonnet-4-6</command-args>",
+                ),
+                test_text_block(
+                    "<local-command-stdout>Opened settings UI in the local client.</local-command-stdout>",
+                ),
+                test_text_block("Tell me whether the stdout line is still visible."),
+            ]),
+        });
+
+        let translated = translate_request(&req).expect("translate");
+        let input = serialized_input(&translated);
+
+        assert!(input.contains("Tell me whether the stdout line is still visible."));
+        assert!(input.contains("Opened settings UI in the local client."));
+        assert!(!input.contains("/model"));
+    }
+
+    #[test]
     fn local_only_branch_command_is_removed_before_latest_prompt() {
         let mut req = base_req();
         req.messages.push(AnthropicMessage {

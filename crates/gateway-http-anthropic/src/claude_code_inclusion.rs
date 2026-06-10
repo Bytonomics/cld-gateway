@@ -12,6 +12,14 @@ const READ_ONLY_MARKERS: &[&str] = &[
 ];
 const LOCAL_ONLY_COMMANDS: &[LocalOnlyCommandSpec] = &[
     LocalOnlyCommandSpec {
+        name: "add-dir",
+        stdout_markers: &[],
+    },
+    LocalOnlyCommandSpec {
+        name: "agents",
+        stdout_markers: &[],
+    },
+    LocalOnlyCommandSpec {
         name: "branch",
         stdout_markers: &[
             "Branched conversation",
@@ -20,8 +28,76 @@ const LOCAL_ONLY_COMMANDS: &[LocalOnlyCommandSpec] = &[
         ],
     },
     LocalOnlyCommandSpec {
+        name: "color",
+        stdout_markers: &[],
+    },
+    LocalOnlyCommandSpec {
+        name: "config",
+        stdout_markers: &[],
+    },
+    LocalOnlyCommandSpec {
+        name: "copy",
+        stdout_markers: &[],
+    },
+    LocalOnlyCommandSpec {
+        name: "effort",
+        stdout_markers: &[],
+    },
+    LocalOnlyCommandSpec {
+        name: "export",
+        stdout_markers: &[],
+    },
+    LocalOnlyCommandSpec {
+        name: "hooks",
+        stdout_markers: &[],
+    },
+    LocalOnlyCommandSpec {
+        name: "ide",
+        stdout_markers: &[],
+    },
+    LocalOnlyCommandSpec {
+        name: "login",
+        stdout_markers: &[],
+    },
+    LocalOnlyCommandSpec {
+        name: "logout",
+        stdout_markers: &[],
+    },
+    LocalOnlyCommandSpec {
+        name: "mcp",
+        stdout_markers: &[],
+    },
+    LocalOnlyCommandSpec {
+        name: "mobile",
+        stdout_markers: &[],
+    },
+    LocalOnlyCommandSpec {
+        name: "model",
+        stdout_markers: &[],
+    },
+    LocalOnlyCommandSpec {
+        name: "permissions",
+        stdout_markers: &[],
+    },
+    LocalOnlyCommandSpec {
+        name: "plugin",
+        stdout_markers: &[],
+    },
+    LocalOnlyCommandSpec {
         name: "rename",
         stdout_markers: &["Session renamed to:"],
+    },
+    LocalOnlyCommandSpec {
+        name: "resume",
+        stdout_markers: &[],
+    },
+    LocalOnlyCommandSpec {
+        name: "sandbox",
+        stdout_markers: &[],
+    },
+    LocalOnlyCommandSpec {
+        name: "skills",
+        stdout_markers: &[],
     },
 ];
 
@@ -255,9 +331,11 @@ fn local_only_command_spec(command_name: &str) -> Option<&'static LocalOnlyComma
 
 fn local_only_stdout_spec(stdout: &str) -> Option<&'static LocalOnlyCommandSpec> {
     LOCAL_ONLY_COMMANDS.iter().find(|spec| {
-        spec.stdout_markers
-            .iter()
-            .all(|marker| stdout.contains(marker))
+        !spec.stdout_markers.is_empty()
+            && spec
+                .stdout_markers
+                .iter()
+                .all(|marker| stdout.contains(marker))
     })
 }
 

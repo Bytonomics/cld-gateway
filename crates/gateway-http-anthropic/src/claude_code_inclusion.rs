@@ -10,14 +10,20 @@ const READ_ONLY_MARKERS: &[&str] = &[
     "separate, lightweight agent",
     "The main agent is NOT interrupted",
 ];
-const LOCAL_ONLY_COMMANDS: &[LocalOnlyCommandSpec] = &[LocalOnlyCommandSpec {
-    name: "branch",
-    stdout_markers: &[
-        "Branched conversation",
-        "You are now in the branch",
-        "claude -r ",
-    ],
-}];
+const LOCAL_ONLY_COMMANDS: &[LocalOnlyCommandSpec] = &[
+    LocalOnlyCommandSpec {
+        name: "branch",
+        stdout_markers: &[
+            "Branched conversation",
+            "You are now in the branch",
+            "claude -r ",
+        ],
+    },
+    LocalOnlyCommandSpec {
+        name: "rename",
+        stdout_markers: &["Session renamed to:"],
+    },
+];
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum ConversationInclusion {

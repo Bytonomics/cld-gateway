@@ -1061,6 +1061,57 @@ mod tests {
     }
 
     #[test]
+    fn local_only_rename_command_is_removed_before_active_command() {
+        let mut req = base_req();
+        req.messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Blocks(vec![
+                test_text_block(
+                    "<command-name>/rename</command-name>\n\
+                     <command-message>rename</command-message>\n\
+                     <command-args>gateway-cli-release-distribution-plan</command-args>",
+                ),
+                test_text_block(
+                    "<local-command-stdout>Session renamed to: gateway-cli-release-distribution-plan</local-command-stdout>",
+                ),
+                test_text_block(
+                    "<command-message>review_agent</command-message>\n\
+                     <command-name>/review_agent</command-name>\n\
+                     <command-args>review the implementation</command-args>",
+                ),
+                test_text_block("Review the implementation and report issues."),
+            ]),
+        });
+
+        let translated = translate_request(&req).expect("translate");
+        let input = serialized_input(&translated);
+        let metadata = translated.client_metadata.as_ref().expect("metadata");
+
+        assert!(
+            translated
+                .instructions
+                .contains("Review the implementation")
+        );
+        assert!(input.contains("review the implementation"));
+        assert!(!translated.instructions.contains("/rename"));
+        assert!(!translated.instructions.contains("Session renamed to:"));
+        assert!(!input.contains("/rename"));
+        assert!(!input.contains("Session renamed to:"));
+        assert_eq!(
+            metadata
+                .get("gateway_local_only_commands")
+                .map(String::as_str),
+            Some("/rename")
+        );
+        assert_eq!(
+            metadata
+                .get("claude_code_slash_command")
+                .map(String::as_str),
+            Some("/review_agent")
+        );
+    }
+
+    #[test]
     fn read_only_side_question_is_marked_without_using_literal_btw() {
         let mut req = base_req();
         req.messages.push(AnthropicMessage {

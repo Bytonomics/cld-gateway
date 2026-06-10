@@ -14,7 +14,7 @@ Rules:
 4. Do not make unrelated edits.
 5. After editing, show a concise summary of which files were updated and what old value changed to what new value.
 
-Checklist:
+Do these tasks in this exact order:
 1. Validate the input version.
    - Parse `$ARGUMENTS` as exactly one semantic version string.
    - Reject anything that is not `X.Y.Z` or the repo’s accepted prerelease format.
@@ -29,7 +29,8 @@ Checklist:
      - change the pinned shell installer example that uses a concrete release version
 4. Verify the generated formula file was untouched and run validation.
    - Verify `homebrew-tap/Formula/cld-gateway.rb` was not modified by this command.
-   - Run `make check` after the allowed edits complete.
+   - Run `make -C /<path to cld-gateway project> check` after the allowed edits complete.
+5. Ask the used using AskQuestion tool, if they want to commit, and if they say yes, immediately run "git add Cargo.toml, Cargo.lock, and README.md"  invoke Skill(/commit) and do the commit.
 
 Behavior:
 - If additional exact version references are discovered while reading the allowed files and they are clearly part of the same release-version set, include them.

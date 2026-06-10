@@ -26,7 +26,7 @@ curl -fsSL https://github.com/Bytonomics/cld-gateway/releases/latest/download/in
 Or with version pinning:
 
 ```sh
-curl -fsSL https://github.com/Bytonomics/cld-gateway/releases/latest/download/install.sh | sh -s -- --release 0.1.3
+curl -fsSL https://github.com/Bytonomics/cld-gateway/releases/latest/download/install.sh | sh -s -- --release 0.1.4
 ```
 
 ### Direct download

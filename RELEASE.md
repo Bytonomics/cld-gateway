@@ -23,6 +23,7 @@ Every published package archive must contain:
 - `config.yml`
 - `settings.json`
 - `homebrew/post_install.py` (Homebrew post-install helper)
+- `bin/cld-gateway-sh` (Setup and diagnostics facade wrapper)
 - `bin/cldg` (Claude wrapper script)
 - `bin/clddg` (Dangerously-skip-permissions variant wrapper)
 
@@ -64,7 +65,7 @@ Before the first release exists, `Formula/cld-gateway.rb` may be a bootstrap pla
 
 #### Homebrew formula architecture
 
-The formula is now minimal DSL only: it installs the binary, configuration files, wrapper scripts, and the Python helper. The post-install hook delegates all user-home directory setup and symlink creation to the packaged Python helper at `homebrew/post_install.py`, which is invoked with appropriate paths. Wrapper scripts (`cldg` and `clddg`) are packaged as assets rather than Ruby-generated.
+The formula is now minimal DSL only: it installs the binary, configuration files, wrapper scripts, and the Python helper. The post-install hook delegates all user-home directory setup and symlink creation to the packaged Python helper at `homebrew/post_install.py`. The setup facade wrapper (`cld-gateway-sh`) is invoked by users after installation to complete configuration setup. Wrapper scripts (`cld-gateway-sh`, `cldg`, and `clddg`) are packaged as assets rather than Ruby-generated.
 
 ---
 
@@ -264,8 +265,24 @@ What each job does:
 
 - `tag-check`: validates tag format and confirms tag version equals `Cargo.toml` version.
 - `build`: builds all four target binaries and packages archives.
-- `verify`: confirms each archive exists and contains `bin/cld-gateway`, `cld-gateway-package.json`, `config.yml`, `settings.json`, `homebrew/post_install.py`, `bin/cldg`, and `bin/clddg`.
+- `verify`: confirms each archive exists and contains `bin/cld-gateway`, `cld-gateway-package.json`, `config.yml`, `settings.json`, `homebrew/post_install.py`, `bin/cld-gateway-sh`, `bin/cldg`, and `bin/clddg`.
 - `release`: publishes GitHub Release assets, generates `cld-gateway-package_SHA256SUMS`, and dispatches the Homebrew tap update.
+
+### 6.c. Validating packaged setup (optional)
+
+After the release is published and Homebrew tap is updated, maintainers can optionally validate the packaged setup behavior:
+
+```sh
+brew install bytonomics/tap/cld-gateway
+cld-gateway-sh setup
+cld-gateway-sh doctor
+```
+
+The `cld-gateway-sh setup` command runs the packaged Python helper with zero arguments; the helper derives paths internally. After setup, the verifier checks that:
+
+- `~/.gateway/config.yml` exists and matches packaged config
+- `~/.claude_gateway/settings.json` exists and matches packaged settings
+- representative shared entries under `~/.claude_gateway` are valid as either directories or symlinks (not symlink-only)
 
 ### 6.a. If the release workflow fails before publishing assets
 
@@ -413,13 +430,13 @@ sh scripts/install/homebrew-verify.sh
 This verifies:
 
 - the `cld-gateway` binary is installed
-- wrapper commands `cldg` and `clddg` exist
+- wrapper commands `cld-gateway-sh`, `cldg`, and `clddg` exist
 - gateway runtime config exists at `~/.gateway/config.yml`
-- Claude settings for wrappers exist at `~/.claude_codex/settings.json`
+- Claude settings for wrappers exist at `~/.claude_gateway/settings.json`
 - wrapper script contents point at the runtime settings path
 - the health endpoint responds using the address read from the installed config file
 
-The `cldg` and `clddg` wrappers shell out to `claude`. The verification helper always inspects the wrapper script contents, and will also try executing them only when `claude` is available on `PATH`.
+The `cld-gateway-sh setup` command initializes user-home configuration and shared Claude entries. The `cldg` and `clddg` wrappers shell out to `claude`. The verification helper always inspects the wrapper script contents, and will also try executing them only when `claude` is available on `PATH`.
 
 ### 12. Validate Homebrew service support
 

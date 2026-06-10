@@ -1,0 +1,144 @@
+#!/bin/sh
+# User-facing facade for cld-gateway Homebrew installation.
+#
+# Provides high-level commands (setup, doctor) and pass-through to cld-gateway.
+# Expected to be invoked from Homebrew-installed location: $(brew --prefix)/bin/cld-gateway-sh
+#
+# Commands:
+#   cld-gateway-sh setup              - Run packaged Python helper to set up user-home files
+#   cld-gateway-sh doctor             - Check installation status and health
+#   cld-gateway-sh gateway <args>     - Explicit pass-through to cld-gateway
+#   cld-gateway-sh <args>             - Pass through unknown subcommands to cld-gateway
+
+set -e
+
+# Locate the script directory (where this script lives, and where packaged assets are)
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Resolve the Python helper path.
+# Works in both archive extraction (bin/ sibling to homebrew/) and Homebrew installation.
+resolve_python_helper() {
+    # Try archive layout first: assume bin/ is sibling to homebrew/
+    local archive_path="$(dirname "$SCRIPT_DIR")/homebrew/post_install.py"
+    if [ -f "$archive_path" ]; then
+        echo "$archive_path"
+        return 0
+    fi
+
+    # Fall back to formula-scoped Homebrew libexec location
+    local formula_prefix
+    formula_prefix="$(brew --prefix cld-gateway 2>/dev/null)" || {
+        echo "Error: brew not found and archive layout not detected" >&2
+        return 1
+    }
+    local brew_path="$formula_prefix/libexec/post_install.py"
+    if [ -f "$brew_path" ]; then
+        echo "$brew_path"
+        return 0
+    fi
+
+    # Neither location exists
+    echo "Error: Python helper not found in archive layout or formula-scoped libexec" >&2
+    return 1
+}
+
+PYTHON_HELPER="$(resolve_python_helper)" || exit 1
+
+# User home paths
+USER_HOME="${HOME}"
+GATEWAY_HOME="$USER_HOME/.gateway"
+CLAUDE_GATEWAY_HOME="$USER_HOME/.claude_gateway"
+
+# Main command dispatch
+main() {
+    if [ $# -eq 0 ]; then
+        # No arguments: pass through to cld-gateway
+        exec cld-gateway "$@"
+    fi
+
+    case "$1" in
+        setup)
+            cmd_setup
+            ;;
+        doctor)
+            cmd_doctor
+            ;;
+        gateway)
+            # Explicit pass-through: cld-gateway-sh gateway <args> -> cld-gateway <args>
+            shift
+            exec cld-gateway "$@"
+            ;;
+        *)
+            # Unknown subcommand: pass through to cld-gateway
+            exec cld-gateway "$@"
+            ;;
+    esac
+}
+
+# Setup command: run the packaged Python helper
+cmd_setup() {
+    if [ ! -f "$PYTHON_HELPER" ]; then
+        echo "Error: Packaged Python helper not found: $PYTHON_HELPER" >&2
+        exit 1
+    fi
+
+    echo "==> Setting up cld-gateway user configuration"
+    echo "==> Ensuring ~/.gateway exists"
+    echo "==> Ensuring ~/.claude_gateway exists"
+    echo "==> Installing config.yml"
+    echo "==> Installing settings.json"
+    echo "==> Linking shared Claude entries"
+
+    # Run the Python helper with zero arguments; it derives paths internally
+    if ! python3 "$PYTHON_HELPER"; then
+        echo "Error: Setup failed" >&2
+        exit 1
+    fi
+
+    echo "==> Setup finished"
+}
+
+# Doctor command: lightweight health check
+cmd_doctor() {
+    echo "==> Checking cld-gateway installation"
+    critical_exit_code=0
+    optional_missing=""
+
+    # Check critical files (must exist for success)
+    if [ -f "$GATEWAY_HOME/config.yml" ]; then
+        echo "[OK] Found ~/.gateway/config.yml"
+    else
+        echo "[FAIL] Missing ~/.gateway/config.yml"
+        critical_exit_code=1
+    fi
+
+    if [ -f "$CLAUDE_GATEWAY_HOME/settings.json" ]; then
+        echo "[OK] Found ~/.claude_gateway/settings.json"
+    else
+        echo "[FAIL] Missing ~/.claude_gateway/settings.json"
+        critical_exit_code=1
+    fi
+
+    # Check for representative shared entries (either directory or symlink)
+    # These are required; setup creates them, so doctor verifies they exist
+    for entry in agents commands skills hooks docs projects; do
+        entry_path="$CLAUDE_GATEWAY_HOME/$entry"
+        if [ -d "$entry_path" ] || [ -L "$entry_path" ]; then
+            echo "[OK] Found ~/.claude_gateway/$entry"
+        else
+            echo "[FAIL] Missing ~/.claude_gateway/$entry"
+            critical_exit_code=1
+        fi
+    done
+
+    if [ $critical_exit_code -eq 0 ]; then
+        echo "==> Installation check passed"
+        exit 0
+    else
+        echo "==> Installation check failed (required entries missing)" >&2
+        exit 1
+    fi
+}
+
+# Invoke main
+main "$@"

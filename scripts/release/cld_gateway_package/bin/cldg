@@ -1,2 +1,2 @@
 #!/bin/sh
-exec claude --settings "$HOME/.claude_codex/settings.json" "$@"
+exec claude --settings "$HOME/.claude_gateway/settings.json" "$@"

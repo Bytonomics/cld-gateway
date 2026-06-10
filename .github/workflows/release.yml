@@ -152,6 +152,7 @@ jobs:
             grep -q "^homebrew/post_install.py$" "${listing}" || { echo "Missing homebrew/post_install.py in ${archive}"; exit 1; }
             grep -q "^bin/cldg$" "${listing}" || { echo "Missing bin/cldg in ${archive}"; exit 1; }
             grep -q "^bin/clddg$" "${listing}" || { echo "Missing bin/clddg in ${archive}"; exit 1; }
+            grep -q "^bin/cld-gateway-sh$" "${listing}" || { echo "Missing bin/cld-gateway-sh in ${archive}"; exit 1; }
             echo "OK: ${archive}"
           done
 

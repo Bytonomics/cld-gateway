@@ -7,7 +7,7 @@ BREW_PREFIX="$(brew --prefix "$FORMULA_NAME")"
 CONFIG_PATH="$HOME/.gateway/config.yml"
 PACKAGE_SHARE_DIR="$BREW_PREFIX/share/cld-gateway"
 PACKAGE_CONFIG_PATH="$PACKAGE_SHARE_DIR/config.yml"
-SETTINGS_PATH="$HOME/.claude_codex/settings.json"
+SETTINGS_PATH="$HOME/.claude_gateway/settings.json"
 PACKAGE_SETTINGS_PATH="$PACKAGE_SHARE_DIR/settings.json"
 WRAPPER_ONE="$(brew --prefix)/bin/cldg"
 WRAPPER_TWO="$(brew --prefix)/bin/clddg"
@@ -36,11 +36,10 @@ usage() {
 Usage: homebrew-verify.sh
 
 Verifies a Homebrew installation of cld-gateway by checking:
-  - installed binaries and wrapper scripts
+  - installed binaries and wrapper scripts (cld-gateway, cld-gateway-sh, cldg, clddg)
   - installed config/settings files
   - wrapper script contents
   - health endpoint using the listen address from ~/.gateway/config.yml
-  - optional wrapper execution if claude is on PATH
 EOF
 }
 
@@ -165,6 +164,9 @@ step "Checking installed binaries"
 command -v cld-gateway >/dev/null 2>&1 || { echo "cld-gateway not found on PATH" >&2; exit 1; }
 [ -f "$WRAPPER_ONE" ] || { echo "Missing wrapper: $WRAPPER_ONE" >&2; exit 1; }
 [ -f "$WRAPPER_TWO" ] || { echo "Missing wrapper: $WRAPPER_TWO" >&2; exit 1; }
+WRAPPER_NEW="$(brew --prefix)/bin/cld-gateway-sh"
+[ -f "$WRAPPER_NEW" ] || { echo "Missing wrapper: $WRAPPER_NEW" >&2; exit 1; }
+[ -x "$WRAPPER_NEW" ] || { echo "Wrapper not executable: $WRAPPER_NEW" >&2; exit 1; }
 
 step "Checking installed runtime files"
 [ -f "$CONFIG_PATH" ] || { echo "Missing config file: $CONFIG_PATH" >&2; exit 1; }
@@ -173,8 +175,37 @@ step "Checking installed runtime files"
 [ -f "$PACKAGE_SETTINGS_PATH" ] || { echo "Missing packaged settings file: $PACKAGE_SETTINGS_PATH" >&2; exit 1; }
 
 step "Verifying wrapper contents"
-verify_wrapper_content "$WRAPPER_ONE" 'claude --settings "$HOME/.claude_codex/settings.json" "$@"'
+verify_wrapper_content "$WRAPPER_ONE" 'claude --settings "$HOME/.claude_gateway/settings.json" "$@"'
 verify_wrapper_content "$WRAPPER_TWO" 'cldg" --dangerously-skip-permissions "$@"'
+verify_wrapper_content "$WRAPPER_NEW" 'resolve_python_helper'
+
+step "Verifying cld-gateway-sh helper path resolution"
+# Check that cld-gateway-sh mentions formula-scoped libexec path pattern
+if ! grep -q "libexec/post_install.py" "$WRAPPER_NEW" 2>/dev/null; then
+  echo "Warning: cld-gateway-sh does not reference expected libexec path pattern" >&2
+else
+  echo "[OK] cld-gateway-sh references formula-scoped libexec path"
+fi
+
+# Verify the helper exists at expected formula-scoped path
+FORMULA_LIBEXEC="$(brew --prefix "$FORMULA_NAME")/libexec"
+FORMULA_HELPER="$FORMULA_LIBEXEC/post_install.py"
+if [ -f "$FORMULA_HELPER" ]; then
+  echo "[OK] Found formula-scoped helper at $FORMULA_HELPER"
+else
+  echo "Warning: Expected helper not found at $FORMULA_HELPER" >&2
+fi
+
+# Verify cld-gateway-sh setup and doctor commands are callable
+if [ -x "$WRAPPER_NEW" ]; then
+  if "$WRAPPER_NEW" doctor >/dev/null 2>&1; then
+    echo "[OK] cld-gateway-sh doctor command is callable"
+  else
+    warn "cld-gateway-sh doctor command returned non-zero exit (may be expected if setup incomplete)"
+  fi
+else
+  echo "Warning: cld-gateway-sh is not executable at $WRAPPER_NEW" >&2
+fi
 
 if command -v claude >/dev/null 2>&1; then
   step "Running wrapper executables because claude is on PATH"
@@ -185,28 +216,29 @@ else
 fi
 
 step "Verifying symlinks created by Python helper"
-CODEX_HOME="${HOME}/.claude_codex"
+CLAUDE_GATEWAY_HOME="${HOME}/.claude_gateway"
 CLAUDE_HOME="${HOME}/.claude"
 
-if [ ! -d "${CODEX_HOME}" ]; then
-  echo "Warning: ${CODEX_HOME} not found; cannot verify symlinks" >&2
+if [ ! -d "${CLAUDE_GATEWAY_HOME}" ]; then
+  echo "Warning: ${CLAUDE_GATEWAY_HOME} not found; cannot verify symlinks" >&2
 fi
 
 # Representative entries from SHARED_CLAUDE_ENTRIES in post_install.py
 # We check a few key entries that commonly exist
 for entry in agents commands skills; do
   source_path="${CLAUDE_HOME}/${entry}"
-  target_path="${CODEX_HOME}/${entry}"
+  target_path="${CLAUDE_GATEWAY_HOME}/${entry}"
 
-  # Only verify symlink if source exists
+  # Entry is valid if it's either a directory or symlink
   if [ -d "$source_path" ]; then
-    if [ ! -L "$target_path" ]; then
-      echo "ERROR: Expected symlink not found: $target_path (source exists at $source_path)" >&2
+    # Source exists; target should be directory or symlink
+    if [ ! -d "$target_path" ] && [ ! -L "$target_path" ]; then
+      echo "ERROR: Expected directory or symlink not found: $target_path (source exists at $source_path)" >&2
       exit 1
     fi
   fi
 done
-echo "✓ Symlink verification passed"
+echo "✓ Directory/symlink verification passed"
 
 step "Checking binary behavior"
 cld-gateway invalid-command >/dev/null 2>&1 || true

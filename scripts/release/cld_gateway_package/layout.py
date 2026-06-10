@@ -15,6 +15,7 @@ PACKAGE_ASSET_FILENAMES = (
     "config.yml",
     "settings.json",
     "homebrew/post_install.py",
+    "bin/cld-gateway-sh",
     "bin/cldg",
     "bin/clddg",
 )
@@ -68,7 +69,7 @@ def build_package_dir(
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(src, dst)
         # Preserve execute bits for executable assets
-        if asset_filename in ("bin/cldg", "bin/clddg", "homebrew/post_install.py"):
+        if asset_filename in ("bin/cld-gateway-sh", "bin/cldg", "bin/clddg", "homebrew/post_install.py"):
             mode = src.stat().st_mode
             dst.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
@@ -116,7 +117,7 @@ def validate_package_dir(package_dir: Path, spec: TargetSpec) -> None:
         if not asset_path.is_file():
             raise RuntimeError(f"Missing package asset: {asset_filename}")
         # Wrapper scripts and post-install helper must be executable
-        if asset_filename in ("bin/cldg", "bin/clddg", "homebrew/post_install.py"):
+        if asset_filename in ("bin/cld-gateway-sh", "bin/cldg", "bin/clddg", "homebrew/post_install.py"):
             if not _is_executable(asset_path):
                 raise RuntimeError(f"Script is not executable: {asset_filename}")
 

@@ -49,7 +49,7 @@ def test_build_and_validate_package_dir() -> None:
             assert asset_path.is_file(), f"Package asset not found: {asset_path}"
 
         # Check wrapper scripts are executable
-        for wrapper in ["bin/cldg", "bin/clddg"]:
+        for wrapper in ["bin/cld-gateway-sh", "bin/cldg", "bin/clddg"]:
             wrapper_path = package_dir / wrapper
             assert wrapper_path.is_file(), f"Wrapper not found: {wrapper_path}"
             assert bool(wrapper_path.stat().st_mode & stat.S_IXUSR), f"Wrapper not executable: {wrapper}"

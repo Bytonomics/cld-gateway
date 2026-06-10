@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Post-install hook for cld-gateway Homebrew formula.
 
-Handles initialization of ~/.gateway and ~/.claude_codex directories,
+Handles initialization of ~/.gateway and ~/.claude_gateway directories,
 copies configuration files, and symlinks Claude Code entries.
 """
 
@@ -10,7 +10,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-# Shared Claude Code entries to symlink from ~/.claude into ~/.claude_codex
+# Shared Claude Code entries to symlink from ~/.claude into ~/.claude_gateway
 SHARED_CLAUDE_ENTRIES = (
     '.claude.json',
     'CLAUDE.md',
@@ -37,52 +37,159 @@ SHARED_CLAUDE_ENTRIES = (
     'universal_instructions.md',
 )
 
+# Directory-style entries that should be created on the source side if missing
+DIRECTORY_STYLE_ENTRIES = frozenset({
+    'agents',
+    'commands',
+    'debug',
+    'docs',
+    'downloads',
+    'hooks',
+    'ide',
+    'output-styles',
+    'plans',
+    'plugins',
+    'projects',
+    'session-env',
+    'shell-snapshots',
+    'skills',
+    'todos',
+})
 
-def validate_symlink_target(symlink_path: Path) -> None:
-    """Validate that a symlink target exists and is a directory.
 
-    Args:
-        symlink_path: Path to the symlink to validate.
+def get_user_home() -> Path:
+    """Get the user's home directory.
+
+    Returns:
+        Path to user's home directory.
 
     Raises:
-        SystemExit: If symlink target doesn't exist or is not a directory.
+        SystemExit: If home directory cannot be determined.
     """
-    if not symlink_path.is_symlink():
-        return
-
-    target = symlink_path.resolve()
-    if not target.exists():
-        sys.exit(f'Expected {symlink_path} symlink target to exist: {target}')
-    if not target.is_dir():
-        sys.exit(f'Expected {symlink_path} symlink target to be a directory: {target}')
+    home = Path.home()
+    if not home.exists():
+        sys.exit(f'User home directory does not exist: {home}')
+    return home
 
 
-def ensure_claude_codex_path(claude_codex_path: Path) -> None:
-    """Ensure ~/.claude_codex exists and is valid.
+def get_gateway_home(user_home: Path) -> Path:
+    """Get the gateway home directory path.
+
+    Args:
+        user_home: Path to user's home directory.
+
+    Returns:
+        Path to ~/.gateway.
+    """
+    return user_home / '.gateway'
+
+
+def get_claude_home(user_home: Path) -> Path:
+    """Get the Claude home directory path.
+
+    Args:
+        user_home: Path to user's home directory.
+
+    Returns:
+        Path to ~/.claude.
+    """
+    return user_home / '.claude'
+
+
+def get_claude_gateway_home(user_home: Path) -> Path:
+    """Get the Claude gateway home directory path.
+
+    Args:
+        user_home: Path to user's home directory.
+
+    Returns:
+        Path to ~/.claude_gateway.
+    """
+    return user_home / '.claude_gateway'
+
+
+def get_packaged_config_path() -> Path:
+    """Get the path to the packaged config.yml file.
+
+    The packaged config is located relative to this script's installation
+    directory. Assumes layout: homebrew/post_install.py and config.yml
+    are siblings under the package.
+
+    Returns:
+        Path to packaged config.yml.
+
+    Raises:
+        SystemExit: If packaged config cannot be located.
+    """
+    script_dir = Path(__file__).parent.parent
+    config_path = script_dir / 'config.yml'
+    if not config_path.exists():
+        sys.exit(f'Packaged config.yml not found at {config_path}')
+    return config_path
+
+
+def get_packaged_settings_path() -> Path:
+    """Get the path to the packaged settings.json file.
+
+    The packaged settings is located relative to this script's installation
+    directory. Assumes layout: homebrew/post_install.py and settings.json
+    are siblings under the package.
+
+    Returns:
+        Path to packaged settings.json.
+
+    Raises:
+        SystemExit: If packaged settings cannot be located.
+    """
+    script_dir = Path(__file__).parent.parent
+    settings_path = script_dir / 'settings.json'
+    if not settings_path.exists():
+        sys.exit(f'Packaged settings.json not found at {settings_path}')
+    return settings_path
+
+
+def is_directory_style_entry(entry_name: str) -> bool:
+    """Check if an entry is directory-style (not file-style).
+
+    Args:
+        entry_name: Name of the entry to check.
+
+    Returns:
+        True if the entry is directory-style, False otherwise.
+    """
+    return entry_name in DIRECTORY_STYLE_ENTRIES
+
+
+def ensure_directory_or_symlink_root(path: Path, label: str) -> None:
+    """Ensure a root directory exists and is valid.
 
     Handles four cases:
-    - symlink: validate target exists and is directory
+    - symlink: accept as-is (target validation deferred to usage)
     - directory: use as-is
-    - missing: create it
+    - missing: create it as a directory
     - file/other: error
 
     Args:
-        claude_codex_path: Path to ~/.claude_codex.
+        path: Path to the root directory to validate/create.
+        label: Human-readable label for error messages.
 
     Raises:
-        SystemExit: If claude_codex_path is invalid.
+        SystemExit: If path is invalid.
     """
-    if claude_codex_path.is_symlink():
-        validate_symlink_target(claude_codex_path)
-    elif claude_codex_path.exists():
-        if not claude_codex_path.is_dir():
-            sys.exit(f'Expected {claude_codex_path} to be a directory or symlink')
-    else:
-        claude_codex_path.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink():
+        return
+    if path.exists():
+        if not path.is_dir():
+            sys.exit(f'Expected {label} to be a directory or symlink, got: {path}')
+        return
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        sys.exit(f'Failed to create {label} at {path}: {exc}')
 
 
-def copy_file(src: Path, dst: Path) -> None:
-    """Copy a file from src to dst.
+def copy_text_file(src: Path, dst: Path) -> None:
+    """Copy a text file from src to dst.
 
     Args:
         src: Source file path.
@@ -101,107 +208,179 @@ def copy_file(src: Path, dst: Path) -> None:
         sys.exit(f'Failed to copy {src} to {dst}: {exc}')
 
 
-def validate_claude_home(claude_home: Path) -> None:
-    """Validate that ~/.claude exists as a directory.
+def ensure_claude_source_root(claude_home: Path) -> None:
+    """Ensure ~/.claude exists as a directory or symlink.
+
+    Handles four cases:
+    - symlink: accept as-is (target validation deferred to usage)
+    - directory: use as-is
+    - missing: create it as a directory
+    - file/other: error
 
     Args:
         claude_home: Path to ~/.claude.
 
     Raises:
-        SystemExit: If ~/.claude doesn't exist or isn't a directory.
+        SystemExit: If creation fails.
     """
-    if not claude_home.is_dir():
-        sys.exit(f'Expected {claude_home} to exist as a directory')
+    if claude_home.is_symlink():
+        return
+    if claude_home.exists():
+        if not claude_home.is_dir():
+            sys.exit(f'Expected {claude_home} to be a directory or symlink, got: {claude_home}')
+        return
+    try:
+        claude_home.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        sys.exit(f'Failed to create {claude_home}: {exc}')
 
 
-def create_symlinks(
-    claude_home: Path,
-    claude_codex_path: Path,
-) -> None:
-    """Create symlinks from ~/.claude/* to ~/.claude_codex/* for missing targets.
+def ensure_source_entry_exists(claude_home: Path, entry_name: str) -> None:
+    """Ensure a source-side entry exists if it is directory-style.
 
-    For each entry in SHARED_CLAUDE_ENTRIES:
-    - Skip if source doesn't exist (including broken symlinks)
-    - Skip if target already exists (including symlinks)
-    - Otherwise create symlink from source to target
+    For directory-style entries, create the directory when missing.
+    For file-style entries, do nothing (do not auto-create files).
 
     Args:
         claude_home: Path to ~/.claude.
-        claude_codex_path: Path to ~/.claude_codex.
+        entry_name: Name of the entry to ensure.
+
+    Raises:
+        SystemExit: If creation fails.
+    """
+    if not is_directory_style_entry(entry_name):
+        return
+
+    entry_path = claude_home / entry_name
+    if entry_path.exists():
+        return
+
+    try:
+        entry_path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        sys.exit(f'Failed to create source entry {entry_path}: {exc}')
+
+
+def ensure_target_entry_linked(
+    claude_home: Path,
+    claude_gateway_home: Path,
+    entry_name: str,
+) -> None:
+    """Create or preserve a symlink for a shared entry.
+
+    For each entry:
+    - Skip if source doesn't exist (including broken symlinks)
+    - Skip if target already exists (directory or symlink)
+    - Create symlink from target to source
+
+    Args:
+        claude_home: Path to ~/.claude.
+        claude_gateway_home: Path to ~/.claude_gateway.
+        entry_name: Name of the entry to link.
 
     Raises:
         SystemExit: If symlink creation fails.
     """
-    for entry_name in SHARED_CLAUDE_ENTRIES:
-        source = claude_home / entry_name
-        target = claude_codex_path / entry_name
+    source = claude_home / entry_name
+    target = claude_gateway_home / entry_name
 
-        # Check if source exists (resolves symlinks to check actual existence)
-        source_present = source.exists() or source.is_symlink()
-        if not source_present:
-            continue
+    source_present = source.exists() or source.is_symlink()
+    if not source_present:
+        return
 
-        # Skip if target already exists
-        if target.exists() or target.is_symlink():
-            continue
+    if target.exists() or target.is_symlink():
+        return
 
-        # Create symlink
-        try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.symlink_to(source)
-        except OSError as exc:
-            sys.exit(f'Failed to create symlink {target} -> {source}: {exc}')
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.symlink_to(source)
+    except OSError as exc:
+        sys.exit(f'Failed to create symlink {target} -> {source}: {exc}')
 
 
-def post_install(
-    user_home: str,
-    gateway_config_src: str,
-    settings_json_src: str,
-) -> None:
-    """Execute post-install operations.
+def sync_shared_claude_entries(claude_home: Path, claude_gateway_home: Path) -> None:
+    """Sync shared Claude entries from ~/.claude to ~/.claude_gateway.
+
+    For each entry in SHARED_CLAUDE_ENTRIES:
+    - Ensure source-side directory-style entry exists
+    - Create target symlink if source exists and target is missing
 
     Args:
-        user_home: Path to user's home directory.
-        gateway_config_src: Path to source config.yml (from pkgshare).
-        settings_json_src: Path to source settings.json (from pkgshare).
+        claude_home: Path to ~/.claude.
+        claude_gateway_home: Path to ~/.claude_gateway.
+
+    Raises:
+        SystemExit: On any operation failure.
+    """
+    for entry_name in SHARED_CLAUDE_ENTRIES:
+        ensure_source_entry_exists(claude_home, entry_name)
+        ensure_target_entry_linked(claude_home, claude_gateway_home, entry_name)
+
+
+def install_gateway_runtime_config(gateway_home: Path) -> None:
+    """Install the gateway runtime configuration.
+
+    Copies packaged config.yml to ~/.gateway/config.yml.
+
+    Args:
+        gateway_home: Path to ~/.gateway.
+
+    Raises:
+        SystemExit: If installation fails.
+    """
+    src = get_packaged_config_path()
+    dst = gateway_home / 'config.yml'
+    copy_text_file(src, dst)
+
+
+def install_claude_gateway_settings(claude_gateway_home: Path) -> None:
+    """Install the Claude gateway settings.
+
+    Copies packaged settings.json to ~/.claude_gateway/settings.json.
+
+    Args:
+        claude_gateway_home: Path to ~/.claude_gateway.
+
+    Raises:
+        SystemExit: If installation fails.
+    """
+    src = get_packaged_settings_path()
+    dst = claude_gateway_home / 'settings.json'
+    copy_text_file(src, dst)
+
+
+def post_install() -> None:
+    """Execute post-install operations with zero-argument invocation.
+
+    Orchestrates:
+    - User home discovery
+    - Gateway home initialization
+    - Claude gateway home validation/creation
+    - Runtime config installation
+    - Claude gateway settings installation
+    - Source-side Claude directory preparation
+    - Shared entry symlink synchronization
 
     Raises:
         SystemExit: On any validation or operation failure.
     """
-    user_home_path = Path(user_home).expanduser().resolve()
-    gateway_home = user_home_path / '.gateway'
-    claude_home = user_home_path / '.claude'
-    claude_codex_path = user_home_path / '.claude_codex'
+    user_home = get_user_home()
+    gateway_home = get_gateway_home(user_home)
+    claude_home = get_claude_home(user_home)
+    claude_gateway_home = get_claude_gateway_home(user_home)
 
-    gateway_config_dst = gateway_home / 'config.yml'
-    settings_json_dst = claude_codex_path / 'settings.json'
+    ensure_directory_or_symlink_root(gateway_home, '~/.gateway')
+    ensure_directory_or_symlink_root(claude_gateway_home, '~/.claude_gateway')
 
-    # Create ~/.gateway directory
-    try:
-        gateway_home.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        sys.exit(f'Failed to create {gateway_home}: {exc}')
+    install_gateway_runtime_config(gateway_home)
+    install_claude_gateway_settings(claude_gateway_home)
 
-    # Validate/handle ~/.claude_codex
-    ensure_claude_codex_path(claude_codex_path)
-
-    # Copy config.yml to ~/.gateway/config.yml
-    copy_file(Path(gateway_config_src), gateway_config_dst)
-
-    # Copy settings.json to ~/.claude_codex/settings.json
-    copy_file(Path(settings_json_src), settings_json_dst)
-
-    # Validate ~/.claude exists as directory
-    validate_claude_home(claude_home)
-
-    # Create symlinks for shared Claude entries
-    create_symlinks(claude_home, claude_codex_path)
+    ensure_claude_source_root(claude_home)
+    sync_shared_claude_entries(claude_home, claude_gateway_home)
 
 
 if __name__ == '__main__':
-    if len(sys.argv) != 4:
-        sys.exit(
-            'Usage: post_install.py <user_home> <gateway_config_src> <settings_json_src>'
-        )
+    if len(sys.argv) != 1:
+        sys.exit('post_install.py takes no arguments')
 
-    post_install(sys.argv[1], sys.argv[2], sys.argv[3])
+    post_install()

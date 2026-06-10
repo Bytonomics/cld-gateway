@@ -87,6 +87,96 @@ class TestReleaseWorkflowSemantics:
         assert "dist/install.sh" in files_block
         assert "install.ps1" not in files_block
 
+    def test_template_does_not_invoke_post_install(self) -> None:
+        """Regression test: ensure Homebrew formula template never auto-invokes post_install.
+
+        IMPORTANT: Setup must be MANUAL via `cld-gateway-sh setup`, not automatic during
+        `brew install`. The post_install.py helper exists as a reusable utility for manual
+        setup orchestration, but the Homebrew formula must NOT invoke it automatically.
+
+        This test prevents accidental reintroduction of the bug where a `def post_install`
+        method in the formula would call `system(opt_libexec/"post_install.py")` during
+        installation, which:
+          1. Defeats user autonomy (setup happens invisibly)
+          2. Creates unpredictable file creation/modification at install time
+          3. Makes troubleshooting harder (users don't know what setup step failed)
+          4. Violates Homebrew best practices (formulas should not modify user home)
+
+        See: .github/scripts/templates/cld-gateway.rb.erb
+        """
+        template_path = (
+            REPO_ROOT
+            / "homebrew-tap"
+            / ".github"
+            / "scripts"
+            / "templates"
+            / "cld-gateway.rb.erb"
+        )
+        if not template_path.is_file():
+            raise AssertionError(
+                f"Homebrew formula template not found at {template_path}"
+            )
+
+        content = template_path.read_text(encoding="utf-8")
+
+        # Check that the forbidden patterns do not exist in the template
+        forbidden_patterns = [
+            ("def post_install", "post_install method definition"),
+            (
+                "system(opt_libexec/\"post_install.py\")",
+                "system call to post_install.py in formula",
+            ),
+            (
+                "system(opt_libexec/'post_install.py')",
+                "system call to post_install.py in formula (single quotes)",
+            ),
+        ]
+
+        for pattern, description in forbidden_patterns:
+            if pattern in content:
+                raise AssertionError(
+                    f"Homebrew formula template contains forbidden pattern: {description}\n"
+                    f"Pattern: {pattern}\n"
+                    f"File: {template_path}\n"
+                    f"\nReason: Setup must be manual via `cld-gateway-sh setup`, not automatic.\n"
+                    f"The post_install.py helper is available for manual setup, but the\n"
+                    f"formula must NOT invoke it automatically during brew install."
+                )
+
+    def test_rendered_formula_does_not_invoke_post_install(self) -> None:
+        """Regression test: ensure rendered Homebrew formula never auto-invokes post_install.
+
+        The checked-in rendered formula must stay in lockstep with the template and must not
+        define a formula-time `post_install` hook that runs the setup helper during
+        `brew install`.
+        """
+        formula_path = REPO_ROOT / "homebrew-tap" / "Formula" / "cld-gateway.rb"
+        if not formula_path.is_file():
+            raise AssertionError(f"Rendered Homebrew formula not found at {formula_path}")
+
+        content = formula_path.read_text(encoding="utf-8")
+
+        forbidden_patterns = [
+            ("def post_install", "post_install method definition"),
+            (
+                "system(opt_libexec/\"post_install.py\")",
+                "system call to post_install.py in rendered formula",
+            ),
+            (
+                "system(opt_libexec/'post_install.py')",
+                "system call to post_install.py in rendered formula (single quotes)",
+            ),
+        ]
+
+        for pattern, description in forbidden_patterns:
+            if pattern in content:
+                raise AssertionError(
+                    f"Rendered Homebrew formula contains forbidden pattern: {description}\n"
+                    f"Pattern: {pattern}\n"
+                    f"File: {formula_path}\n"
+                    f"\nReason: Setup must be manual via `cld-gateway-sh setup`, not automatic."
+                )
+
 
 class TestPackageMetadataValidation:
     """Regression tests for package metadata field validation."""
@@ -158,6 +248,7 @@ class TestPackageMetadataValidation:
             assert "homebrew/post_install.py" in names, "Python helper missing from archive"
             assert "bin/cldg" in names, "cldg wrapper missing from archive"
             assert "bin/clddg" in names, "clddg wrapper missing from archive"
+            assert "bin/cld-gateway-sh" in names, "cld-gateway-sh wrapper missing from archive"
 
     def test_archive_wrapper_scripts_are_executable(self) -> None:
         """Test that wrapper scripts in the archive are executable."""
@@ -174,7 +265,7 @@ class TestPackageMetadataValidation:
             write_archive(package_dir, archive_out, force=False)
 
             with tarfile.open(archive_out, "r:gz") as tar:
-                for wrapper in ["bin/cldg", "bin/clddg"]:
+                for wrapper in ["bin/cld-gateway-sh", "bin/cldg", "bin/clddg"]:
                     member = tar.getmember(wrapper)
                     # Check executable bit is set in tarfile mode
                     assert member.mode & stat.S_IXUSR, f"Wrapper {wrapper} not executable in archive"

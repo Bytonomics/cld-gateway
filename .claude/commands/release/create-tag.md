@@ -23,12 +23,13 @@ Do the following. Strictly, step by step:
    - If the release commit is not done yet, proactively offer `/commit` and continue with tag creation if the user approves.
 6. Check whether the tag already exists locally or remotely.
 7. Create the annotated tag only if all checks pass.
-8. Report the exact tag name and the commit SHA it points to.
-9. While doing the above, follow these constraints.
+8. Offer to push the tag to origin after creating it, and push it if the user approves.
+9. Report the exact tag name and the commit SHA it points to.
+10. While doing the above, follow these constraints.
    - Complete every required validation before sending any user-facing response.
    - Do not provide partial progress updates, intermediate status, or “not done yet” messages.
    - If any check fails, report only the final blocking reason after completing the required checks.
    - Do not change files.
    - Do not create commits directly.
-   - Do not push tags.
+   - Do not push tags unless the user approves after you offer.
    - Do not guess the version or kind.

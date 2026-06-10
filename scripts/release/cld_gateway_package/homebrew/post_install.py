@@ -139,7 +139,7 @@ def get_packaged_settings_path() -> Path:
     Raises:
         SystemExit: If packaged settings cannot be located.
     """
-    formula_prefix = Path(__file__).resolve().parents[3]
+    formula_prefix = Path(__file__).resolve().parents[1]
     settings_path = formula_prefix / 'share' / 'cld-gateway' / 'settings.json'
     if not settings_path.exists():
         sys.exit(f'Packaged settings.json not found at {settings_path}')

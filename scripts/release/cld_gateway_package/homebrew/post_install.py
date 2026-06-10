@@ -120,7 +120,7 @@ def get_packaged_config_path() -> Path:
     Raises:
         SystemExit: If packaged config cannot be located.
     """
-    formula_prefix = Path(__file__).resolve().parents[3]
+    formula_prefix = Path(__file__).resolve().parents[1]
     config_path = formula_prefix / 'share' / 'cld-gateway' / 'config.yml'
     if not config_path.exists():
         sys.exit(f'Packaged config.yml not found at {config_path}')

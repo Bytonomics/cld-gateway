@@ -119,10 +119,7 @@ class TestReleaseWorkflowSemantics:
 
         content = template_path.read_text(encoding="utf-8")
         assert 'pkgshare.install "config.yml", "settings.json"' in content
-        assert (
-            '(pkgshare/"commands"/"codex").install "commands/codex/status.md"'
-            in content
-        )
+        assert 'libexec.install "commands"' in content
 
         # Check that the forbidden patterns do not exist in the template
         forbidden_patterns = [
@@ -148,6 +145,23 @@ class TestReleaseWorkflowSemantics:
                     f"formula must NOT invoke it automatically during brew install."
                 )
 
+    def test_release_workflow_verify_job_greps_commands_asset(self) -> None:
+        """Regression test: release workflow verify job must assert commands/ directory.
+
+        The verify job iterates over all built archives and checks each one with grep.
+        This test ensures the commands subtree assets are included in those grep assertions,
+        so a packaging regression (dropping the asset) is caught by CI before release.
+        """
+        content = self._workflow()
+        verify_steps = content["jobs"]["verify"].get("steps", [])
+        verify_run_scripts = [
+            s.get("run", "") for s in verify_steps if s.get("run")
+        ]
+        combined = "\n".join(verify_run_scripts)
+        assert 'grep -q "^commands/"' in combined, (
+            "release.yml verify job must grep for commands/ directory in every archive"
+        )
+
     def test_rendered_formula_does_not_invoke_post_install(self) -> None:
         """Regression test: ensure rendered Homebrew formula never auto-invokes post_install.
 
@@ -161,10 +175,7 @@ class TestReleaseWorkflowSemantics:
 
         content = formula_path.read_text(encoding="utf-8")
         assert 'pkgshare.install "config.yml", "settings.json"' in content
-        assert (
-            '(pkgshare/"commands"/"codex").install "commands/codex/status.md"'
-            in content
-        )
+        assert 'libexec.install "commands"' in content
 
         forbidden_patterns = [
             ("def post_install", "post_install method definition"),

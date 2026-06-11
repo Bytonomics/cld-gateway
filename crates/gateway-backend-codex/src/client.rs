@@ -74,6 +74,16 @@ impl CodexBackendClient {
         self.request_timeout
     }
 
+    #[must_use]
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    #[must_use]
+    pub fn http_client(&self) -> &GatewayHttpClient {
+        &self.http
+    }
+
     /// Sends a request to the Codex backend.
     ///
     /// # Errors

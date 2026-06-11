@@ -64,6 +64,7 @@ This step:
 - Creates directory-style entries under `~/.claude` if missing (e.g. `agents`, `commands`, `skills`, `hooks`)
 - Creates symlinks in `~/.claude_gateway` pointing to those entries from `~/.claude`
 - File-style entries (`.claude.json`, `CLAUDE.md`) are only symlinked if they already exist
+- Installs translated Codex command assets to `~/.codex_gateway/commands/` (e.g. `commands/codex/status.md`)
 
 To verify the installation completed successfully:
 

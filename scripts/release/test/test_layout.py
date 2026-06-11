@@ -255,11 +255,12 @@ def test_post_install_deploys_codex_status_asset() -> None:
         user_home = tmp_path / "home"
         formula_prefix = tmp_path / "formula"
         user_home.mkdir(parents=True)
-        (formula_prefix / "share" / "cld-gateway" / "commands" / "codex").mkdir(parents=True)
-        (formula_prefix / "share" / "cld-gateway" / "commands" / "codex" / "status.md").write_text(
+        (formula_prefix / "libexec" / "commands" / "codex").mkdir(parents=True)
+        (formula_prefix / "libexec" / "commands" / "codex" / "status.md").write_text(
             "translated status instructions\n",
             encoding="utf-8",
         )
+        (formula_prefix / "share" / "cld-gateway").mkdir(parents=True)
         (formula_prefix / "share" / "cld-gateway" / "config.yml").write_text(
             "listen_addr: 127.0.0.1:8080\n",
             encoding="utf-8",

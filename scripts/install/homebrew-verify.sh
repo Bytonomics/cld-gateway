@@ -9,8 +9,8 @@ PACKAGE_SHARE_DIR="$BREW_PREFIX/share/cld-gateway"
 PACKAGE_CONFIG_PATH="$PACKAGE_SHARE_DIR/config.yml"
 SETTINGS_PATH="$HOME/.claude_gateway/settings.json"
 PACKAGE_SETTINGS_PATH="$PACKAGE_SHARE_DIR/settings.json"
-INSTALLED_CODEX_STATUS_PATH="$HOME/.codex_gateway/commands/codex/status.md"
-PACKAGE_CODEX_STATUS_PATH="$PACKAGE_SHARE_DIR/commands/codex/status.md"
+INSTALLED_COMMANDS_DIR="$HOME/.codex_gateway/commands"
+PACKAGE_COMMANDS_DIR="$PACKAGE_SHARE_DIR/commands"
 WRAPPER_ONE="$(brew --prefix)/bin/cldg"
 WRAPPER_TWO="$(brew --prefix)/bin/clddg"
 INSTALLED_BINARY_ONE="$(brew --prefix)/bin/cld-gateway"
@@ -40,6 +40,7 @@ Usage: homebrew-verify.sh
 Verifies a Homebrew installation of cld-gateway by checking:
   - installed binaries and wrapper scripts (cld-gateway, cld-gateway-sh, cldg, clddg)
   - installed config/settings files
+  - deployed command assets (e.g. ~/.codex_gateway/commands/codex/status.md)
   - wrapper script contents
   - health endpoint using the listen address from ~/.gateway/config.yml
 EOF
@@ -129,23 +130,36 @@ verify_installed_settings_match_package() {
   fi
 }
 
-verify_installed_codex_status_matches_package() {
-  if [ ! -f "$INSTALLED_CODEX_STATUS_PATH" ]; then
-    echo "Installed Codex status asset not found at $INSTALLED_CODEX_STATUS_PATH" >&2
+verify_installed_commands_dir_matches_package() {
+  if [ ! -d "$INSTALLED_COMMANDS_DIR" ]; then
+    echo "Installed commands directory not found at $INSTALLED_COMMANDS_DIR" >&2
     exit 1
   fi
 
-  if [ ! -f "$PACKAGE_CODEX_STATUS_PATH" ]; then
-    echo "Packaged Codex status asset not found at $PACKAGE_CODEX_STATUS_PATH" >&2
+  if [ ! -d "$PACKAGE_COMMANDS_DIR" ]; then
+    echo "Packaged commands directory not found at $PACKAGE_COMMANDS_DIR" >&2
     exit 1
   fi
 
-  if ! cmp -s "$INSTALLED_CODEX_STATUS_PATH" "$PACKAGE_CODEX_STATUS_PATH"; then
-    echo "Installed Codex status asset does not match packaged asset." >&2
-    echo "installed: $INSTALLED_CODEX_STATUS_PATH" >&2
-    echo "package:   $PACKAGE_CODEX_STATUS_PATH" >&2
-    exit 1
-  fi
+  # Recursively verify all files in the packaged commands directory exist
+  # and match their installed counterparts
+  for pkg_file in $(find "$PACKAGE_COMMANDS_DIR" -type f); do
+    rel_path="${pkg_file#$PACKAGE_COMMANDS_DIR/}"
+    installed_file="$INSTALLED_COMMANDS_DIR/$rel_path"
+
+    if [ ! -f "$installed_file" ]; then
+      echo "Installed command file not found: $installed_file" >&2
+      echo "Package has: $pkg_file" >&2
+      exit 1
+    fi
+
+    if ! cmp -s "$installed_file" "$pkg_file"; then
+      echo "Installed command file does not match packaged file." >&2
+      echo "installed: $installed_file" >&2
+      echo "package:   $pkg_file" >&2
+      exit 1
+    fi
+  done
 }
 
 detect_conflicting_gateway_process() {
@@ -194,8 +208,8 @@ step "Checking installed runtime files"
 [ -f "$PACKAGE_CONFIG_PATH" ] || { echo "Missing packaged config file: $PACKAGE_CONFIG_PATH" >&2; exit 1; }
 [ -f "$SETTINGS_PATH" ] || { echo "Missing settings file: $SETTINGS_PATH" >&2; exit 1; }
 [ -f "$PACKAGE_SETTINGS_PATH" ] || { echo "Missing packaged settings file: $PACKAGE_SETTINGS_PATH" >&2; exit 1; }
-[ -f "$INSTALLED_CODEX_STATUS_PATH" ] || { echo "Missing installed Codex status asset: $INSTALLED_CODEX_STATUS_PATH" >&2; exit 1; }
-[ -f "$PACKAGE_CODEX_STATUS_PATH" ] || { echo "Missing packaged Codex status asset: $PACKAGE_CODEX_STATUS_PATH" >&2; exit 1; }
+[ -d "$INSTALLED_COMMANDS_DIR" ] || { echo "Missing installed commands directory: $INSTALLED_COMMANDS_DIR" >&2; exit 1; }
+[ -d "$PACKAGE_COMMANDS_DIR" ] || { echo "Missing packaged commands directory: $PACKAGE_COMMANDS_DIR" >&2; exit 1; }
 
 step "Verifying wrapper contents"
 verify_wrapper_content "$WRAPPER_ONE" 'claude --settings "$HOME/.claude_gateway/settings.json" "$@"'
@@ -269,7 +283,7 @@ cld-gateway invalid-command >/dev/null 2>&1 || true
 expected_listen_addr="$(resolve_expected_listen_addr)"
 verify_installed_config_matches_package
 verify_installed_settings_match_package
-verify_installed_codex_status_matches_package
+verify_installed_commands_dir_matches_package
 detect_conflicting_gateway_process "$expected_listen_addr"
 health_url="$(resolve_health_url "$expected_listen_addr")"
 step "Checking health endpoint at $health_url"

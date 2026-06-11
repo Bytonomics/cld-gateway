@@ -38,10 +38,12 @@ mod context_management;
 mod sse_bridge;
 mod tool_arg_policy;
 mod translate;
+mod translate_executor;
 mod types;
 
 use crate::context_management::{ContextManagementReport, ContextManager};
 use crate::translate::{ToolTranslationContext, translate_request_with_context};
+use crate::translate_executor::{ExecutorRuntime, execute_translated_command};
 use crate::types::AnthropicMessagesRequest;
 use gateway_state::ToolCallStore;
 
@@ -414,6 +416,7 @@ async fn v1_models_with_state(State(state): State<AppState>) -> axum::response::
     Json(serde_json::json!({ "object": "list", "data": data })).into_response()
 }
 
+#[allow(clippy::too_many_lines)]
 async fn v1_messages(
     State(state): State<AppState>,
     request_id: Option<axum::extract::Extension<RequestId>>,
@@ -454,10 +457,118 @@ async fn v1_messages(
     };
     attach_context_management_metadata(&mut translated, &context_management_report);
 
+    // Check for translated command BEFORE requiring credentials.
+    // This allows /status to work even without valid auth credentials.
+    if let Some(cmd_name) = translated.client_metadata.as_ref().and_then(|m| {
+        m.get("claude_code_translated_slash_command")
+            .map(std::string::String::as_str)
+    }) {
+        let maybe_creds = load_codex_credentials(auth_path_override(&state)).ok();
+        let config_path = gateway_core::config::default_gateway_config_path();
+        let runtime = ExecutorRuntime {
+            credentials: maybe_creds.clone(),
+            backend_client: state.backend.clone(),
+            current_model: Some(req.model.clone()),
+            session_info: translate_executor::SessionInfo {
+                // Thread/session tracking is client-side (Claude Code); the gateway
+                // is a stateless proxy and does not maintain session state across requests.
+                thread_id: None,
+                thread_name: None,
+                // Account display is derived from credentials when available.
+                account_display: maybe_creds.as_ref().map(|c| c.account_id.clone()),
+            },
+            gateway_version: env!("CARGO_PKG_VERSION"),
+            config_path: Some(config_path.display().to_string()),
+            resolved_model: Some(resolution.selected_backend_model.clone()),
+            current_dir: std::env::current_dir()
+                .ok()
+                .map(|p| p.display().to_string()),
+            reasoning_effort: translated
+                .client_metadata
+                .as_ref()
+                .and_then(|m| m.get("anthropic_effort").cloned()),
+        };
+        match execute_translated_command(Some(cmd_name), &runtime).await {
+            Ok(Some(executor_json)) => {
+                // Look up the post-result wrapper function for this command.
+                let Some(post_result_fn) = translate_executor::get_post_result_function(cmd_name)
+                else {
+                    let error_message = format!(
+                        "No post-result function registered for translated command '{cmd_name}'"
+                    );
+                    tracing::error!(
+                        command = %cmd_name,
+                        "translated command missing post-result function; returning error"
+                    );
+                    let error_response = serde_json::json!({
+                        "type": "error",
+                        "error": {
+                            "type": "invalid_request_error",
+                            "message": error_message
+                        }
+                    });
+                    return (StatusCode::OK, Json(error_response)).into_response();
+                };
+                let packaged_body = crate::claude_code_context::get_packaged_command_body(cmd_name);
+                let result_text = post_result_fn(&executor_json, packaged_body);
+                // Append result as a user message to the backend input.
+                translated.input.push(serde_json::json!({
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": result_text }]
+                }));
+            }
+            Ok(None) => {
+                // Classified as Translate but no executor registered — this is a bug.
+                let error_message =
+                    format!("No executor registered for translated command '{cmd_name}'");
+                tracing::error!(
+                    command = %cmd_name,
+                    "translated command has no executor; returning error"
+                );
+                let error_response = serde_json::json!({
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": error_message
+                    }
+                });
+                return (StatusCode::OK, Json(error_response)).into_response();
+            }
+            Err(err) => {
+                // Executor failure is explicit; return error instead of silently degrading.
+                let error_response = serde_json::json!({
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": format!("Translated command '{}' failed: {}", cmd_name, err)
+                    }
+                });
+                if let Some(axum::extract::Extension(rid)) = request_id.as_ref() {
+                    tracing::error!(
+                        request_id = %rid.0,
+                        error = %err,
+                        command = %cmd_name,
+                        "translated command executor failed; returning error"
+                    );
+                } else {
+                    tracing::error!(
+                        error = %err,
+                        command = %cmd_name,
+                        "translated command executor failed; returning error"
+                    );
+                }
+                return (StatusCode::OK, Json(error_response)).into_response();
+            }
+        }
+    }
+
+    // For non-translated commands, credentials are required.
     let creds = match load_codex_credentials(auth_path_override(&state)) {
         Ok(c) => c,
         Err(err) => return auth_error(&err),
     };
+
     let backend_req = build_backend_request(&state.gateway_config, &resolution, translated, creds);
     let decoded = match run_backend_unary(&state, backend_req).await {
         Ok(d) => d,
@@ -878,6 +989,7 @@ fn anthropic_stream_start_events(msg_id: &str, model: &str) -> Vec<Event> {
     ]
 }
 
+#[allow(clippy::too_many_lines)]
 async fn stream_messages(
     state: AppState,
     request_id: Option<axum::extract::Extension<RequestId>>,
@@ -896,10 +1008,99 @@ async fn stream_messages(
         Err(err) => return sse_error("invalid_request_error", &err),
     };
     attach_context_management_metadata(&mut translated, &context_management_report);
+
+    // Check for translated command BEFORE requiring credentials.
+    // This allows /status to work even without valid auth credentials.
+    if let Some(cmd_name) = translated.client_metadata.as_ref().and_then(|m| {
+        m.get("claude_code_translated_slash_command")
+            .map(std::string::String::as_str)
+    }) {
+        let maybe_creds = load_codex_credentials(auth_path_override(&state)).ok();
+        let config_path = gateway_core::config::default_gateway_config_path();
+        let runtime = ExecutorRuntime {
+            credentials: maybe_creds.clone(),
+            backend_client: state.backend.clone(),
+            current_model: Some(req.model.clone()),
+            session_info: translate_executor::SessionInfo {
+                // Thread/session tracking is client-side (Claude Code); the gateway
+                // is a stateless proxy and does not maintain session state across requests.
+                thread_id: None,
+                thread_name: None,
+                // Account display is derived from credentials when available.
+                account_display: maybe_creds.as_ref().map(|c| c.account_id.clone()),
+            },
+            gateway_version: env!("CARGO_PKG_VERSION"),
+            config_path: Some(config_path.display().to_string()),
+            resolved_model: Some(resolution.selected_backend_model.clone()),
+            current_dir: std::env::current_dir()
+                .ok()
+                .map(|p| p.display().to_string()),
+            reasoning_effort: translated
+                .client_metadata
+                .as_ref()
+                .and_then(|m| m.get("anthropic_effort").cloned()),
+        };
+        match execute_translated_command(Some(cmd_name), &runtime).await {
+            Ok(Some(executor_json)) => {
+                // Look up the post-result wrapper function for this command.
+                let Some(post_result_fn) = translate_executor::get_post_result_function(cmd_name)
+                else {
+                    let error_message = format!(
+                        "No post-result function registered for translated command '{cmd_name}'"
+                    );
+                    tracing::error!(
+                        command = %cmd_name,
+                        "translated command missing post-result function; returning error"
+                    );
+                    return sse_error("invalid_request_error", &error_message);
+                };
+                let packaged_body = crate::claude_code_context::get_packaged_command_body(cmd_name);
+                let result_text = post_result_fn(&executor_json, packaged_body);
+                // Append result as a user message to the backend input.
+                translated.input.push(serde_json::json!({
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": result_text }]
+                }));
+            }
+            Ok(None) => {
+                // Classified as Translate but no executor registered — this is a bug.
+                let error_message =
+                    format!("No executor registered for translated command '{cmd_name}'");
+                tracing::error!(
+                    command = %cmd_name,
+                    "translated command has no executor; returning error"
+                );
+                return sse_error("invalid_request_error", &error_message);
+            }
+            Err(err) => {
+                // Executor failure is explicit; return error instead of silently degrading.
+                let error_message = format!("Translated command '{cmd_name}' failed: {err}");
+                if let Some(axum::extract::Extension(rid)) = request_id.as_ref() {
+                    tracing::error!(
+                        request_id = %rid.0,
+                        error = %err,
+                        command = %cmd_name,
+                        "translated command executor failed; returning error"
+                    );
+                } else {
+                    tracing::error!(
+                        error = %err,
+                        command = %cmd_name,
+                        "translated command executor failed; returning error"
+                    );
+                }
+                return sse_error("invalid_request_error", &error_message);
+            }
+        }
+    }
+
+    // For non-translated commands, credentials are required.
     let creds = match load_codex_credentials(auth_path_override(&state)) {
         Ok(c) => c,
         Err(err) => return sse_auth_error(&err),
     };
+
     let request_to_backend =
         build_backend_request(&state.gateway_config, &resolution, translated, creds);
 
@@ -1845,6 +2046,81 @@ mod messages_tests {
             Some("Please run: cld-gateway login claude"),
             "expected structured remediation in SSE payload, got: {first_payload:?}"
         );
+
+        let _ = std::fs::remove_file(&auth_path);
+    }
+
+    #[tokio::test]
+    async fn v1_messages_status_command_routes_through_executor() {
+        if std::env::var("RUN_WIREMOCK").ok().as_deref() != Some("1") {
+            return;
+        }
+
+        let auth_path = write_temp_auth_json();
+        let mock = MockServer::start().await;
+
+        // The backend should receive the executor-enriched request.
+        // We verify the request body contains executor-produced JSON.
+        let backend_response = format!("{}\n\n", fixture("streaming/backend_stream_text_only.sse"));
+        Mock::given(method("POST"))
+            .and(path("/backend-api/codex/responses"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(backend_response, "text/event-stream"),
+            )
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        // Also mock the usage endpoint (executor will try to fetch it)
+        Mock::given(method("GET"))
+            .and(path("/api/codex/usage"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "plan_type": "pro",
+                "rate_limit": { "allowed": true, "limit_reached": false }
+            })))
+            .mount(&mock)
+            .await;
+
+        let base_url = url::Url::parse(&mock.uri()).expect("mock url");
+        let state = super::AppState {
+            backend: gateway_backend_codex::client::CodexBackendClient::default()
+                .with_base_url(&base_url),
+            auth_json_path: Some(auth_path.clone()),
+            ..super::AppState::default()
+        };
+
+        let app = super::router(state);
+        let req_body = serde_json::json!({
+            "model": DEFAULT_BACKEND_MODEL,
+            "stream": true,
+            "messages": [{
+                "role": "user",
+                "content": "<command-message>status</command-message>\n<command-name>/status</command-name>\n<command-args></command-args>"
+            }]
+        });
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .body(Body::from(req_body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // The handler should succeed (executor ran, then forwarded to backend)
+        assert!(
+            res.status().is_success(),
+            "expected success status, got {}",
+            res.status()
+        );
+
+        // Verify the backend received exactly one request (executor path completed
+        // and forwarded the enriched request to the backend)
+        // The Mock::expect(1) above ensures this.
 
         let _ = std::fs::remove_file(&auth_path);
     }

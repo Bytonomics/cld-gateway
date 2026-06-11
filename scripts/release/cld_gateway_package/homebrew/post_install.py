@@ -158,30 +158,35 @@ def get_packaged_settings_path() -> Path:
     return settings_path
 
 
-def get_packaged_codex_status_path() -> Path:
-    """Get the path to the packaged Codex status markdown file.
+def get_packaged_commands_dir() -> Path:
+    """Get the path to the packaged commands directory.
 
-    The packaged status file is located under the formula's pkgshare directory,
-    derived from this installed helper path.
+    The commands directory is co-located with this helper in libexec
+    (Homebrew layout) or is a sibling of the homebrew/ directory
+    (archive layout).
 
     Returns:
-        Path to packaged commands/codex/status.md.
+        Path to packaged commands/ directory.
 
     Raises:
-        SystemExit: If packaged status file cannot be located.
+        SystemExit: If packaged commands directory cannot be located.
     """
-    formula_prefix = Path(__file__).resolve().parents[1]
-    status_path = (
-        formula_prefix
-        / 'share'
-        / 'cld-gateway'
-        / 'commands'
-        / 'codex'
-        / 'status.md'
+    helper_dir = Path(__file__).resolve().parent
+
+    # Homebrew layout: both post_install.py and commands/ are in libexec
+    libexec_path = helper_dir / 'commands'
+    if libexec_path.is_dir():
+        return libexec_path
+
+    # Archive layout: post_install.py is in homebrew/, commands/ is at root
+    archive_path = helper_dir.parent / 'commands'
+    if archive_path.is_dir():
+        return archive_path
+
+    sys.exit(
+        f'Packaged commands directory not found at '
+        f'{libexec_path} or {archive_path}'
     )
-    if not status_path.exists():
-        sys.exit(f'Packaged commands/codex/status.md not found at {status_path}')
-    return status_path
 
 
 def is_directory_style_entry(entry_name: str) -> bool:
@@ -385,11 +390,12 @@ def install_claude_gateway_settings(claude_gateway_home: Path) -> None:
     copy_text_file(src, dst)
 
 
-def install_codex_gateway_status(codex_gateway_home: Path) -> None:
-    """Install the Codex gateway status command.
+def install_codex_gateway_commands(codex_gateway_home: Path) -> None:
+    """Sync packaged command files to ~/.codex_gateway/commands/.
 
-    Copies packaged commands/codex/status.md to
-    ~/.codex_gateway/commands/codex/status.md.
+    Walks the packaged commands tree and copies/overwrites each file
+    individually, preserving any user-added content under commands/
+    that is not part of the packaged set.
 
     Args:
         codex_gateway_home: Path to ~/.codex_gateway.
@@ -397,9 +403,22 @@ def install_codex_gateway_status(codex_gateway_home: Path) -> None:
     Raises:
         SystemExit: If installation fails.
     """
-    src = get_packaged_codex_status_path()
-    dst = codex_gateway_home / 'commands' / 'codex' / 'status.md'
-    copy_text_file(src, dst)
+    src_commands = get_packaged_commands_dir()
+    dst_commands = codex_gateway_home / 'commands'
+
+    # Walk the packaged commands tree and sync each file individually.
+    # This preserves any user-added content under commands/ that is not
+    # part of the packaged set.
+    for src_file in src_commands.rglob('*'):
+        if not src_file.is_file():
+            continue
+        rel_path = src_file.relative_to(src_commands)
+        dst_file = dst_commands / rel_path
+        try:
+            dst_file.parent.mkdir(parents=True, exist_ok=True)
+            dst_file.write_bytes(src_file.read_bytes())
+        except OSError as exc:
+            sys.exit(f'Failed to install command {rel_path}: {exc}')
 
 
 def post_install() -> None:
@@ -412,7 +431,7 @@ def post_install() -> None:
     - Codex gateway home validation/creation
     - Runtime config installation
     - Claude gateway settings installation
-    - Codex gateway status installation
+    - Packaged translated commands installation
     - Source-side Claude directory preparation
     - Shared entry symlink synchronization
 
@@ -431,7 +450,7 @@ def post_install() -> None:
 
     install_gateway_runtime_config(gateway_home)
     install_claude_gateway_settings(claude_gateway_home)
-    install_codex_gateway_status(codex_gateway_home)
+    install_codex_gateway_commands(codex_gateway_home)
 
     ensure_claude_source_root(claude_home)
     sync_shared_claude_entries(claude_home, claude_gateway_home)

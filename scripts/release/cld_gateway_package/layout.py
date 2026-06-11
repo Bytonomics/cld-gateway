@@ -11,6 +11,7 @@ from .targets import TargetSpec
 LAYOUT_VERSION = 1
 BIN_NAME = "cld-gateway"
 METADATA_FILENAME = "cld-gateway-package.json"
+# Individual files to package (preserve paths exactly)
 PACKAGE_ASSET_FILENAMES = (
     "config.yml",
     "settings.json",
@@ -18,7 +19,10 @@ PACKAGE_ASSET_FILENAMES = (
     "bin/cld-gateway-sh",
     "bin/cldg",
     "bin/clddg",
-    "commands/codex/status.md",
+)
+# Directories to package recursively (preserve relative directory structure)
+PACKAGE_DIRECTORIES = (
+    "commands",
 )
 
 
@@ -64,6 +68,8 @@ def build_package_dir(
     _write_json(package_dir / METADATA_FILENAME, metadata)
 
     package_source_dir = _package_source_dir()
+
+    # Copy individual asset files
     for asset_filename in PACKAGE_ASSET_FILENAMES:
         src = package_source_dir / asset_filename
         dst = package_dir / asset_filename
@@ -73,6 +79,13 @@ def build_package_dir(
         if asset_filename in ("bin/cld-gateway-sh", "bin/cldg", "bin/clddg", "homebrew/post_install.py"):
             mode = src.stat().st_mode
             dst.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+    # Copy directories recursively, preserving relative structure
+    for dir_name in PACKAGE_DIRECTORIES:
+        src_dir = package_source_dir / dir_name
+        dst_dir = package_dir / dir_name
+        if src_dir.is_dir():
+            shutil.copytree(src_dir, dst_dir, dirs_exist_ok=True)
 
 
 def validate_package_dir(package_dir: Path, spec: TargetSpec) -> None:
@@ -113,6 +126,7 @@ def validate_package_dir(package_dir: Path, spec: TargetSpec) -> None:
     if not _is_executable(bin_path):
         raise RuntimeError(f"Binary is not executable: bin/{BIN_NAME}")
 
+    # Validate individual asset files
     for asset_filename in PACKAGE_ASSET_FILENAMES:
         asset_path = package_dir / asset_filename
         if not asset_path.is_file():
@@ -121,6 +135,15 @@ def validate_package_dir(package_dir: Path, spec: TargetSpec) -> None:
         if asset_filename in ("bin/cld-gateway-sh", "bin/cldg", "bin/clddg", "homebrew/post_install.py"):
             if not _is_executable(asset_path):
                 raise RuntimeError(f"Script is not executable: {asset_filename}")
+
+    # Validate that directories exist and contain files
+    for dir_name in PACKAGE_DIRECTORIES:
+        dir_path = package_dir / dir_name
+        if not dir_path.is_dir():
+            raise RuntimeError(f"Missing package directory: {dir_name}")
+        # Verify directory has content
+        if not any(dir_path.rglob("*")):
+            raise RuntimeError(f"Package directory is empty: {dir_name}")
 
 
 def _write_json(path: Path, value: object) -> None:

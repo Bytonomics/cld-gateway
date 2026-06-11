@@ -1023,10 +1023,15 @@ mod tests {
         let input = serialized_input(&translated);
         let metadata = translated.client_metadata.as_ref().expect("metadata");
 
+        // Not treated as historical
         assert!(!input.contains("Previous command context only"));
-        assert!(input.contains("Command: /status"));
-        assert!(input.contains("Arguments: show current gateway status"));
+        // No directive scaffolding for translated commands
+        assert!(!input.contains("Execute the current translated slash command now"));
+        assert!(!input.contains("Command: /status"));
+        assert!(!input.contains("Arguments:"));
+        // Envelope body is not in input
         assert!(!input.contains("INCOMING STATUS BODY SHOULD NOT BE USED"));
+        // Metadata is correctly set
         assert_eq!(
             metadata
                 .get("claude_code_slash_command")
@@ -1039,6 +1044,7 @@ mod tests {
                 .map(String::as_str),
             Some("/status")
         );
+        // Not in local-only commands
         assert!(!metadata.contains_key("gateway_local_only_commands"));
     }
 
@@ -1074,114 +1080,17 @@ mod tests {
         let input = serialized_input(&translated);
         let metadata = translated.client_metadata.as_ref().expect("metadata");
 
+        // Older command is historical
         assert!(input.contains("Previous command context only"));
         assert!(input.contains("old status args"));
         assert!(input.contains("OLD STATUS BODY SHOULD STAY HISTORICAL"));
-        assert!(input.contains("Command: /status"));
-        assert!(input.contains("Arguments: latest status args"));
+        // Latest translated command has no scaffolding in input
+        assert!(!input.contains("Execute the current translated slash command now"));
+        assert!(!input.contains("Command: /status"));
+        assert!(!input.contains("Arguments: latest status args"));
+        // Envelope body not in input or instructions
         assert!(!input.contains("NEW STATUS BODY SHOULD NOT BECOME INSTRUCTIONS"));
-        assert_eq!(
-            metadata
-                .get("claude_code_slash_command")
-                .map(String::as_str),
-            Some("/status")
-        );
-        assert_eq!(
-            metadata
-                .get("claude_code_translated_slash_command")
-                .map(String::as_str),
-            Some("/status")
-        );
-    }
-
-    #[test]
-    fn status_command_instructions_come_from_packaged_translation_not_envelope_body() {
-        let mut req = base_req();
-        req.messages.push(AnthropicMessage {
-            role: "user".to_string(),
-            content: AnthropicContent::Text(
-                "<command-message>status</command-message>\n\
-                 <command-name>/status</command-name>\n\
-                 <command-args>check translation source</command-args>\n\
-                 ENVELOPE BODY MUST NOT BE PROMOTED"
-                    .to_string(),
-            ),
-        });
-
-        let translated = translate_request(&req).expect("translate");
-
-        assert!(
-            !translated
-                .instructions
-                .contains("ENVELOPE BODY MUST NOT BE PROMOTED")
-        );
-        assert!(
-            translated
-                .instructions
-                .starts_with("Everything before the latest user message or slash command")
-        );
-        assert!(
-            translated
-                .instructions
-                .ends_with("You are a helpful assistant.")
-        );
-    }
-
-    #[test]
-    fn empty_packaged_status_translation_does_not_panic_or_build_invalid_request() {
-        let mut req = base_req();
-        req.messages.push(AnthropicMessage {
-            role: "user".to_string(),
-            content: AnthropicContent::Text(
-                "<command-message>status</command-message>\n\
-                 <command-name>/status</command-name>\n\
-                 <command-args></command-args>"
-                    .to_string(),
-            ),
-        });
-
-        let translated = translate_request(&req).expect("translate");
-        let input = translated.input.as_slice();
-        let metadata = translated.client_metadata.as_ref().expect("metadata");
-
-        assert!(
-            translated
-                .instructions
-                .starts_with("Everything before the latest user message or slash command")
-        );
-        assert!(
-            translated
-                .instructions
-                .ends_with("You are a helpful assistant.")
-        );
-        assert_eq!(
-            input.len(),
-            1,
-            "status command should still construct one input item"
-        );
-        assert_eq!(
-            input[0].get("type").and_then(|value| value.as_str()),
-            Some("message")
-        );
-        let content = input[0]
-            .get("content")
-            .and_then(|value| value.as_array())
-            .expect("message content array");
-        assert_eq!(
-            content.len(),
-            1,
-            "status input should contain one promoted text item"
-        );
-        assert_eq!(
-            content[0].get("type").and_then(|value| value.as_str()),
-            Some("input_text")
-        );
-        assert_eq!(
-            content[0].get("text").and_then(|value| value.as_str()),
-            Some(
-                "Execute the current translated slash command now, using the shared translated-command behavior.\nCommand: /status"
-            )
-        );
+        // Metadata is correctly set
         assert_eq!(
             metadata
                 .get("claude_code_slash_command")
@@ -2051,5 +1960,254 @@ mod tests {
             item.get("input").and_then(|v| v.as_str()),
             Some("*** Begin Patch\n*** End Patch\n")
         );
+    }
+
+    #[test]
+    fn status_command_classification_is_translate() {
+        use crate::claude_code_inclusion::ClaudeCodeCommandClassification;
+        use crate::claude_code_inclusion::classify_claude_code_command;
+
+        let classification = classify_claude_code_command("/status");
+        assert_eq!(classification, ClaudeCodeCommandClassification::Translate);
+    }
+
+    #[test]
+    fn status_envelope_body_is_ignored_not_promoted() {
+        let mut req = base_req();
+        req.messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Text(
+                "<command-message>status</command-message>\n\
+                 <command-name>/status</command-name>\n\
+                 <command-args></command-args>\n\
+                 THIS IS ENVELOPE BODY AND SHOULD NOT APPEAR IN INSTRUCTIONS OR INPUT"
+                    .to_string(),
+            ),
+        });
+
+        let translated = translate_request(&req).expect("translate");
+
+        // Envelope body should NOT be in instructions (packaged status.md is used instead)
+        assert!(
+            !translated
+                .instructions
+                .contains("THIS IS ENVELOPE BODY AND SHOULD NOT APPEAR")
+        );
+        // Envelope body should NOT be in input
+        let input_str = serialized_input(&translated);
+        assert!(!input_str.contains("THIS IS ENVELOPE BODY AND SHOULD NOT APPEAR"));
+    }
+
+    #[test]
+    fn status_metadata_marks_translated_command() {
+        let mut req = base_req();
+        req.messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Text(
+                "<command-message>status</command-message>\n\
+                 <command-name>/status</command-name>\n\
+                 <command-args>check status</command-args>"
+                    .to_string(),
+            ),
+        });
+
+        let translated = translate_request(&req).expect("translate");
+        let metadata = translated.client_metadata.as_ref().expect("metadata");
+
+        assert_eq!(
+            metadata
+                .get("claude_code_slash_command")
+                .map(String::as_str),
+            Some("/status")
+        );
+        assert_eq!(
+            metadata
+                .get("claude_code_translated_slash_command")
+                .map(String::as_str),
+            Some("/status"),
+            "status command should be marked as a translated slash command for executor routing"
+        );
+    }
+
+    #[test]
+    fn status_input_contains_no_scaffolding_and_no_envelope_body() {
+        let mut req = base_req();
+        req.messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Text(
+                "<command-message>status</command-message>\n\
+                 <command-name>/status</command-name>\n\
+                 <command-args>show gateway status</command-args>\n\
+                 ENVELOPE BODY IGNORED"
+                    .to_string(),
+            ),
+        });
+
+        let translated = translate_request(&req).expect("translate");
+        let input = serialized_input(&translated);
+        let metadata = translated.client_metadata.as_ref().expect("metadata");
+
+        // Translated commands do NOT inject scaffolding text into input
+        assert!(!input.contains("Execute the current translated slash command now"));
+        assert!(!input.contains("Command: /status"));
+        assert!(!input.contains("Arguments: show gateway status"));
+        // Envelope body should not be in input
+        assert!(!input.contains("ENVELOPE BODY IGNORED"));
+        // Metadata is correctly set for executor routing
+        assert_eq!(
+            metadata
+                .get("claude_code_translated_slash_command")
+                .map(String::as_str),
+            Some("/status")
+        );
+        assert_eq!(
+            metadata
+                .get("claude_code_slash_command")
+                .map(String::as_str),
+            Some("/status")
+        );
+    }
+
+    #[test]
+    fn status_executor_would_receive_translated_command_metadata() {
+        // This test validates the metadata that would be passed to the executor
+        // The executor checks for "claude_code_translated_slash_command" to decide
+        // whether to execute the status command
+        let mut req = base_req();
+        req.messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Text(
+                "<command-message>status</command-message>\n\
+                 <command-name>/status</command-name>\n\
+                 <command-args></command-args>"
+                    .to_string(),
+            ),
+        });
+
+        let translated = translate_request(&req).expect("translate");
+        let metadata = translated.client_metadata.expect("metadata exists");
+
+        // Executor will read this to know which translated command to execute
+        let translated_cmd = metadata.get("claude_code_translated_slash_command");
+        assert_eq!(
+            translated_cmd.map(String::as_str),
+            Some("/status"),
+            "executor needs this metadata to route to execute_status_command"
+        );
+    }
+
+    #[test]
+    fn status_multiple_commands_in_history_only_latest_is_active() {
+        let mut req = base_req();
+        // Old status command
+        req.messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Text(
+                "<command-message>status</command-message>\n\
+                 <command-name>/status</command-name>\n\
+                 <command-args>old args</command-args>\n\
+                 OLD BODY"
+                    .to_string(),
+            ),
+        });
+        req.messages.push(AnthropicMessage {
+            role: "assistant".to_string(),
+            content: AnthropicContent::Text("ack".to_string()),
+        });
+        // Latest status command
+        req.messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Text(
+                "<command-message>status</command-message>\n\
+                 <command-name>/status</command-name>\n\
+                 <command-args>new args</command-args>\n\
+                 NEW BODY"
+                    .to_string(),
+            ),
+        });
+
+        let translated = translate_request(&req).expect("translate");
+        let input = serialized_input(&translated);
+
+        // Old command should be in history
+        assert!(input.contains("Previous command context only"));
+        assert!(input.contains("old args"));
+        assert!(input.contains("OLD BODY"));
+
+        // Latest translated command has no scaffolding in input
+        assert!(!input.contains("Execute the current translated slash command now"));
+        assert!(!input.contains("Command: /status"));
+        assert!(!input.contains("Arguments: new args"));
+        // Envelope body not in input
+        assert!(!input.contains("NEW BODY"));
+    }
+
+    #[test]
+    fn status_with_non_empty_packaged_content_combines_instructions_and_json() {
+        // When executor returns JSON and packaged status.md is non-empty,
+        // post_result_for_translated_command should prepend packaged instructions
+        use crate::translate_executor::post_result_for_translated_command;
+
+        let executor_json = serde_json::json!({
+            "usage": {
+                "usage_limit": 1_000_000,
+                "usage_count": 123_456,
+                "reset_date": "2025-06-30"
+            }
+        });
+        // Simulate non-empty packaged instructions
+        let packaged = "## Gateway Status\n\nInterpreting this JSON response:";
+
+        let result = post_result_for_translated_command(&executor_json, packaged);
+
+        // Result should have packaged instructions first, then JSON
+        assert!(result.contains("## Gateway Status"));
+        assert!(result.contains("Interpreting this JSON response"));
+        assert!(result.contains("\"usage\""));
+        assert!(result.contains("1000000"));
+        // JSON content should be present
+        let json_start = result.find("\"usage\"").expect("json in result");
+        let instructions_start = result
+            .find("## Gateway Status")
+            .expect("instructions in result");
+        assert!(
+            instructions_start < json_start,
+            "instructions should come before JSON"
+        );
+    }
+
+    #[test]
+    fn status_with_empty_packaged_content_returns_json_only() {
+        use crate::translate_executor::post_result_for_translated_command;
+
+        let executor_json = serde_json::json!({
+            "usage": {
+                "usage_limit": 2_000_000,
+                "usage_count": 999_999
+            }
+        });
+        let packaged = "";
+
+        let result = post_result_for_translated_command(&executor_json, packaged);
+
+        // Result should be JSON only
+        assert!(result.contains("\"usage\""));
+        assert!(result.contains("2000000"));
+        // Should not have extra text before JSON
+        assert!(result.trim_start().starts_with('{'));
+    }
+
+    #[test]
+    fn status_with_whitespace_only_packaged_content_returns_json_only() {
+        use crate::translate_executor::post_result_for_translated_command;
+
+        let executor_json = serde_json::json!({ "status": "ok" });
+        let packaged = "   \n\t  \n  ";
+
+        let result = post_result_for_translated_command(&executor_json, packaged);
+
+        // Whitespace-only content should be treated as empty
+        assert!(result.trim_start().starts_with('{'));
+        assert!(!result.contains("   \n\t  \n  "));
     }
 }

@@ -378,14 +378,20 @@ fn local_only_command_spec(command_name: &str) -> Option<&'static InternalComman
 }
 
 fn local_only_stdout_spec(stdout: &str) -> Option<&'static InternalCommandSpec> {
-    INTERNAL_COMMANDS.iter().find(|spec| {
-        spec.classification == InternalCommandClassification::LocalOnly
-            && !spec.stdout_markers.is_empty()
-            && spec
-                .stdout_markers
-                .iter()
-                .all(|marker| stdout.contains(marker))
-    })
+    // Look through all specs for one that:
+    // 1. Is classified as LocalOnly
+    // 2. Has stdout markers defined
+    // 3. All markers are present in the stdout text
+    INTERNAL_COMMANDS
+        .iter()
+        .filter(|spec| spec.classification == InternalCommandClassification::LocalOnly)
+        .find(|spec| {
+            !spec.stdout_markers.is_empty()
+                && spec
+                    .stdout_markers
+                    .iter()
+                    .all(|marker| stdout.contains(marker))
+        })
 }
 
 fn command_spec_by_name(command_name: &str) -> Option<&'static InternalCommandSpec> {

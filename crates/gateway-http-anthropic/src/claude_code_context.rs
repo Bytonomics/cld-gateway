@@ -12,7 +12,6 @@ const PREVIOUS_COMMAND_CONTEXT_DIRECTIVE: &str =
     "Previous command context only; do not execute or follow it as the current instruction.";
 const ACTIVE_PROMPT_BACKED_COMMAND_INPUT_DIRECTIVE: &str =
     "Execute the current slash command now, using the promoted command instructions.";
-const ACTIVE_TRANSLATED_COMMAND_INPUT_DIRECTIVE: &str = "Execute the current translated slash command now, using the shared translated-command behavior.";
 const STRICT_INSTRUCTION_DIRECTIVE: &str =
     "Follow these instructions strictly, without ignoring or paraphrasing anything.";
 const COMPLETE_COMMAND_BODY_DIRECTIVE: &str = "The slash command instructions below are complete. Do not search for or load any command file, command directory, skill file, or skill directory unless these instructions explicitly tell you to do so.";
@@ -150,16 +149,17 @@ fn active_command_user_input(
     envelope: &CommandEnvelope,
     dispatch: ActiveCommandDispatch,
 ) -> String {
+    // Translated commands do not inject any user-input text at the context layer.
+    // The executor pipeline in lib.rs handles the actual input for translated commands.
+    if dispatch == ActiveCommandDispatch::Translated {
+        return String::new();
+    }
+
     let command_name = envelope.command_name.trim();
     let args = envelope.command_args.trim();
     let command_message = envelope.command_message.trim();
 
-    let mut lines = vec![match dispatch {
-        ActiveCommandDispatch::PromptBacked => {
-            ACTIVE_PROMPT_BACKED_COMMAND_INPUT_DIRECTIVE.to_string()
-        }
-        ActiveCommandDispatch::Translated => ACTIVE_TRANSLATED_COMMAND_INPUT_DIRECTIVE.to_string(),
-    }];
+    let mut lines = vec![ACTIVE_PROMPT_BACKED_COMMAND_INPUT_DIRECTIVE.to_string()];
     if !command_name.is_empty() {
         lines.push(format!("Command: {command_name}"));
     } else if !command_message.is_empty() {
@@ -190,30 +190,23 @@ fn active_command_instructions(
             }
         }
         ActiveCommandDispatch::Translated => {
-            let body = translated_command_body(envelope.command_name.as_str())
-                .map(str::trim)
-                .filter(|body| !body.is_empty());
-            Some(match body {
-                Some(body) => strict_instructions(&command_body_instructions(body)),
-                None => strict_instructions(&translated_command_instructions(
-                    envelope.command_name.as_str(),
-                )),
-            })
+            // Translated commands have their output handled by the executor pipeline in lib.rs.
+            // Packaged prompt text is applied only after executor JSON exists, via post_result_for_translated_command().
+            // Do not apply packaged prompt here at the context layer.
+            None
         }
     }
-}
-
-fn translated_command_instructions(command_name: &str) -> String {
-    format!(
-        "Use the shared translated slash-command behavior for {}.",
-        command_name.trim()
-    )
 }
 
 fn translated_command_body(command_name: &str) -> Option<&'static str> {
     TRANSLATED_COMMAND_BODIES
         .iter()
         .find_map(|(name, body)| (*name == normalize_command_name(command_name)).then_some(*body))
+}
+
+/// Returns the packaged command body for a translated command name.
+pub fn get_packaged_command_body(command_name: &str) -> &'static str {
+    translated_command_body(command_name).unwrap_or("")
 }
 
 fn strict_instructions(body: &str) -> String {

@@ -1006,6 +1006,197 @@ mod tests {
     }
 
     #[test]
+    fn status_command_is_not_stripped_as_local_only_and_becomes_active_translated_command() {
+        let mut req = base_req();
+        req.messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Text(
+                "<command-message>status</command-message>\n\
+                 <command-name>/status</command-name>\n\
+                 <command-args>show current gateway status</command-args>\n\
+                 INCOMING STATUS BODY SHOULD NOT BE USED"
+                    .to_string(),
+            ),
+        });
+
+        let translated = translate_request(&req).expect("translate");
+        let input = serialized_input(&translated);
+        let metadata = translated.client_metadata.as_ref().expect("metadata");
+
+        assert!(!input.contains("Previous command context only"));
+        assert!(input.contains("Command: /status"));
+        assert!(input.contains("Arguments: show current gateway status"));
+        assert!(!input.contains("INCOMING STATUS BODY SHOULD NOT BE USED"));
+        assert_eq!(
+            metadata
+                .get("claude_code_slash_command")
+                .map(String::as_str),
+            Some("/status")
+        );
+        assert_eq!(
+            metadata
+                .get("claude_code_translated_slash_command")
+                .map(String::as_str),
+            Some("/status")
+        );
+        assert!(!metadata.contains_key("gateway_local_only_commands"));
+    }
+
+    #[test]
+    fn older_status_command_envelopes_are_historical_not_active() {
+        let mut req = base_req();
+        req.messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Text(
+                "<command-message>status</command-message>\n\
+                 <command-name>/status</command-name>\n\
+                 <command-args>old status args</command-args>\n\
+                 OLD STATUS BODY SHOULD STAY HISTORICAL"
+                    .to_string(),
+            ),
+        });
+        req.messages.push(AnthropicMessage {
+            role: "assistant".to_string(),
+            content: AnthropicContent::Text("ack".to_string()),
+        });
+        req.messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Text(
+                "<command-message>status</command-message>\n\
+                 <command-name>/status</command-name>\n\
+                 <command-args>latest status args</command-args>\n\
+                 NEW STATUS BODY SHOULD NOT BECOME INSTRUCTIONS"
+                    .to_string(),
+            ),
+        });
+
+        let translated = translate_request(&req).expect("translate");
+        let input = serialized_input(&translated);
+        let metadata = translated.client_metadata.as_ref().expect("metadata");
+
+        assert!(input.contains("Previous command context only"));
+        assert!(input.contains("old status args"));
+        assert!(input.contains("OLD STATUS BODY SHOULD STAY HISTORICAL"));
+        assert!(input.contains("Command: /status"));
+        assert!(input.contains("Arguments: latest status args"));
+        assert!(!input.contains("NEW STATUS BODY SHOULD NOT BECOME INSTRUCTIONS"));
+        assert_eq!(
+            metadata
+                .get("claude_code_slash_command")
+                .map(String::as_str),
+            Some("/status")
+        );
+        assert_eq!(
+            metadata
+                .get("claude_code_translated_slash_command")
+                .map(String::as_str),
+            Some("/status")
+        );
+    }
+
+    #[test]
+    fn status_command_instructions_come_from_packaged_translation_not_envelope_body() {
+        let mut req = base_req();
+        req.messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Text(
+                "<command-message>status</command-message>\n\
+                 <command-name>/status</command-name>\n\
+                 <command-args>check translation source</command-args>\n\
+                 ENVELOPE BODY MUST NOT BE PROMOTED"
+                    .to_string(),
+            ),
+        });
+
+        let translated = translate_request(&req).expect("translate");
+
+        assert!(
+            !translated
+                .instructions
+                .contains("ENVELOPE BODY MUST NOT BE PROMOTED")
+        );
+        assert!(
+            translated
+                .instructions
+                .starts_with("Everything before the latest user message or slash command")
+        );
+        assert!(
+            translated
+                .instructions
+                .ends_with("You are a helpful assistant.")
+        );
+    }
+
+    #[test]
+    fn empty_packaged_status_translation_does_not_panic_or_build_invalid_request() {
+        let mut req = base_req();
+        req.messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Text(
+                "<command-message>status</command-message>\n\
+                 <command-name>/status</command-name>\n\
+                 <command-args></command-args>"
+                    .to_string(),
+            ),
+        });
+
+        let translated = translate_request(&req).expect("translate");
+        let input = translated.input.as_slice();
+        let metadata = translated.client_metadata.as_ref().expect("metadata");
+
+        assert!(
+            translated
+                .instructions
+                .starts_with("Everything before the latest user message or slash command")
+        );
+        assert!(
+            translated
+                .instructions
+                .ends_with("You are a helpful assistant.")
+        );
+        assert_eq!(
+            input.len(),
+            1,
+            "status command should still construct one input item"
+        );
+        assert_eq!(
+            input[0].get("type").and_then(|value| value.as_str()),
+            Some("message")
+        );
+        let content = input[0]
+            .get("content")
+            .and_then(|value| value.as_array())
+            .expect("message content array");
+        assert_eq!(
+            content.len(),
+            1,
+            "status input should contain one promoted text item"
+        );
+        assert_eq!(
+            content[0].get("type").and_then(|value| value.as_str()),
+            Some("input_text")
+        );
+        assert_eq!(
+            content[0].get("text").and_then(|value| value.as_str()),
+            Some(
+                "Execute the current translated slash command now, using the shared translated-command behavior.\nCommand: /status"
+            )
+        );
+        assert_eq!(
+            metadata
+                .get("claude_code_slash_command")
+                .map(String::as_str),
+            Some("/status")
+        );
+        assert_eq!(
+            metadata
+                .get("claude_code_translated_slash_command")
+                .map(String::as_str),
+            Some("/status")
+        );
+    }
+
+    #[test]
     fn local_only_model_command_is_removed_before_latest_prompt() {
         let mut req = base_req();
         req.messages.push(AnthropicMessage {

@@ -18,21 +18,19 @@ use futures_util::StreamExt as _;
 use gateway_backend_codex::client::BackendError;
 use gateway_backend_codex::types::{CodexToolCall, CodexToolCallKind};
 use gateway_core::RequestId;
-use gateway_core::Secret;
 use gateway_core::config::{
     GatewayConfig, ModelResolution, load_gateway_config_default_path, resolve_model,
     service_tier_for_config,
 };
 use gateway_net::{GatewayHttpClient, GatewayNetworkPolicy};
-use std::collections::HashMap;
-use std::path::Path;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{info, warn};
 use uuid::Uuid;
-
-#[cfg(test)]
-use std::path::PathBuf;
 
 mod claude_code_context;
 mod claude_code_inclusion;
@@ -51,11 +49,9 @@ use gateway_state::ToolCallStore;
 pub struct AppState {
     auth: gateway_auth_codex::CodexAuthManager,
     backend: gateway_backend_codex::client::CodexBackendClient,
-    http: GatewayHttpClient,
-    openai_models_url: String,
-    openai_api_key: Option<Secret<String>>,
     tool_calls: ToolCallStore,
     gateway_config: GatewayConfig,
+    claude_gateway_settings_path: Option<PathBuf>,
     #[cfg(test)]
     auth_json_path: Option<PathBuf>,
 }
@@ -66,23 +62,13 @@ impl AppState {
     /// Returns an error if the gateway config file exists but cannot be read or parsed.
     pub fn from_env() -> Result<Self, gateway_core::config::GatewayConfigError> {
         let gateway_config = load_gateway_config_default_path()?;
-        let openai_api_key = std::env::var("OPENAI_API_KEY")
-            .ok()
-            .map(Secret::new)
-            .or_else(|| {
-                gateway_auth_codex::load_openai_api_key_default_path()
-                    .ok()
-                    .flatten()
-            });
         let http = http_client_for_config(&gateway_config);
         let backend = backend_client_from_env(http.clone());
         let auth = gateway_auth_codex::CodexAuthManager::default().with_http_client(http.clone());
         Ok(Self {
             auth,
             backend,
-            http,
-            openai_models_url: "https://api.openai.com/v1/models".to_string(),
-            openai_api_key,
+            claude_gateway_settings_path: Some(default_claude_gateway_settings_path()),
             gateway_config,
             ..Self::default()
         })
@@ -90,17 +76,37 @@ impl AppState {
 
     #[cfg(test)]
     #[must_use]
-    fn with_openai_models_url(mut self, url: &str) -> Self {
-        self.openai_models_url = url.to_string();
+    fn with_claude_gateway_settings_path(mut self, path: PathBuf) -> Self {
+        self.claude_gateway_settings_path = Some(path);
         self
     }
+}
 
-    #[cfg(test)]
-    #[must_use]
-    fn with_openai_api_key(mut self, key: &str) -> Self {
-        self.openai_api_key = Some(Secret::new(key.to_string()));
-        self
-    }
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+struct ClaudeGatewaySettings {
+    models: Vec<ClaudeGatewayModel>,
+    env: HashMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ClaudeGatewayModel {
+    id: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ClaudeGatewayModelsResponseItem {
+    id: String,
+    #[serde(rename = "type")]
+    item_type: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
 }
 
 fn http_client_for_config(config: &GatewayConfig) -> GatewayHttpClient {
@@ -147,6 +153,141 @@ fn auth_path_override(state: &AppState) -> Option<&Path> {
         let _ = state;
         None
     }
+}
+
+fn default_claude_gateway_settings_path() -> PathBuf {
+    if let Ok(path) = std::env::var("CLAUDE_GATEWAY_SETTINGS_PATH") {
+        return PathBuf::from(path);
+    }
+
+    if let Ok(claude_gateway_home) = std::env::var("CLAUDE_GATEWAY_HOME") {
+        return PathBuf::from(claude_gateway_home).join("settings.json");
+    }
+
+    let home = std::env::var("HOME").map_or_else(|_| PathBuf::from("."), PathBuf::from);
+    home.join(".claude_gateway").join("settings.json")
+}
+
+fn load_claude_gateway_settings(path: &Path) -> Result<ClaudeGatewaySettings, String> {
+    let bytes = fs::read(path).map_err(|err| {
+        format!(
+            "failed to read Claude gateway settings at {}: {err}",
+            path.display()
+        )
+    })?;
+    serde_json::from_slice::<ClaudeGatewaySettings>(&bytes).map_err(|err| {
+        format!(
+            "failed to parse Claude gateway settings at {}: {err}",
+            path.display()
+        )
+    })
+}
+
+fn model_catalog_from_settings(
+    settings: &ClaudeGatewaySettings,
+) -> Vec<ClaudeGatewayModelsResponseItem> {
+    if !settings.models.is_empty() {
+        return dedupe_models(
+            settings
+                .models
+                .iter()
+                .map(|model| ClaudeGatewayModelsResponseItem {
+                    id: model.id.clone(),
+                    item_type: "model",
+                    name: model.name.clone(),
+                    description: model.description.clone(),
+                })
+                .collect(),
+        );
+    }
+
+    let mut models = Vec::new();
+    add_model_from_env(
+        &settings.env,
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION",
+        "GPT-5.4 Mini",
+        "OpenAI small/fallback model",
+        &mut models,
+    );
+    add_model_from_env(
+        &settings.env,
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION",
+        "GPT-5.4",
+        "OpenAI general-purpose model",
+        &mut models,
+    );
+    add_model_from_env(
+        &settings.env,
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION",
+        "GPT-5.5",
+        "OpenAI reasoning model",
+        &mut models,
+    );
+    add_model_from_env(
+        &settings.env,
+        "ANTHROPIC_DEFAULT_FABLE_MODEL",
+        "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME",
+        "ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION",
+        "GPT-5.5 Pro",
+        "OpenAI highest-capability model",
+        &mut models,
+    );
+    add_model_from_env(
+        &settings.env,
+        "ANTHROPIC_CUSTOM_MODEL_OPTION",
+        "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME",
+        "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION",
+        "Custom model",
+        "Custom model option",
+        &mut models,
+    );
+
+    dedupe_models(models)
+}
+
+fn add_model_from_env(
+    env: &HashMap<String, serde_json::Value>,
+    id_key: &str,
+    name_key: &str,
+    description_key: &str,
+    default_name: &str,
+    default_description: &str,
+    models: &mut Vec<ClaudeGatewayModelsResponseItem>,
+) {
+    let Some(id) = env.get(id_key).and_then(serde_json::Value::as_str) else {
+        return;
+    };
+
+    models.push(ClaudeGatewayModelsResponseItem {
+        id: id.to_string(),
+        item_type: "model",
+        name: env
+            .get(name_key)
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string)
+            .or_else(|| Some(default_name.to_string())),
+        description: env
+            .get(description_key)
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string)
+            .or_else(|| Some(default_description.to_string())),
+    });
+}
+
+fn dedupe_models(
+    models: Vec<ClaudeGatewayModelsResponseItem>,
+) -> Vec<ClaudeGatewayModelsResponseItem> {
+    let mut seen = HashSet::new();
+    models
+        .into_iter()
+        .filter(|model| seen.insert(model.id.clone()))
+        .collect()
 }
 
 pub fn router(state: AppState) -> axum::Router {
@@ -231,87 +372,46 @@ async fn fallback_404() -> impl IntoResponse {
 }
 
 async fn v1_models_with_state(State(state): State<AppState>) -> axum::response::Response {
-    let Some(api_key) = state.openai_api_key else {
+    let settings_path = state
+        .claude_gateway_settings_path
+        .as_deref()
+        .map_or_else(default_claude_gateway_settings_path, Path::to_path_buf);
+
+    let settings = match load_claude_gateway_settings(&settings_path) {
+        Ok(settings) => settings,
+        Err(message) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": {
+                        "type": "config_error",
+                        "message": message
+                    }
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let data = model_catalog_from_settings(&settings);
+
+    if data.is_empty() {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({
                 "error": {
                     "type": "config_error",
-                    "message": "OPENAI_API_KEY is not set (env or ~/.gateway/auth.json); required to serve /v1/models from api.openai.com"
+                    "message": format!(
+                        "no models were found in {}",
+                        settings_path.display()
+                    )
                 }
-            })),
-        )
-            .into_response();
-    };
-
-    let res = match state.http.get(&state.openai_models_url) {
-        Ok(builder) => {
-            let authorization = format!("Bearer {}", api_key.expose());
-            builder
-                .header("Authorization", &authorization)
-                .execute()
-                .await
-        }
-        Err(err) => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({
-                    "error": { "type": "network_policy_error", "message": err.to_string() }
-                })),
-            )
-                .into_response();
-        }
-    };
-
-    let Ok(res) = res else {
-        return (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({
-                    "error": { "type": "upstream_error", "message": "failed to reach api.openai.com /v1/models" }
-                })),
-            )
-                .into_response();
-    };
-
-    if !res.status().is_success() {
-        return (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({
-                "error": { "type": "upstream_error", "message": format!("upstream returned {}", res.status()) }
             })),
         )
             .into_response();
     }
 
-    let json: serde_json::Value = match res.json().await {
-        Ok(v) => v,
-        Err(_) => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({
-                    "error": { "type": "upstream_error", "message": "invalid JSON from upstream /v1/models" }
-                })),
-            )
-                .into_response();
-        }
-    };
-
-    let ids_iter = json["data"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|v| v.get("id").and_then(|id| id.as_str()).map(str::to_string));
-
-    let mut ids: Vec<String> = ids_iter.collect();
-    ids.sort();
-    ids.dedup();
-
-    let data: Vec<serde_json::Value> = ids
-        .iter()
-        .map(|id| serde_json::json!({ "id": id, "type": "model" }))
-        .collect();
-
-    Json(serde_json::json!({ "data": data })).into_response()
+    Json(serde_json::json!({ "object": "list", "data": data })).into_response()
 }
 
 async fn v1_messages(
@@ -1755,31 +1855,35 @@ mod models_api_tests {
     use super::{AppState, router};
     use axum::body::{Body, to_bytes};
     use axum::http::Request;
-    use gateway_core::DEFAULT_BACKEND_MODEL;
     use tower::ServiceExt as _;
-    use wiremock::matchers::{header, method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
-
     #[tokio::test]
-    async fn v1_models_proxies_openai_models_list() {
-        if std::env::var("RUN_WIREMOCK").ok().as_deref() != Some("1") {
-            return;
-        }
+    async fn v1_models_reads_local_settings_catalog() {
+        let settings_path = std::env::temp_dir().join(format!(
+            "claude_gateway_settings_{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(
+            &settings_path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "includeCoAuthoredBy": false,
+                "models": [
+                    {
+                        "id": "gpt-5.4-mini",
+                        "name": "GPT-5.4 Mini",
+                        "description": "OpenAI small/fallback model"
+                    },
+                    {
+                        "id": "gpt-5.4",
+                        "name": "GPT-5.4",
+                        "description": "OpenAI general-purpose model"
+                    }
+                ]
+            }))
+            .expect("serialize temp settings"),
+        )
+        .expect("write temp settings");
 
-        let mock = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/v1/models"))
-            .and(header("authorization", "Bearer test-key"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "object": "list",
-                "data": [{"id": DEFAULT_BACKEND_MODEL}]
-            })))
-            .mount(&mock)
-            .await;
-
-        let state = AppState::default()
-            .with_openai_models_url(&format!("{}/v1/models", mock.uri()))
-            .with_openai_api_key("test-key");
+        let state = AppState::default().with_claude_gateway_settings_path(settings_path.clone());
 
         let app = router(state);
         let res = app
@@ -1802,6 +1906,13 @@ mod models_api_tests {
             .map(|v| v["id"].as_str().unwrap().to_string())
             .collect();
 
-        assert_eq!(ids, vec![DEFAULT_BACKEND_MODEL.to_string()]);
+        assert_eq!(ids, vec!["gpt-5.4-mini".to_string(), "gpt-5.4".to_string()]);
+        assert_eq!(json["data"][0]["name"].as_str(), Some("GPT-5.4 Mini"));
+        assert_eq!(
+            json["data"][1]["description"].as_str(),
+            Some("OpenAI general-purpose model")
+        );
+
+        let _ = std::fs::remove_file(&settings_path);
     }
 }

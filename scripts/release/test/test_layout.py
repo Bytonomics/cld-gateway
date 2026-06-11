@@ -1,5 +1,6 @@
 """Tests for cld_gateway_package.layout."""
 
+import importlib.util
 import json
 import os
 import stat
@@ -235,13 +236,49 @@ def test_validate_package_dir_post_install_not_executable() -> None:
             assert "post_install.py" in str(e), f"Error should mention post_install.py: {e}"
 
 
-if __name__ == "__main__":
-    test_build_and_validate_package_dir()
-    test_prepare_package_dir_force_replaces()
-    test_prepare_package_dir_no_force_raises_on_non_empty()
-    test_build_package_dir_with_custom_cargo_profile()
-    test_validate_package_dir_missing_package_asset()
-    test_validate_package_dir_missing_cargo_profile()
-    test_validate_package_dir_invalid_cargo_profile()
-    test_validate_package_dir_wrapper_not_executable()
-    print("All tests passed.")
+
+
+def load_post_install_module():
+    module_path = Path(__file__).resolve().parents[1] / "cld_gateway_package" / "homebrew" / "post_install.py"
+    spec = importlib.util.spec_from_file_location("cld_gateway_post_install", module_path)
+    assert spec is not None and spec.loader is not None, f"Failed to load module spec for {module_path}"
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_post_install_deploys_codex_status_asset() -> None:
+    post_install = load_post_install_module()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        user_home = tmp_path / "home"
+        formula_prefix = tmp_path / "formula"
+        user_home.mkdir(parents=True)
+        (formula_prefix / "share" / "cld-gateway" / "commands" / "codex").mkdir(parents=True)
+        (formula_prefix / "share" / "cld-gateway" / "commands" / "codex" / "status.md").write_text(
+            "translated status instructions\n",
+            encoding="utf-8",
+        )
+        (formula_prefix / "share" / "cld-gateway" / "config.yml").write_text(
+            "listen_addr: 127.0.0.1:8080\n",
+            encoding="utf-8",
+        )
+        (formula_prefix / "share" / "cld-gateway" / "settings.json").write_text(
+            "{}\n",
+            encoding="utf-8",
+        )
+
+        original_file = post_install.__file__
+        original_path_home = Path.home
+        try:
+            post_install.__file__ = str(formula_prefix / "libexec" / "post_install.py")
+            Path.home = staticmethod(lambda: user_home)
+            post_install.post_install()
+        finally:
+            post_install.__file__ = original_file
+            Path.home = original_path_home
+
+        installed_status = user_home / ".codex_gateway" / "commands" / "codex" / "status.md"
+        assert installed_status.is_file(), f"Installed status asset not found: {installed_status}"
+        assert installed_status.read_text(encoding="utf-8") == "translated status instructions\n"

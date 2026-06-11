@@ -26,6 +26,7 @@ Every published package archive must contain:
 - `bin/cld-gateway-sh` (Setup and diagnostics facade wrapper)
 - `bin/cldg` (Claude wrapper script)
 - `bin/clddg` (Dangerously-skip-permissions variant wrapper)
+- `commands/codex/status.md`
 
 ---
 
@@ -265,7 +266,7 @@ What each job does:
 
 - `tag-check`: validates tag format and confirms tag version equals `Cargo.toml` version.
 - `build`: builds all four target binaries and packages archives.
-- `verify`: confirms each archive exists and contains `bin/cld-gateway`, `cld-gateway-package.json`, `config.yml`, `settings.json`, `homebrew/post_install.py`, `bin/cld-gateway-sh`, `bin/cldg`, and `bin/clddg`.
+- `verify`: confirms each archive exists and contains `bin/cld-gateway`, `cld-gateway-package.json`, `config.yml`, `settings.json`, `homebrew/post_install.py`, `bin/cld-gateway-sh`, `bin/cldg`, `bin/clddg`, and `commands/codex/status.md`.
 - `release`: publishes GitHub Release assets, generates `cld-gateway-package_SHA256SUMS`, and dispatches the Homebrew tap update.
 
 ### 6.c. Validating packaged setup (optional)
@@ -278,10 +279,11 @@ cld-gateway-sh setup
 cld-gateway-sh doctor
 ```
 
-The `cld-gateway-sh setup` command runs the packaged Python helper with zero arguments; the helper derives paths internally. After setup, the verifier checks that:
+The `cld-gateway-sh setup` command runs the packaged Python helper with zero arguments; the helper derives paths internally. The packaged archive includes `commands/codex/status.md`, and setup installs it to `~/.codex_gateway/commands/codex/status.md`. After setup, the verifier checks that:
 
 - `~/.gateway/config.yml` exists and matches packaged config
 - `~/.claude_gateway/settings.json` exists and matches packaged settings
+- `~/.codex_gateway/commands/codex/status.md` exists and matches the packaged status asset
 - representative shared entries under `~/.claude_gateway` are valid as either directories or symlinks (not symlink-only)
 
 ### 6.a. If the release workflow fails before publishing assets

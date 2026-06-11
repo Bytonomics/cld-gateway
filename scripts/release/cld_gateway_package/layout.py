@@ -18,6 +18,7 @@ PACKAGE_ASSET_FILENAMES = (
     "bin/cld-gateway-sh",
     "bin/cldg",
     "bin/clddg",
+    "commands/codex/status.md",
 )
 
 

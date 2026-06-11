@@ -1,5 +1,6 @@
 use crate::claude_code_inclusion::{
-    CommandEnvelope, apply_conversation_inclusion_policy, parse_command_envelope,
+    ClaudeCodeCommandClassification, CommandEnvelope, apply_conversation_inclusion_policy,
+    classify_claude_code_command, parse_command_envelope,
 };
 use crate::types::{AnthropicContent, AnthropicMessage};
 use gateway_core::config::{ClaudeCodeSlashCommandMode, ClaudeCodeWorkflowConfig};
@@ -9,13 +10,17 @@ const CURRENT_TURN_PRIORITY_DIRECTIVE: &str = "Everything before the latest user
 const SKILL_BASE_DIRECTORY_PREFIX: &str = "Base directory for this skill:";
 const PREVIOUS_COMMAND_CONTEXT_DIRECTIVE: &str =
     "Previous command context only; do not execute or follow it as the current instruction.";
-const ACTIVE_COMMAND_INPUT_DIRECTIVE: &str =
+const ACTIVE_PROMPT_BACKED_COMMAND_INPUT_DIRECTIVE: &str =
     "Execute the current slash command now, using the promoted command instructions.";
+const ACTIVE_TRANSLATED_COMMAND_INPUT_DIRECTIVE: &str = "Execute the current translated slash command now, using the shared translated-command behavior.";
 const STRICT_INSTRUCTION_DIRECTIVE: &str =
     "Follow these instructions strictly, without ignoring or paraphrasing anything.";
 const COMPLETE_COMMAND_BODY_DIRECTIVE: &str = "The slash command instructions below are complete. Do not search for or load any command file, command directory, skill file, or skill directory unless these instructions explicitly tell you to do so.";
 const SKILL_DIRECTORY_ANALYSIS_SUFFIX: &str =
     "analyze the files in this directory before proceeding";
+const PACKAGED_CODEX_STATUS_COMMAND: &str =
+    include_str!("../../../scripts/release/cld_gateway_package/commands/codex/status.md");
+const TRANSLATED_COMMAND_BODIES: &[(&str, &str)] = &[("status", PACKAGED_CODEX_STATUS_COMMAND)];
 
 #[derive(Debug, Clone)]
 pub(crate) struct NormalizedClaudeCodeContext {
@@ -90,15 +95,22 @@ fn normalize_claude_code_commands(
     let Some((active_index, active_envelope)) = active else {
         return;
     };
-    let active_user_input = active_command_user_input(&active_envelope);
+    let dispatch = active_command_dispatch(&active_envelope);
+    let active_user_input = active_command_user_input(&active_envelope, dispatch);
     set_message_text_preserving_non_text(&mut messages[active_index], active_user_input);
-    if let Some(instructions) = active_command_instructions(&active_envelope) {
+    if let Some(instructions) = active_command_instructions(&active_envelope, dispatch) {
         instruction_fragments.push(instructions);
     }
     client_metadata.insert(
         "claude_code_slash_command".to_string(),
         active_envelope.command_name.trim().to_string(),
     );
+    if dispatch == ActiveCommandDispatch::Translated {
+        client_metadata.insert(
+            "claude_code_translated_slash_command".to_string(),
+            active_envelope.command_name.trim().to_string(),
+        );
+    }
 }
 
 fn slash_commands_enabled(config: &ClaudeCodeWorkflowConfig) -> bool {
@@ -116,12 +128,38 @@ fn has_latest_user_text_instruction(messages: &[AnthropicMessage]) -> bool {
         .any(|message| message.role == "user" && !message_text(message).trim().is_empty())
 }
 
-fn active_command_user_input(envelope: &CommandEnvelope) -> String {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActiveCommandDispatch {
+    PromptBacked,
+    Translated,
+}
+
+fn active_command_dispatch(envelope: &CommandEnvelope) -> ActiveCommandDispatch {
+    match classify_claude_code_command(envelope.command_name.as_str()) {
+        ClaudeCodeCommandClassification::Translate => ActiveCommandDispatch::Translated,
+        ClaudeCodeCommandClassification::PromptBacked
+        | ClaudeCodeCommandClassification::LocalOnly => ActiveCommandDispatch::PromptBacked,
+    }
+}
+
+fn normalize_command_name(command_name: &str) -> &str {
+    command_name.trim().trim_start_matches('/')
+}
+
+fn active_command_user_input(
+    envelope: &CommandEnvelope,
+    dispatch: ActiveCommandDispatch,
+) -> String {
     let command_name = envelope.command_name.trim();
     let args = envelope.command_args.trim();
     let command_message = envelope.command_message.trim();
 
-    let mut lines = vec![ACTIVE_COMMAND_INPUT_DIRECTIVE.to_string()];
+    let mut lines = vec![match dispatch {
+        ActiveCommandDispatch::PromptBacked => {
+            ACTIVE_PROMPT_BACKED_COMMAND_INPUT_DIRECTIVE.to_string()
+        }
+        ActiveCommandDispatch::Translated => ACTIVE_TRANSLATED_COMMAND_INPUT_DIRECTIVE.to_string(),
+    }];
     if !command_name.is_empty() {
         lines.push(format!("Command: {command_name}"));
     } else if !command_message.is_empty() {
@@ -138,12 +176,44 @@ fn previous_command_context(text: &str) -> String {
     format!("{PREVIOUS_COMMAND_CONTEXT_DIRECTIVE}\n\n{text}")
 }
 
-fn active_command_instructions(envelope: &CommandEnvelope) -> Option<String> {
-    let body = envelope.body.trim();
-    if body.is_empty() {
-        return None;
+fn active_command_instructions(
+    envelope: &CommandEnvelope,
+    dispatch: ActiveCommandDispatch,
+) -> Option<String> {
+    match dispatch {
+        ActiveCommandDispatch::PromptBacked => {
+            let body = envelope.body.trim();
+            if body.is_empty() {
+                None
+            } else {
+                Some(strict_instructions(&command_body_instructions(body)))
+            }
+        }
+        ActiveCommandDispatch::Translated => {
+            let body = translated_command_body(envelope.command_name.as_str())
+                .map(str::trim)
+                .filter(|body| !body.is_empty());
+            Some(match body {
+                Some(body) => strict_instructions(&command_body_instructions(body)),
+                None => strict_instructions(&translated_command_instructions(
+                    envelope.command_name.as_str(),
+                )),
+            })
+        }
     }
-    Some(strict_instructions(&command_body_instructions(body)))
+}
+
+fn translated_command_instructions(command_name: &str) -> String {
+    format!(
+        "Use the shared translated slash-command behavior for {}.",
+        command_name.trim()
+    )
+}
+
+fn translated_command_body(command_name: &str) -> Option<&'static str> {
+    TRANSLATED_COMMAND_BODIES
+        .iter()
+        .find_map(|(name, body)| (*name == normalize_command_name(command_name)).then_some(*body))
 }
 
 fn strict_instructions(body: &str) -> String {

@@ -1,5 +1,5 @@
 use crate::types::{AnthropicContent, AnthropicMessage};
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::OnceLock};
 
 const COMMAND_MESSAGE_TAG: &str = "command-message";
 const COMMAND_NAME_TAG: &str = "command-name";
@@ -10,93 +10,119 @@ const READ_ONLY_MARKERS: &[&str] = &[
     "separate, lightweight agent",
     "The main agent is NOT interrupted",
 ];
-const LOCAL_ONLY_COMMANDS: &[LocalOnlyCommandSpec] = &[
-    LocalOnlyCommandSpec {
+const INTERNAL_COMMANDS: &[InternalCommandSpec] = &[
+    InternalCommandSpec {
         name: "add-dir",
+        classification: InternalCommandClassification::LocalOnly,
         stdout_markers: &[],
     },
-    LocalOnlyCommandSpec {
+    InternalCommandSpec {
         name: "agents",
+        classification: InternalCommandClassification::LocalOnly,
         stdout_markers: &[],
     },
-    LocalOnlyCommandSpec {
+    InternalCommandSpec {
         name: "branch",
+        classification: InternalCommandClassification::LocalOnly,
         stdout_markers: &[
             "Branched conversation",
             "You are now in the branch",
             "claude -r ",
         ],
     },
-    LocalOnlyCommandSpec {
+    InternalCommandSpec {
         name: "color",
+        classification: InternalCommandClassification::LocalOnly,
         stdout_markers: &[],
     },
-    LocalOnlyCommandSpec {
+    InternalCommandSpec {
         name: "config",
+        classification: InternalCommandClassification::LocalOnly,
         stdout_markers: &[],
     },
-    LocalOnlyCommandSpec {
+    InternalCommandSpec {
         name: "copy",
+        classification: InternalCommandClassification::LocalOnly,
         stdout_markers: &[],
     },
-    LocalOnlyCommandSpec {
+    InternalCommandSpec {
         name: "effort",
+        classification: InternalCommandClassification::LocalOnly,
         stdout_markers: &[],
     },
-    LocalOnlyCommandSpec {
+    InternalCommandSpec {
         name: "export",
+        classification: InternalCommandClassification::LocalOnly,
         stdout_markers: &[],
     },
-    LocalOnlyCommandSpec {
+    InternalCommandSpec {
         name: "hooks",
+        classification: InternalCommandClassification::LocalOnly,
         stdout_markers: &[],
     },
-    LocalOnlyCommandSpec {
+    InternalCommandSpec {
         name: "ide",
+        classification: InternalCommandClassification::LocalOnly,
         stdout_markers: &[],
     },
-    LocalOnlyCommandSpec {
+    InternalCommandSpec {
         name: "login",
+        classification: InternalCommandClassification::LocalOnly,
         stdout_markers: &[],
     },
-    LocalOnlyCommandSpec {
+    InternalCommandSpec {
         name: "logout",
+        classification: InternalCommandClassification::LocalOnly,
         stdout_markers: &[],
     },
-    LocalOnlyCommandSpec {
+    InternalCommandSpec {
         name: "mcp",
+        classification: InternalCommandClassification::LocalOnly,
         stdout_markers: &[],
     },
-    LocalOnlyCommandSpec {
+    InternalCommandSpec {
         name: "mobile",
+        classification: InternalCommandClassification::LocalOnly,
         stdout_markers: &[],
     },
-    LocalOnlyCommandSpec {
+    InternalCommandSpec {
         name: "model",
+        classification: InternalCommandClassification::LocalOnly,
         stdout_markers: &[],
     },
-    LocalOnlyCommandSpec {
+    InternalCommandSpec {
         name: "permissions",
+        classification: InternalCommandClassification::LocalOnly,
         stdout_markers: &[],
     },
-    LocalOnlyCommandSpec {
+    InternalCommandSpec {
         name: "plugin",
+        classification: InternalCommandClassification::LocalOnly,
         stdout_markers: &[],
     },
-    LocalOnlyCommandSpec {
+    InternalCommandSpec {
         name: "rename",
+        classification: InternalCommandClassification::LocalOnly,
         stdout_markers: &["Session renamed to:"],
     },
-    LocalOnlyCommandSpec {
+    InternalCommandSpec {
         name: "resume",
+        classification: InternalCommandClassification::LocalOnly,
         stdout_markers: &[],
     },
-    LocalOnlyCommandSpec {
+    InternalCommandSpec {
         name: "sandbox",
+        classification: InternalCommandClassification::LocalOnly,
         stdout_markers: &[],
     },
-    LocalOnlyCommandSpec {
+    InternalCommandSpec {
         name: "skills",
+        classification: InternalCommandClassification::LocalOnly,
+        stdout_markers: &[],
+    },
+    InternalCommandSpec {
+        name: "status",
+        classification: InternalCommandClassification::Translate,
         stdout_markers: &[],
     },
 ];
@@ -165,9 +191,23 @@ impl ConversationInclusionReport {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClaudeCodeCommandClassification {
+    PromptBacked,
+    LocalOnly,
+    Translate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InternalCommandClassification {
+    LocalOnly,
+    Translate,
+}
+
 #[derive(Debug)]
-struct LocalOnlyCommandSpec {
+struct InternalCommandSpec {
     name: &'static str,
+    classification: InternalCommandClassification,
     stdout_markers: &'static [&'static str],
 }
 
@@ -322,21 +362,45 @@ fn local_only_stdout_span(text: &str) -> Option<LocalOnlyMatch> {
     None
 }
 
-fn local_only_command_spec(command_name: &str) -> Option<&'static LocalOnlyCommandSpec> {
-    let normalized = normalize_command_name(command_name);
-    LOCAL_ONLY_COMMANDS
-        .iter()
-        .find(|spec| spec.name == normalized)
+pub(crate) fn classify_claude_code_command(command_name: &str) -> ClaudeCodeCommandClassification {
+    command_spec_by_name(normalize_command_name(command_name)).map_or(
+        ClaudeCodeCommandClassification::PromptBacked,
+        |spec| match spec.classification {
+            InternalCommandClassification::LocalOnly => ClaudeCodeCommandClassification::LocalOnly,
+            InternalCommandClassification::Translate => ClaudeCodeCommandClassification::Translate,
+        },
+    )
 }
 
-fn local_only_stdout_spec(stdout: &str) -> Option<&'static LocalOnlyCommandSpec> {
-    LOCAL_ONLY_COMMANDS.iter().find(|spec| {
-        !spec.stdout_markers.is_empty()
+fn local_only_command_spec(command_name: &str) -> Option<&'static InternalCommandSpec> {
+    command_spec_by_name(normalize_command_name(command_name))
+        .filter(|spec| spec.classification == InternalCommandClassification::LocalOnly)
+}
+
+fn local_only_stdout_spec(stdout: &str) -> Option<&'static InternalCommandSpec> {
+    INTERNAL_COMMANDS.iter().find(|spec| {
+        spec.classification == InternalCommandClassification::LocalOnly
+            && !spec.stdout_markers.is_empty()
             && spec
                 .stdout_markers
                 .iter()
                 .all(|marker| stdout.contains(marker))
     })
+}
+
+fn command_spec_by_name(command_name: &str) -> Option<&'static InternalCommandSpec> {
+    static COMMANDS_BY_NAME: OnceLock<HashMap<&'static str, &'static InternalCommandSpec>> =
+        OnceLock::new();
+
+    COMMANDS_BY_NAME
+        .get_or_init(|| {
+            INTERNAL_COMMANDS
+                .iter()
+                .map(|spec| (spec.name, spec))
+                .collect()
+        })
+        .get(command_name)
+        .copied()
 }
 
 fn normalize_command_name(command_name: &str) -> &str {

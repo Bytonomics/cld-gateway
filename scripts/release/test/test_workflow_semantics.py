@@ -118,6 +118,11 @@ class TestReleaseWorkflowSemantics:
             )
 
         content = template_path.read_text(encoding="utf-8")
+        assert 'pkgshare.install "config.yml", "settings.json"' in content
+        assert (
+            '(pkgshare/"commands"/"codex").install "commands/codex/status.md"'
+            in content
+        )
 
         # Check that the forbidden patterns do not exist in the template
         forbidden_patterns = [
@@ -155,6 +160,11 @@ class TestReleaseWorkflowSemantics:
             raise AssertionError(f"Rendered Homebrew formula not found at {formula_path}")
 
         content = formula_path.read_text(encoding="utf-8")
+        assert 'pkgshare.install "config.yml", "settings.json"' in content
+        assert (
+            '(pkgshare/"commands"/"codex").install "commands/codex/status.md"'
+            in content
+        )
 
         forbidden_patterns = [
             ("def post_install", "post_install method definition"),
@@ -245,6 +255,7 @@ class TestPackageMetadataValidation:
             assert expected_names.issubset(set(names))
 
             # Explicitly verify the packaged Python helper and wrapper scripts
+            assert "commands/codex/status.md" in names, "Codex status asset missing from archive"
             assert "homebrew/post_install.py" in names, "Python helper missing from archive"
             assert "bin/cldg" in names, "cldg wrapper missing from archive"
             assert "bin/clddg" in names, "clddg wrapper missing from archive"

@@ -43,7 +43,7 @@ fn login_with_api_key() -> Result<(), Box<dyn std::error::Error>> {
 /// Prompt user to paste `OpenAI` API key
 fn prompt_api_key() -> Result<String, Box<dyn std::error::Error>> {
     println!(
-        "\nPaste your OpenAI API key. This enables /v1/models; /v1/messages still requires ChatGPT login.\n"
+        "\nPaste your OpenAI API key. This stores your key for OpenAI-backed auth flows; /v1/models now reads ~/.claude_gateway/settings.json.\n"
     );
     print!("OPENAI_API_KEY: ");
     std::io::stdout().flush()?;

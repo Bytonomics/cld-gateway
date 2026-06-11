@@ -9,6 +9,8 @@ PACKAGE_SHARE_DIR="$BREW_PREFIX/share/cld-gateway"
 PACKAGE_CONFIG_PATH="$PACKAGE_SHARE_DIR/config.yml"
 SETTINGS_PATH="$HOME/.claude_gateway/settings.json"
 PACKAGE_SETTINGS_PATH="$PACKAGE_SHARE_DIR/settings.json"
+INSTALLED_CODEX_STATUS_PATH="$HOME/.codex_gateway/commands/codex/status.md"
+PACKAGE_CODEX_STATUS_PATH="$PACKAGE_SHARE_DIR/commands/codex/status.md"
 WRAPPER_ONE="$(brew --prefix)/bin/cldg"
 WRAPPER_TWO="$(brew --prefix)/bin/clddg"
 INSTALLED_BINARY_ONE="$(brew --prefix)/bin/cld-gateway"
@@ -127,6 +129,25 @@ verify_installed_settings_match_package() {
   fi
 }
 
+verify_installed_codex_status_matches_package() {
+  if [ ! -f "$INSTALLED_CODEX_STATUS_PATH" ]; then
+    echo "Installed Codex status asset not found at $INSTALLED_CODEX_STATUS_PATH" >&2
+    exit 1
+  fi
+
+  if [ ! -f "$PACKAGE_CODEX_STATUS_PATH" ]; then
+    echo "Packaged Codex status asset not found at $PACKAGE_CODEX_STATUS_PATH" >&2
+    exit 1
+  fi
+
+  if ! cmp -s "$INSTALLED_CODEX_STATUS_PATH" "$PACKAGE_CODEX_STATUS_PATH"; then
+    echo "Installed Codex status asset does not match packaged asset." >&2
+    echo "installed: $INSTALLED_CODEX_STATUS_PATH" >&2
+    echo "package:   $PACKAGE_CODEX_STATUS_PATH" >&2
+    exit 1
+  fi
+}
+
 detect_conflicting_gateway_process() {
   listen_addr="$1"
   host="${listen_addr%%:*}"
@@ -173,6 +194,8 @@ step "Checking installed runtime files"
 [ -f "$PACKAGE_CONFIG_PATH" ] || { echo "Missing packaged config file: $PACKAGE_CONFIG_PATH" >&2; exit 1; }
 [ -f "$SETTINGS_PATH" ] || { echo "Missing settings file: $SETTINGS_PATH" >&2; exit 1; }
 [ -f "$PACKAGE_SETTINGS_PATH" ] || { echo "Missing packaged settings file: $PACKAGE_SETTINGS_PATH" >&2; exit 1; }
+[ -f "$INSTALLED_CODEX_STATUS_PATH" ] || { echo "Missing installed Codex status asset: $INSTALLED_CODEX_STATUS_PATH" >&2; exit 1; }
+[ -f "$PACKAGE_CODEX_STATUS_PATH" ] || { echo "Missing packaged Codex status asset: $PACKAGE_CODEX_STATUS_PATH" >&2; exit 1; }
 
 step "Verifying wrapper contents"
 verify_wrapper_content "$WRAPPER_ONE" 'claude --settings "$HOME/.claude_gateway/settings.json" "$@"'
@@ -245,6 +268,8 @@ cld-gateway invalid-command >/dev/null 2>&1 || true
 
 expected_listen_addr="$(resolve_expected_listen_addr)"
 verify_installed_config_matches_package
+verify_installed_settings_match_package
+verify_installed_codex_status_matches_package
 detect_conflicting_gateway_process "$expected_listen_addr"
 health_url="$(resolve_health_url "$expected_listen_addr")"
 step "Checking health endpoint at $health_url"

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Post-install hook for cld-gateway Homebrew formula.
 
-Handles initialization of ~/.gateway and ~/.claude_gateway directories,
-copies configuration files, and symlinks Claude Code entries.
+Handles initialization of ~/.gateway, ~/.claude_gateway, and ~/.codex_gateway
+directories, copies configuration files, and symlinks Claude Code entries.
 """
 
 from __future__ import annotations
@@ -108,6 +108,18 @@ def get_claude_gateway_home(user_home: Path) -> Path:
     return user_home / '.claude_gateway'
 
 
+def get_codex_gateway_home(user_home: Path) -> Path:
+    """Get the Codex gateway home directory path.
+
+    Args:
+        user_home: Path to user's home directory.
+
+    Returns:
+        Path to ~/.codex_gateway.
+    """
+    return user_home / '.codex_gateway'
+
+
 def get_packaged_config_path() -> Path:
     """Get the path to the packaged config.yml file.
 
@@ -144,6 +156,32 @@ def get_packaged_settings_path() -> Path:
     if not settings_path.exists():
         sys.exit(f'Packaged settings.json not found at {settings_path}')
     return settings_path
+
+
+def get_packaged_codex_status_path() -> Path:
+    """Get the path to the packaged Codex status markdown file.
+
+    The packaged status file is located under the formula's pkgshare directory,
+    derived from this installed helper path.
+
+    Returns:
+        Path to packaged commands/codex/status.md.
+
+    Raises:
+        SystemExit: If packaged status file cannot be located.
+    """
+    formula_prefix = Path(__file__).resolve().parents[1]
+    status_path = (
+        formula_prefix
+        / 'share'
+        / 'cld-gateway'
+        / 'commands'
+        / 'codex'
+        / 'status.md'
+    )
+    if not status_path.exists():
+        sys.exit(f'Packaged commands/codex/status.md not found at {status_path}')
+    return status_path
 
 
 def is_directory_style_entry(entry_name: str) -> bool:
@@ -347,6 +385,23 @@ def install_claude_gateway_settings(claude_gateway_home: Path) -> None:
     copy_text_file(src, dst)
 
 
+def install_codex_gateway_status(codex_gateway_home: Path) -> None:
+    """Install the Codex gateway status command.
+
+    Copies packaged commands/codex/status.md to
+    ~/.codex_gateway/commands/codex/status.md.
+
+    Args:
+        codex_gateway_home: Path to ~/.codex_gateway.
+
+    Raises:
+        SystemExit: If installation fails.
+    """
+    src = get_packaged_codex_status_path()
+    dst = codex_gateway_home / 'commands' / 'codex' / 'status.md'
+    copy_text_file(src, dst)
+
+
 def post_install() -> None:
     """Execute post-install operations with zero-argument invocation.
 
@@ -354,8 +409,10 @@ def post_install() -> None:
     - User home discovery
     - Gateway home initialization
     - Claude gateway home validation/creation
+    - Codex gateway home validation/creation
     - Runtime config installation
     - Claude gateway settings installation
+    - Codex gateway status installation
     - Source-side Claude directory preparation
     - Shared entry symlink synchronization
 
@@ -366,12 +423,15 @@ def post_install() -> None:
     gateway_home = get_gateway_home(user_home)
     claude_home = get_claude_home(user_home)
     claude_gateway_home = get_claude_gateway_home(user_home)
+    codex_gateway_home = get_codex_gateway_home(user_home)
 
     ensure_directory_or_symlink_root(gateway_home, '~/.gateway')
     ensure_directory_or_symlink_root(claude_gateway_home, '~/.claude_gateway')
+    ensure_directory_or_symlink_root(codex_gateway_home, '~/.codex_gateway')
 
     install_gateway_runtime_config(gateway_home)
     install_claude_gateway_settings(claude_gateway_home)
+    install_codex_gateway_status(codex_gateway_home)
 
     ensure_claude_source_root(claude_home)
     sync_shared_claude_entries(claude_home, claude_gateway_home)

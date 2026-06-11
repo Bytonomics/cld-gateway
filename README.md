@@ -146,6 +146,9 @@ The values below are loaded from YAML into typed Rust config structs unless mark
 YAML fields use code defaults. The packaged Homebrew config can still choose different values, such as
 `network.listen_addr: 127.0.0.1:6473`.
 
+The companion `~/.claude_gateway/settings.json` file is the source of truth for the model catalog returned by
+`GET /v1/models`. The gateway reads that file locally instead of calling `api.openai.com/v1/models`.
+
 ### Root config
 
 | No | Config    | Value / example | Behavior                                               | How to choose                                                 |
@@ -264,9 +267,9 @@ YAML fields use code defaults. The packaged Homebrew config can still choose dif
 | 3  | `GATEWAY_AUTH_JSON_PATH`               | Purpose                             | Exact auth JSON path.                                                                                                                | Overrides `GATEWAY_HOME/auth.json` and `~/.gateway/auth.json`.                                      |
 |    |                                        | unset                               | Uses `GATEWAY_HOME/auth.json` or `~/.gateway/auth.json`.                                                                             | Normal setup after `cld-gateway login`.                                                             |
 |    |                                        | `/tmp/gateway-auth.json`            | Reads/writes auth at that exact file.                                                                                                | Useful for isolated test credentials.                                                               |
-| 4  | `OPENAI_API_KEY`                       | Purpose                             | API key used by `/v1/models` before falling back to an API key stored in Gateway auth JSON.                                          | This does not replace the message credential path, which still reads Gateway auth state.            |
-|    |                                        | unset                               | `/v1/models` tries `OPENAI_API_KEY` stored in `~/.gateway/auth.json` or the configured auth path.                                    | Normal after API-key login/persistence.                                                             |
-|    |                                        | `sk-...`                            | `/v1/models` uses this key directly for the upstream model-list request.                                                             | Use in CI or environments where file-based API-key auth is not available.                           |
+| 4  | `CLAUDE_GATEWAY_SETTINGS_PATH`         | Purpose                             | Exact Claude gateway settings JSON path used to build the `/v1/models` catalog.                                                      | Overrides the default `~/.claude_gateway/settings.json` lookup.                                     |
+|    |                                        | unset                               | Uses `~/.claude_gateway/settings.json` or the `CLAUDE_GATEWAY_HOME/settings.json` override if present.                              | Normal setup after `cld-gateway-sh setup`.                                                          |
+|    |                                        | `/tmp/claude-gateway-settings.json` | Reads the model catalog from that exact file.                                                                                        | Use in tests or isolated installs.                                                                  |
 | 5  | `GATEWAY_BACKEND_REQUEST_TIMEOUT_SECS` | Purpose                             | Total backend request timeout.                                                                                                       | Applies to backend OpenAI/Codex requests.                                                           |
 |    |                                        | unset                               | No gateway-imposed total request timeout.                                                                                            | Default.                                                                                            |
 |    |                                        | `0`                                 | Disables the timeout, same as unset.                                                                                                 | Use if a service manager injects the var but you want no timeout.                                   |
@@ -301,7 +304,7 @@ YAML fields use code defaults. The packaged Homebrew config can still choose dif
 | `GET`  | `/health`       | Health check                                               |
 | `GET`  | `/auth/status`  | Auth status                                                |
 | `POST` | `/auth/refresh` | Force auth token refresh                                   |
-| `GET`  | `/v1/models`    | List models (Anthropic-compatible)                         |
+| `GET`  | `/v1/models`    | List models from `~/.claude_gateway/settings.json`         |
 | `POST` | `/v1/messages`  | Create message (Anthropic-compatible, streaming supported) |
 
 ---

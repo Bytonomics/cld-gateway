@@ -1,11 +1,35 @@
 {
+  "includeCoAuthoredBy": false,
+  "models": [
+    {
+      "id": "gpt-5.4-mini",
+      "name": "GPT-5.4 Mini",
+      "description": "OpenAI small/fallback model"
+    },
+    {
+      "id": "gpt-5.4",
+      "name": "GPT-5.4",
+      "description": "OpenAI general-purpose model"
+    },
+    {
+      "id": "gpt-5.5",
+      "name": "GPT-5.5",
+      "description": "OpenAI reasoning model"
+    },
+    {
+      "id": "gpt-5.3-codex-spark",
+      "name": "GPT-5.3 Codex Spark",
+      "description": "OpenAI Codex Spark model"
+    }
+  ],
   "env": {
     "ANTHROPIC_BASE_URL": "http://127.0.0.1:6473",
     "ANTHROPIC_AUTH_TOKEN": "dummy",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "gpt-5.3-codex-spark",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "gpt-5.4-mini",
     "ANTHROPIC_DEFAULT_SONNET_MODEL": "gpt-5.4",
     "ANTHROPIC_DEFAULT_OPUS_MODEL": "gpt-5.5",
-    "ANTHROPIC_DEFAULT_HAIKU_MAX_TOKENS": 115200,
+    "DISABLE_TELEMETRY": "1",
+    "ANTHROPIC_DEFAULT_HAIKU_MAX_TOKENS": 360000,
     "ANTHROPIC_DEFAULT_SONNET_MAX_TOKENS": 945000,
     "ANTHROPIC_DEFAULT_OPUS_MAX_TOKENS": 945000
   }

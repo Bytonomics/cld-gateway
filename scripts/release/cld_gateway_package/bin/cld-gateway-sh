@@ -96,6 +96,7 @@ cmd_setup() {
     fi
 
     echo "==> Setup finished"
+    echo "Next step: cld-gateway-sh doctor"
 }
 
 # Doctor command: lightweight health check

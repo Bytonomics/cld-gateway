@@ -21,11 +21,12 @@ Do the following. Strictly, step by step:
    - `beta` => `cld-gateway-vX.Y.Z-beta`
 5. Check whether the current repo has uncommitted or staged changes.
    - If the release commit is not done yet, proactively offer `/commit` and continue with tag creation if the user approves.
-6. Check whether the tag already exists locally or remotely.
-7. Create the annotated tag only if all checks pass.
-8. Offer to push the tag to origin after creating it, and push it if the user approves.
-9. Report the exact tag name and the commit SHA it points to.
-10. While doing the above, follow these constraints.
+6. After checking or committing, first offer the uder to `git push` the main branch to the remote by asking user using AskQuestion tool.
+7. Check whether the tag already exists locally or remotely.
+8. Create the annotated tag only if all checks pass.
+9. Offer to push the tag to origin after creating it, and push it if the user approves.
+10. Report the exact tag name and the commit SHA it points to.
+11. While doing the above, follow these constraints.
    - Complete every required validation before sending any user-facing response.
    - Do not provide partial progress updates, intermediate status, or “not done yet” messages.
    - If any check fails, report only the final blocking reason after completing the required checks.

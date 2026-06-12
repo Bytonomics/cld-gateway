@@ -238,6 +238,11 @@ def test_validate_package_dir_post_install_not_executable() -> None:
 
 
 
+def load_wrapper_script() -> str:
+    wrapper_path = Path(__file__).resolve().parents[1] / "cld_gateway_package" / "bin" / "cld-gateway-sh"
+    return wrapper_path.read_text(encoding="utf-8")
+
+
 def load_post_install_module():
     module_path = Path(__file__).resolve().parents[1] / "cld_gateway_package" / "homebrew" / "post_install.py"
     spec = importlib.util.spec_from_file_location("cld_gateway_post_install", module_path)
@@ -245,6 +250,17 @@ def load_post_install_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def test_wrapper_doctor_checks_user_facing_usability_signals() -> None:
+    wrapper = load_wrapper_script()
+
+    assert 'CODEX_COMMANDS_HOME="$USER_HOME/.codex_gateway/commands"' in wrapper
+    assert 'Found ~/.codex_gateway/commands/codex/status.md' in wrapper
+    assert 'Installed Codex command assets match packaged assets' in wrapper
+    assert 'Health endpoint responded at $health_url' in wrapper
+    assert 'Health check failed at $health_url' in wrapper
+    assert 'A different process is already listening on $host:$port' in wrapper
 
 
 def test_post_install_deploys_codex_status_asset() -> None:

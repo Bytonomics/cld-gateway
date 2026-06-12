@@ -312,6 +312,19 @@ The companion `~/.claude_gateway/settings.json` file is the source of truth for 
 
 ## Troubleshooting / logs
 
+### Homebrew service bootstrap fails with `Bootstrap failed: 5: Input/output error`
+
+Problem:
+- `brew services start cld-gateway` fails with launchd bootstrap error 5 even though running `cld-gateway serve` directly works.
+
+Solution:
+
+```sh
+rm -f "$HOME/Library/LaunchAgents/homebrew.mxcl.cld-gateway.plist"
+launchctl bootout gui/501/homebrew.mxcl.cld-gateway
+brew services start cld-gateway
+```
+
 Credentials are saved to `~/.gateway/auth.json`.
 
 Exchange logs are written to:

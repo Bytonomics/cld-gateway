@@ -96,14 +96,20 @@ cmd_setup() {
     fi
 
     echo "==> Setup finished"
-    echo "Next step: cld-gateway-sh doctor"
+    echo "Next steps:"
+    echo "  1. Start the Homebrew service:"
+    echo "     brew services start cld-gateway"
+    echo "     If this is an update or the service was already installed before, use:"
+    echo "     brew services restart cld-gateway"
+    echo "  2. Verify the installation:"
+    echo "     cld-gateway-sh doctor"
+    echo "     This checks installed files and the /health endpoint."
 }
 
-# Doctor command: lightweight health check
+# Doctor command: usability-focused health check
 cmd_doctor() {
     echo "==> Checking cld-gateway installation"
     critical_exit_code=0
-    optional_missing=""
 
     # Check critical files (must exist for success)
     if [ -f "$GATEWAY_HOME/config.yml" ]; then
@@ -120,6 +126,22 @@ cmd_doctor() {
         critical_exit_code=1
     fi
 
+    CODEX_COMMANDS_HOME="$USER_HOME/.codex_gateway/commands"
+    if [ -d "$CODEX_COMMANDS_HOME" ]; then
+        echo "[OK] Found ~/.codex_gateway/commands"
+    else
+        echo "[FAIL] Missing ~/.codex_gateway/commands"
+        critical_exit_code=1
+    fi
+
+    STATUS_ASSET_PATH="$CODEX_COMMANDS_HOME/codex/status.md"
+    if [ -f "$STATUS_ASSET_PATH" ]; then
+        echo "[OK] Found ~/.codex_gateway/commands/codex/status.md"
+    else
+        echo "[FAIL] Missing ~/.codex_gateway/commands/codex/status.md"
+        critical_exit_code=1
+    fi
+
     # Check for representative shared entries (either directory or symlink)
     # These are required; setup creates them, so doctor verifies they exist
     for entry in agents commands skills hooks docs projects; do
@@ -132,11 +154,68 @@ cmd_doctor() {
         fi
     done
 
+    # Verify installed command assets match packaged assets when both are present
+    if [ -f "$PYTHON_HELPER" ]; then
+        FORMULA_PREFIX="$(dirname "$(dirname "$PYTHON_HELPER")")"
+        PACKAGED_COMMANDS_DIR="$FORMULA_PREFIX/share/cld-gateway/commands"
+        if [ -d "$PACKAGED_COMMANDS_DIR" ] && [ -d "$CODEX_COMMANDS_HOME" ]; then
+            mismatch_found=0
+            for pkg_file in $(find "$PACKAGED_COMMANDS_DIR" -type f); do
+                rel_path="${pkg_file#$PACKAGED_COMMANDS_DIR/}"
+                installed_file="$CODEX_COMMANDS_HOME/$rel_path"
+                if [ ! -f "$installed_file" ]; then
+                    echo "[FAIL] Missing installed command asset ~/.codex_gateway/commands/$rel_path"
+                    mismatch_found=1
+                    continue
+                fi
+                if ! cmp -s "$installed_file" "$pkg_file"; then
+                    echo "[FAIL] Installed command asset ~/.codex_gateway/commands/$rel_path does not match packaged asset"
+                    mismatch_found=1
+                fi
+            done
+            if [ $mismatch_found -eq 0 ]; then
+                echo "[OK] Installed Codex command assets match packaged assets"
+            else
+                critical_exit_code=1
+            fi
+        fi
+    fi
+
+    # Resolve listen address from installed config and verify health endpoint
+    if [ -f "$GATEWAY_HOME/config.yml" ]; then
+        listen_addr="$(awk -F': ' '/^[[:space:]]*listen_addr:[[:space:]]*/ {print $2; exit}' "$GATEWAY_HOME/config.yml" 2>/dev/null || true)"
+        if [ -n "$listen_addr" ]; then
+            host="${listen_addr%%:*}"
+            port="${listen_addr##*:}"
+            health_url="http://$listen_addr/health"
+
+            if command -v lsof >/dev/null 2>&1; then
+                lsof_output="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)"
+                if [ -n "$lsof_output" ]; then
+                    if printf '%s\n' "$lsof_output" | grep -F "$(brew --prefix)/bin/cld-gateway" >/dev/null 2>&1 \
+                        || printf '%s\n' "$lsof_output" | grep -F "$(brew --prefix cld-gateway)/bin/cld-gateway" >/dev/null 2>&1; then
+                        :
+                    else
+                        echo "[FAIL] A different process is already listening on $host:$port"
+                        critical_exit_code=1
+                    fi
+                fi
+            fi
+
+            if curl --fail --silent --show-error --max-time 10 "$health_url" >/dev/null 2>&1; then
+                echo "[OK] Health endpoint responded at $health_url"
+            else
+                echo "[FAIL] Health check failed at $health_url"
+                critical_exit_code=1
+            fi
+        fi
+    fi
+
     if [ $critical_exit_code -eq 0 ]; then
         echo "==> Installation check passed"
         exit 0
     else
-        echo "==> Installation check failed (required entries missing)" >&2
+        echo "==> Installation check failed (required checks failed)" >&2
         exit 1
     fi
 }

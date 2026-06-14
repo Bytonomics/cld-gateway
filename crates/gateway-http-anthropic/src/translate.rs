@@ -722,13 +722,13 @@ mod tests {
         assert!(
             translated
                 .instructions
-                .starts_with("Everything before the latest user message or slash command")
+                .starts_with("Follow the prompt coming with this instruction")
         );
         assert!(input.contains("explain the current diff"));
     }
 
     #[test]
-    fn latest_claude_code_slash_command_promotes_body_and_uses_args_as_input() {
+    fn latest_claude_code_slash_command_keeps_body_in_input_and_prioritizes_it() {
         let mut req = base_req();
         req.messages.push(AnthropicMessage {
             role: "user".to_string(),
@@ -749,20 +749,21 @@ mod tests {
         assert!(
             translated
                 .instructions
-                .starts_with("Everything before the latest user message or slash command")
+                .starts_with("Follow the prompt coming with this instruction")
         );
         assert!(
-            translated
+            !translated
                 .instructions
                 .contains("implemented most of the tasks")
         );
         assert!(
-            translated
+            !translated
                 .instructions
                 .contains("The slash command instructions below are complete")
         );
         assert!(input.contains("verify if these tasks are implemented by another agent"));
-        assert!(!input.contains("implemented most of the tasks"));
+        assert!(input.contains("implemented most of the tasks"));
+        assert!(input.contains("<command-name>/review_agent</command-name>"));
         assert_eq!(
             translated
                 .client_metadata
@@ -904,8 +905,14 @@ mod tests {
         let translated = translate_request(&req).expect("translate");
         let input = serialized_input(&translated);
 
-        assert!(translated.instructions.contains("Do not rewrite the plan"));
+        assert!(
+            translated
+                .instructions
+                .starts_with("Follow the prompt coming with this instruction")
+        );
+        assert!(!translated.instructions.contains("Do not rewrite the plan"));
         assert!(input.contains("make tasks from the existing approved plan"));
+        assert!(input.contains("Do not rewrite the plan"));
         assert!(input.contains("Previous command context only"));
         assert!(input.contains("/old_command"));
         assert!(input.contains("OLD COMMAND BODY"));
@@ -992,9 +999,15 @@ mod tests {
         assert!(
             translated
                 .instructions
+                .starts_with("Follow the prompt coming with this instruction")
+        );
+        assert!(
+            !translated
+                .instructions
                 .contains("You are a code explainer for this repository.")
         );
         assert!(input.contains("explain the currently unstaged feature in this repo"));
+        assert!(input.contains("You are a code explainer for this repository."));
         assert_eq!(
             translated
                 .client_metadata
@@ -1269,7 +1282,7 @@ mod tests {
         assert!(
             translated
                 .instructions
-                .starts_with("Everything before the latest user message or slash command")
+                .starts_with("Follow the prompt coming with this instruction")
         );
         assert!(!translated.instructions.contains("/branch"));
         assert!(!translated.instructions.contains("Branched conversation"));
@@ -1319,9 +1332,15 @@ mod tests {
         assert!(
             translated
                 .instructions
+                .starts_with("Follow the prompt coming with this instruction")
+        );
+        assert!(
+            !translated
+                .instructions
                 .contains("Review the implementation")
         );
         assert!(input.contains("review the implementation"));
+        assert!(input.contains("Review the implementation and report issues."));
         assert!(!translated.instructions.contains("/rename"));
         assert!(!translated.instructions.contains("Session renamed to:"));
         assert!(!input.contains("/rename"));
@@ -1465,10 +1484,11 @@ mod tests {
         let input = serialized_input(&translated);
 
         assert!(
-            translated
+            !translated
                 .instructions
                 .contains("Use the requested structure.")
         );
+        assert!(input.contains("Use the requested structure."));
         assert!(input.contains("explain the currently unstaged feature in this repo"));
         assert!(input.contains("\"type\":\"function_call\""));
         assert!(input.contains("\"type\":\"function_call_output\""));
@@ -1549,28 +1569,23 @@ mod tests {
         assert!(
             translated
                 .instructions
-                .starts_with("Everything before the latest user message or slash command")
+                .starts_with("Follow the prompt coming with this instruction")
         );
         assert!(
-            translated
+            !translated
                 .instructions
-                .contains(
-                    "Base directory for this skill: test-fixtures/claude/skills/example-skill, analyze the files in this directory before proceeding"
-                )
+                .contains("Base directory for this skill:")
         );
         assert!(
             !translated
                 .instructions
                 .contains("The slash command instructions below are complete")
         );
-        assert_eq!(
-            translated
-                .instructions
-                .matches("Base directory for this skill:")
-                .count(),
-            1
-        );
-        assert!(translated.instructions.contains("# Example Workflow"));
+        assert_eq!(input.matches("Base directory for this skill:").count(), 1);
+        assert!(input.contains(
+            "Base directory for this skill: test-fixtures/claude/skills/example-skill, analyze the files in this directory before proceeding"
+        ));
+        assert!(input.contains("# Example Workflow"));
         assert!(input.contains("run the example workflow"));
         assert_eq!(
             translated

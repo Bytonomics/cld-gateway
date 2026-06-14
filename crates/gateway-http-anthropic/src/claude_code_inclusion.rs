@@ -213,9 +213,7 @@ struct InternalCommandSpec {
 
 #[derive(Debug, Clone)]
 pub(crate) struct CommandEnvelope {
-    pub(crate) command_message: String,
     pub(crate) command_name: String,
-    pub(crate) command_args: String,
     pub(crate) body: String,
 }
 
@@ -253,17 +251,10 @@ pub(crate) fn apply_conversation_inclusion_policy(
 pub(crate) fn parse_command_envelope(text: &str) -> Option<CommandEnvelope> {
     let command_name_match = last_tag_match(text, COMMAND_NAME_TAG)?;
     let command_name = command_name_match.value;
-    let command_message = text
-        .get(..command_name_match.start)
-        .and_then(|prefix| last_tag_match(prefix, COMMAND_MESSAGE_TAG))
-        .map_or_else(String::new, |tag| tag.value);
     let command_args_match = text
         .get(command_name_match.end..)
         .and_then(|suffix| first_tag_match(suffix, COMMAND_ARGS_TAG))
         .map(|tag| tag.with_offset(command_name_match.end));
-    let command_args = command_args_match
-        .as_ref()
-        .map_or_else(String::new, |tag| tag.value.clone());
     let body_start = command_args_match
         .as_ref()
         .map_or(command_name_match.end, |tag| tag.end);
@@ -273,12 +264,7 @@ pub(crate) fn parse_command_envelope(text: &str) -> Option<CommandEnvelope> {
         .trim()
         .to_string();
 
-    Some(CommandEnvelope {
-        command_message,
-        command_name,
-        command_args,
-        body,
-    })
+    Some(CommandEnvelope { command_name, body })
 }
 
 fn apply_text_inclusion_policy(text: &str, report: &mut ConversationInclusionReport) -> String {

@@ -6,15 +6,10 @@ use crate::types::{AnthropicContent, AnthropicMessage};
 use gateway_core::config::{ClaudeCodeSlashCommandMode, ClaudeCodeWorkflowConfig};
 use std::collections::HashMap;
 
-const CURRENT_TURN_PRIORITY_DIRECTIVE: &str = "Everything before the latest user message or slash command is just context. You must immediately follow the latest user message or slash command; do not continue older tasks unless the latest turn explicitly asks for that.";
+const CURRENT_TURN_PRIORITY_DIRECTIVE: &str = "Follow the prompt coming with this instruction as an immediate and urgent need right now.  Everything before this in the conversation history is only the context leading up to this instruction.  And you are not supposed to do anything else except follow these instructions unless you have completed all of the instructions with 100% compliance.";
 const SKILL_BASE_DIRECTORY_PREFIX: &str = "Base directory for this skill:";
 const PREVIOUS_COMMAND_CONTEXT_DIRECTIVE: &str =
     "Previous command context only; do not execute or follow it as the current instruction.";
-const ACTIVE_PROMPT_BACKED_COMMAND_INPUT_DIRECTIVE: &str =
-    "Execute the current slash command now, using the promoted command instructions.";
-const STRICT_INSTRUCTION_DIRECTIVE: &str =
-    "Follow these instructions strictly, without ignoring or paraphrasing anything.";
-const COMPLETE_COMMAND_BODY_DIRECTIVE: &str = "The slash command instructions below are complete. Do not search for or load any command file, command directory, skill file, or skill directory unless these instructions explicitly tell you to do so.";
 const SKILL_DIRECTORY_ANALYSIS_SUFFIX: &str =
     "analyze the files in this directory before proceeding";
 const PACKAGED_CODEX_STATUS_COMMAND: &str =
@@ -95,9 +90,16 @@ fn normalize_claude_code_commands(
         return;
     };
     let dispatch = active_command_dispatch(&active_envelope);
-    let active_user_input = active_command_user_input(&active_envelope, dispatch);
-    set_message_text_preserving_non_text(&mut messages[active_index], active_user_input);
-    if let Some(instructions) = active_command_instructions(&active_envelope, dispatch) {
+    if dispatch == ActiveCommandDispatch::PromptBacked {
+        let active_user_input = active_prompt_backed_command_text(
+            &message_text(&messages[active_index]),
+            &active_envelope,
+        );
+        set_message_text_preserving_non_text(&mut messages[active_index], active_user_input);
+    } else {
+        set_message_text_preserving_non_text(&mut messages[active_index], String::new());
+    }
+    if let Some(instructions) = active_command_instructions(dispatch) {
         instruction_fragments.push(instructions);
     }
     client_metadata.insert(
@@ -145,50 +147,33 @@ fn normalize_command_name(command_name: &str) -> &str {
     command_name.trim().trim_start_matches('/')
 }
 
-fn active_command_user_input(
-    envelope: &CommandEnvelope,
-    dispatch: ActiveCommandDispatch,
-) -> String {
-    // Translated commands do not inject any user-input text at the context layer.
-    // The executor pipeline in lib.rs handles the actual input for translated commands.
-    if dispatch == ActiveCommandDispatch::Translated {
-        return String::new();
+fn active_prompt_backed_command_text(original_text: &str, envelope: &CommandEnvelope) -> String {
+    let body = envelope.body.trim();
+    if body.is_empty() {
+        return original_text.to_string();
     }
 
-    let command_name = envelope.command_name.trim();
-    let args = envelope.command_args.trim();
-    let command_message = envelope.command_message.trim();
-
-    let mut lines = vec![ACTIVE_PROMPT_BACKED_COMMAND_INPUT_DIRECTIVE.to_string()];
-    if !command_name.is_empty() {
-        lines.push(format!("Command: {command_name}"));
-    } else if !command_message.is_empty() {
-        lines.push(format!("Command: {command_message}"));
-    }
-    if !args.is_empty() {
-        lines.push(format!("Arguments: {args}"));
+    let rewritten_body = command_body_for_history(body);
+    if rewritten_body == body {
+        return original_text.to_string();
     }
 
-    lines.join("\n")
+    let Some(body_start) = original_text.rfind(body) else {
+        return original_text.to_string();
+    };
+
+    let mut text = original_text.to_string();
+    text.replace_range(body_start..body_start + body.len(), &rewritten_body);
+    text
 }
 
 fn previous_command_context(text: &str) -> String {
     format!("{PREVIOUS_COMMAND_CONTEXT_DIRECTIVE}\n\n{text}")
 }
 
-fn active_command_instructions(
-    envelope: &CommandEnvelope,
-    dispatch: ActiveCommandDispatch,
-) -> Option<String> {
+fn active_command_instructions(dispatch: ActiveCommandDispatch) -> Option<String> {
     match dispatch {
-        ActiveCommandDispatch::PromptBacked => {
-            let body = envelope.body.trim();
-            if body.is_empty() {
-                None
-            } else {
-                Some(strict_instructions(&command_body_instructions(body)))
-            }
-        }
+        ActiveCommandDispatch::PromptBacked => Some(CURRENT_TURN_PRIORITY_DIRECTIVE.to_string()),
         ActiveCommandDispatch::Translated => {
             // Translated commands have their output handled by the executor pipeline in lib.rs.
             // Packaged prompt text is applied only after executor JSON exists, via post_result_for_translated_command().
@@ -209,15 +194,11 @@ pub fn get_packaged_command_body(command_name: &str) -> &'static str {
     translated_command_body(command_name).unwrap_or("")
 }
 
-fn strict_instructions(body: &str) -> String {
-    format!("{CURRENT_TURN_PRIORITY_DIRECTIVE}\n\n{STRICT_INSTRUCTION_DIRECTIVE}\n\n{body}")
-}
-
-fn command_body_instructions(body: &str) -> String {
+fn command_body_for_history(body: &str) -> String {
     if is_skill_body(body) {
         rewrite_base_directory_line(body)
     } else {
-        format!("{COMPLETE_COMMAND_BODY_DIRECTIVE}\n\n{body}")
+        body.to_string()
     }
 }
 

@@ -13,6 +13,9 @@ use std::collections::HashMap;
 const WEB_SEARCH_SOURCES_INCLUDE: &str = "web_search_call.action.sources";
 const ANTHROPIC_WEB_SEARCH_TYPE: &str = "web_search_20250305";
 const OPENAI_WEB_SEARCH_TYPE: &str = "web_search";
+const READ_TOOL_LINE_NUMBER_DIRECTIVE: &str = "When calling Read, offset and limit must be JSON whole-number integers written in normal base-10 decimal digits only, such as 1, 250, or 1250. Never use decimals, floats, exponents, or scientific notation. Omit offset unless you are copying an exact line number from prior tool output.";
+const READ_OFFSET_DESCRIPTION: &str = "Line offset. Use only whole-number base-10 decimal digits like 1, 250, or 1250. Never use decimals, floats, exponents, or scientific notation. Omit unless you know the exact line number from prior tool output.";
+const READ_LIMIT_DESCRIPTION: &str = "Number of lines to read. Use only whole-number base-10 decimal digits like 100, 250, or 1250. Never use decimals, floats, exponents, or scientific notation.";
 
 pub struct TranslateResult {
     pub instructions: String,
@@ -68,10 +71,14 @@ pub fn translate_request_with_context(
     let base_instructions = extract_system_text(&req.system)
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "You are a helpful assistant.".to_string());
-    let instructions = if normalized.instruction_fragments.is_empty() {
+    let mut instruction_fragments = normalized.instruction_fragments;
+    if has_read_tool(&req.tools) {
+        instruction_fragments.push(READ_TOOL_LINE_NUMBER_DIRECTIVE.to_string());
+    }
+    let instructions = if instruction_fragments.is_empty() {
         base_instructions
     } else {
-        let mut instructions = normalized.instruction_fragments.join("\n\n");
+        let mut instructions = instruction_fragments.join("\n\n");
         instructions.push_str("\n\n");
         instructions.push_str(&base_instructions);
         instructions
@@ -538,14 +545,18 @@ fn tool_schema_parameters_for_backend(
 }
 
 fn apply_backend_tool_schema_policies(tool_name: &str, parameters: &mut serde_json::Value) {
-    if tool_name != "Agent" {
-        return;
-    }
-
     let Some(obj) = parameters.as_object_mut() else {
         return;
     };
 
+    match tool_name {
+        "Agent" => apply_agent_tool_schema_policy(obj),
+        "Read" => apply_read_tool_schema_policy(obj),
+        _ => {}
+    }
+}
+
+fn apply_agent_tool_schema_policy(obj: &mut serde_json::Map<String, serde_json::Value>) {
     if let Some(properties) = obj
         .get_mut("properties")
         .and_then(serde_json::Value::as_object_mut)
@@ -559,6 +570,41 @@ fn apply_backend_tool_schema_policies(tool_name: &str, parameters: &mut serde_js
     {
         required.retain(|field| field.as_str() != Some("isolation"));
     }
+}
+
+fn apply_read_tool_schema_policy(obj: &mut serde_json::Map<String, serde_json::Value>) {
+    let Some(properties) = obj
+        .get_mut("properties")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+
+    rewrite_read_integer_property(properties, "offset", READ_OFFSET_DESCRIPTION);
+    rewrite_read_integer_property(properties, "limit", READ_LIMIT_DESCRIPTION);
+}
+
+fn rewrite_read_integer_property(
+    properties: &mut serde_json::Map<String, serde_json::Value>,
+    property_name: &str,
+    description: &str,
+) {
+    let Some(property) = properties
+        .get_mut(property_name)
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+
+    property.insert(
+        "type".to_string(),
+        serde_json::Value::String("integer".to_string()),
+    );
+    property.insert("minimum".to_string(), serde_json::Value::Number(1.into()));
+    property.insert(
+        "description".to_string(),
+        serde_json::Value::String(description.to_string()),
+    );
 }
 
 fn normalize_json_schema_parameters(
@@ -591,6 +637,12 @@ fn normalize_json_schema_parameters(
         "required": required,
         "additionalProperties": additional
     }))
+}
+
+fn has_read_tool(tools: &[AnthropicToolDefinition]) -> bool {
+    tools
+        .iter()
+        .any(|tool| tool.tool_type.is_none() && tool.name == "Read")
 }
 
 fn translate_tool_choice(tool_choice: Option<&serde_json::Value>) -> String {
@@ -1699,6 +1751,85 @@ mod tests {
                 .get("additionalProperties")
                 .and_then(serde_json::Value::as_bool),
             Some(false)
+        );
+    }
+
+    #[test]
+    fn read_tool_schema_enforces_decimal_integer_line_numbers() {
+        let mut req = base_req();
+        req.tools.push(AnthropicToolDefinition {
+            name: "Read".to_string(),
+            tool_type: None,
+            description: Some("Read a file from disk".to_string()),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "file_path": { "type": "string" },
+                    "offset": { "type": "number", "description": "Line offset" },
+                    "limit": { "type": "number", "description": "Line count" }
+                },
+                "required": ["file_path"]
+            }),
+            allowed_domains: Vec::new(),
+            blocked_domains: Vec::new(),
+            max_uses: None,
+            extra: std::collections::BTreeMap::new(),
+        });
+
+        let translated = translate_request(&req).expect("translate");
+        let parameters = translated.tools[0].get("parameters").expect("parameters");
+        let properties = parameters
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .expect("properties object");
+        let offset = properties
+            .get("offset")
+            .and_then(serde_json::Value::as_object)
+            .expect("offset object");
+        let limit = properties
+            .get("limit")
+            .and_then(serde_json::Value::as_object)
+            .expect("limit object");
+
+        assert_eq!(
+            offset.get("type").and_then(|value| value.as_str()),
+            Some("integer")
+        );
+        assert_eq!(
+            limit.get("type").and_then(|value| value.as_str()),
+            Some("integer")
+        );
+        assert_eq!(
+            offset.get("minimum").and_then(serde_json::Value::as_i64),
+            Some(1)
+        );
+        assert_eq!(
+            limit.get("minimum").and_then(serde_json::Value::as_i64),
+            Some(1)
+        );
+        assert!(
+            offset
+                .get("description")
+                .and_then(|value| value.as_str())
+                .is_some_and(|description| {
+                    description.contains("base-10 decimal digits")
+                        && description.contains("scientific notation")
+                })
+        );
+        assert!(
+            limit
+                .get("description")
+                .and_then(|value| value.as_str())
+                .is_some_and(|description| {
+                    description.contains("base-10 decimal digits")
+                        && description.contains("scientific notation")
+                })
+        );
+        assert!(
+            translated
+                .instructions
+                .contains("When calling Read, offset and limit must be JSON whole-number integers")
         );
     }
 

@@ -129,9 +129,11 @@ Minimal example:
 version: 1
 providers:
   openai:
-    default_model: gpt-5.4
+    default_model: gpt-5.6-sol
     unsupported_models:
       - gpt-5.2
+      - gpt-5.3-codex
+      - gpt-5.4
 workflow:
   fast_mode: false
   claude_code:
@@ -149,6 +151,8 @@ YAML fields use code defaults. The packaged Homebrew config can still choose dif
 
 The companion `~/.claude_gateway/settings.json` file is the source of truth for the model catalog returned by
 `GET /v1/models`. The gateway reads that file locally instead of calling `api.openai.com/v1/models`.
+The packaged settings map Claude Code's `haiku`, `sonnet`, `opus`, and `fable` aliases to Gateway-served
+OpenAI model IDs through `ANTHROPIC_DEFAULT_*_MODEL` environment variables.
 
 ### Root config
 
@@ -163,11 +167,13 @@ The companion `~/.claude_gateway/settings.json` file is the source of truth for 
 | No | Config                                | Value / example             | Behavior                                                                                      | How to choose                                                                                    |
 |----|---------------------------------------|-----------------------------|-----------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------|
 | 1  | `providers.openai.default_model`      | Purpose                     | Backend model used when a requested model is listed in `providers.openai.unsupported_models`. | This is the compatibility fallback, not a general model alias system.                            |
-|    |                                       | `gpt-5.4`                   | Uses the standard backend model as the fallback.                                              | Use when quality/default behavior matters more than cost.                                        |
-|    |                                       | `gpt-5.4-mini`              | Uses a cheaper/smaller backend model as the fallback.                                         | Use only if unsupported aliases should intentionally fall back to a lower-cost model.            |
+|    |                                       | `gpt-5.6-sol`               | Uses the current flagship backend model as the fallback.                                      | Use when quality/default behavior matters more than cost.                                        |
+|    |                                       | `gpt-5.6-terra`             | Uses the balanced everyday backend model as the fallback.                                     | Use when you want strong quality without paying for the flagship every time.                     |
+|    |                                       | `gpt-5.5`                   | Uses the previous-generation frontier model as the fallback.                                   | Use when you want a familiar, conservative default that is still strong.                         |
+|    |                                       | `gpt-5.6-luna`              | Uses the fastest backend model as the fallback.                                                | Use only if you want lower latency and lower cost over raw capability.                            |
 | 2  | `providers.openai.unsupported_models` | Purpose                     | Requested model names in this list are rewritten to `providers.openai.default_model`.         | Add only model IDs that the backend rejects or that you intentionally want centrally redirected. |
 |    |                                       | `[]`                        | No compatibility rewrites.                                                                    | Use only when every Claude Code model name you send is accepted by the backend.                  |
-|    |                                       | `[gpt-5.2]`                 | Requests for `gpt-5.2` are sent as `default_model` instead.                                   | This is the code default.                                                                        |
+|    |                                       | `[gpt-5.2, gpt-5.3-codex, gpt-5.4]` | Requests for deprecated or rejected models are sent as `default_model` instead.                 | This is the code default.                                                                        |
 |    |                                       | `[gpt-5.2, some-old-alias]` | Multiple requested names are rewritten to `default_model`.                                    | Use during migrations from old client-side model names.                                          |
 
 ### `workflow`
@@ -288,6 +294,33 @@ The companion `~/.claude_gateway/settings.json` file is the source of truth for 
 | 9  | `CLD_GATEWAY_AUTH_PORT`                | Purpose                             | Preferred local OAuth callback port during login.                                                                                    | If unavailable, login falls back to port `1457`.                                                    |
 |    |                                        | unset                               | Uses preferred port `1455`, then fallback `1457`.                                                                                    | Normal setup.                                                                                       |
 |    |                                        | `1456` or `18080`                   | Tries that port first, then falls back to `1457` if busy.                                                                            | Use when `1455` conflicts with another local service.                                               |
+
+---
+
+## Conversation-state config
+
+Gateway conversation-state persistence and incremental transport are controlled through YAML config. Example:
+
+```yaml
+workflow:
+  conversation_state:
+    enabled: true
+    persistence_root: /Users/me/.gateway/sessions/claudecode
+    corruption_policy: fail_closed
+    retention:
+      max_session_age_days: 14
+providers:
+  openai:
+    incremental_transport:
+      mode: auto
+```
+
+Notes:
+- `workflow.conversation_state.enabled` defaults to `true` when omitted.
+- `workflow.conversation_state.corruption_policy` defaults to `fail_closed`.
+- `retention.max_session_age_days` is optional and disabled by default.
+- If retention is enabled, Gateway removes entire expired Claude session buckets at startup based on `session.json.updated_at_unix_seconds`.
+- `providers.openai.incremental_transport.mode` defaults to `auto` and supports `auto`, `always_full`, and `require_delta`.
 
 ---
 

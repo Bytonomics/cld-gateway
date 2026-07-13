@@ -13,6 +13,7 @@ futures-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_path_to_error.workspace = true
+sha2.workspace = true
 tracing.workspace = true
 gateway-auth-codex = { path = "../gateway-auth-codex" }
 gateway-backend-codex = { path = "../gateway-backend-codex" }

@@ -23,6 +23,8 @@ pub struct CodexBackendRequest {
     pub text: Option<serde_json::Value>,
     /// Optional reasoning controls (best-effort; backend-specific).
     pub reasoning: Option<serde_json::Value>,
+    /// Optional previous response checkpoint for incremental transport.
+    pub previous_response_id: Option<String>,
     /// Required by the Codex backend contract: must be `false`.
     pub store: bool,
     /// If true, request a streaming SSE response.
@@ -44,8 +46,10 @@ pub struct CodexBackendResponse {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexUnaryDecoded {
     pub final_text: String,
+    pub response_id: Option<String>,
     pub backend_model: Option<String>,
     pub token_usage: Option<CodexTokenUsage>,
+    pub output_items: Vec<serde_json::Value>,
     pub tool_calls: Vec<CodexToolCall>,
 }
 

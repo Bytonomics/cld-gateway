@@ -686,6 +686,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_path_to_error",
+ "sha2",
  "tokio",
  "tower",
  "tracing",
@@ -729,8 +730,13 @@ name = "gateway-state"
 version = "0.1.5"
 dependencies = [
  "dirs",
+ "gateway-core",
  "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
  "thiserror",
+ "uuid",
 ]
 
 [[package]]

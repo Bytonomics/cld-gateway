@@ -312,6 +312,12 @@ fn build_request_body(req: &CodexBackendRequest) -> serde_json::Value {
     if let Some(text) = req.text.clone() {
         obj.insert("text".to_string(), text);
     }
+    if let Some(previous_response_id) = req.previous_response_id.as_ref() {
+        obj.insert(
+            "previous_response_id".to_string(),
+            serde_json::Value::String(previous_response_id.clone()),
+        );
+    }
     // Backend contract: must be explicitly false.
     obj.insert("store".to_string(), serde_json::Value::Bool(req.store));
     // Backend returns SSE when stream=true.

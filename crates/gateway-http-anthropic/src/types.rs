@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AnthropicMessagesRequest {
     pub model: String,
     pub messages: Vec<AnthropicMessage>,
@@ -32,13 +32,13 @@ pub struct AnthropicMessagesRequest {
     pub output_config: Option<AnthropicOutputConfig>,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AnthropicContextManagement {
     #[serde(default)]
     pub edits: Vec<AnthropicContextEdit>,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AnthropicContextEdit {
     #[serde(rename = "type")]
     pub edit_type: String,
@@ -54,14 +54,14 @@ pub struct AnthropicContextEdit {
     pub clear_tool_inputs: bool,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AnthropicContextThreshold {
     #[serde(rename = "type")]
     pub threshold_type: String,
     pub value: u64,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AnthropicOutputConfig {
     #[serde(default)]
     pub effort: Option<String>,
@@ -69,7 +69,7 @@ pub struct AnthropicOutputConfig {
     pub format: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AnthropicToolDefinition {
     pub name: String,
     #[serde(rename = "type", default)]
@@ -88,7 +88,7 @@ pub struct AnthropicToolDefinition {
     pub extra: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AnthropicSystemBlock {
     #[serde(rename = "type")]
     pub block_type: String,
@@ -96,20 +96,20 @@ pub struct AnthropicSystemBlock {
     pub text: Option<String>,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AnthropicMessage {
     pub role: String,
     pub content: AnthropicContent,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(untagged)]
 pub enum AnthropicContent {
     Text(String),
     Blocks(Vec<AnthropicContentBlock>),
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AnthropicContentBlock {
     #[serde(rename = "type")]
     pub block_type: String,
@@ -143,7 +143,7 @@ pub struct AnthropicContentBlock {
     pub extra: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AnthropicImageSource {
     #[serde(rename = "type")]
     pub source_type: String,

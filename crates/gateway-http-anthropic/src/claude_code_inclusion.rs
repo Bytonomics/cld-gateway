@@ -46,6 +46,11 @@ const INTERNAL_COMMANDS: &[InternalCommandSpec] = &[
         stdout_markers: &[],
     },
     InternalCommandSpec {
+        name: "compact",
+        classification: InternalCommandClassification::LocalOnly,
+        stdout_markers: &["Compacted"],
+    },
+    InternalCommandSpec {
         name: "effort",
         classification: InternalCommandClassification::LocalOnly,
         stdout_markers: &[],

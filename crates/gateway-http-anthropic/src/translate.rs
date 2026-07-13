@@ -67,10 +67,16 @@ pub fn translate_request_with_context(
     req: &AnthropicMessagesRequest,
     tool_context: &ToolTranslationContext,
 ) -> Result<TranslateResult, String> {
-    let normalized = normalize_claude_code_context(&req.messages, &tool_context.claude_code_config);
-    let base_instructions = extract_system_text(&req.system)
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "You are a helpful assistant.".to_string());
+    let normalized =
+        normalize_claude_code_context(&req.system, &req.messages, &tool_context.claude_code_config);
+    let mut messages = normalized.messages;
+    let turn_system_instructions = extract_turn_system_text_and_filter(&mut messages);
+    let base_instructions = combine_instruction_parts(
+        extract_system_text(&normalized.system),
+        turn_system_instructions,
+    )
+    .filter(|s| !s.trim().is_empty())
+    .unwrap_or_else(|| "You are a helpful assistant.".to_string());
     let mut instruction_fragments = normalized.instruction_fragments;
     if has_read_tool(&req.tools) {
         instruction_fragments.push(READ_TOOL_LINE_NUMBER_DIRECTIVE.to_string());
@@ -83,7 +89,7 @@ pub fn translate_request_with_context(
         instructions.push_str(&base_instructions);
         instructions
     };
-    let input = translate_messages_to_backend_items(&normalized.messages, tool_context)?;
+    let input = translate_messages_to_backend_items(&messages, tool_context)?;
     let hosted_web_search = req
         .tools
         .iter()
@@ -180,6 +186,62 @@ pub fn extract_system_text(system: &[AnthropicSystemBlock]) -> Option<String> {
     } else {
         Some(parts.join("\n\n"))
     }
+}
+
+fn combine_instruction_parts(
+    parts: impl IntoIterator<Item = String>,
+    appended_parts: Vec<String>,
+) -> Option<String> {
+    let parts: Vec<String> = parts
+        .into_iter()
+        .chain(appended_parts)
+        .map(|part| part.trim().to_string())
+        .filter(|part| !part.is_empty())
+        .collect();
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n\n"))
+    }
+}
+
+fn extract_turn_system_text_and_filter(messages: &mut Vec<AnthropicMessage>) -> Vec<String> {
+    let mut instruction_parts = Vec::new();
+    messages.retain(|message| {
+        if !message.role.eq_ignore_ascii_case("system") {
+            return true;
+        }
+        if let Some(text) = message_text_for_instructions(message) {
+            instruction_parts.push(text);
+        }
+        false
+    });
+    instruction_parts
+}
+
+fn message_text_for_instructions(message: &AnthropicMessage) -> Option<String> {
+    match &message.content {
+        AnthropicContent::Text(text) => non_empty_instruction_text(text),
+        AnthropicContent::Blocks(blocks) => {
+            let parts: Vec<String> = blocks
+                .iter()
+                .filter(|block| block.block_type == "text")
+                .filter_map(|block| block.text.as_deref())
+                .filter_map(non_empty_instruction_text)
+                .collect();
+            if parts.is_empty() {
+                None
+            } else {
+                Some(parts.join("\n\n"))
+            }
+        }
+    }
+}
+
+fn non_empty_instruction_text(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 fn translate_messages_to_backend_items(
@@ -777,6 +839,59 @@ mod tests {
                 .starts_with("Follow the prompt coming with this instruction")
         );
         assert!(input.contains("explain the current diff"));
+    }
+
+    #[test]
+    fn turn_level_system_messages_are_promoted_to_instructions() {
+        let mut req = base_req();
+        req.system.push(AnthropicSystemBlock {
+            block_type: "text".to_string(),
+            text: Some("Top-level system prompt.".to_string()),
+        });
+        req.messages.push(AnthropicMessage {
+            role: "system".to_string(),
+            content: AnthropicContent::Text("Turn-level system prompt.".to_string()),
+        });
+        req.messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Text("Handle the current task.".to_string()),
+        });
+
+        let translated = translate_request(&req).expect("translate");
+        let input = serialized_input(&translated);
+
+        assert!(translated.instructions.contains("Top-level system prompt."));
+        assert!(
+            translated
+                .instructions
+                .contains("Turn-level system prompt.")
+        );
+        assert!(input.contains("Handle the current task."));
+        assert!(!input.contains("\"role\":\"system\""));
+        assert!(!input.contains("Turn-level system prompt."));
+    }
+
+    #[test]
+    fn turn_level_system_block_text_is_promoted_and_removed_from_input() {
+        let mut req = base_req();
+        req.messages.push(AnthropicMessage {
+            role: "system".to_string(),
+            content: AnthropicContent::Blocks(vec![
+                test_text_block("First turn-level system block."),
+                test_text_block("Second turn-level system block."),
+            ]),
+        });
+
+        let translated = translate_request(&req).expect("translate");
+        let input = serialized_input(&translated);
+
+        assert!(
+            translated
+                .instructions
+                .contains("First turn-level system block.\n\nSecond turn-level system block.")
+        );
+        assert!(!input.contains("\"role\":\"system\""));
+        assert!(!input.contains("turn-level system block"));
     }
 
     #[test]

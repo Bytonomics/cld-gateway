@@ -2,19 +2,24 @@
   "includeCoAuthoredBy": false,
   "models": [
     {
-      "id": "gpt-5.4-mini",
-      "name": "GPT-5.4 Mini",
-      "description": "OpenAI small/fallback model"
+      "id": "gpt-5.6-sol",
+      "name": "GPT-5.6 Sol",
+      "description": "OpenAI flagship coding model"
     },
     {
-      "id": "gpt-5.4",
-      "name": "GPT-5.4",
-      "description": "OpenAI general-purpose model"
+      "id": "gpt-5.6-terra",
+      "name": "GPT-5.6 Terra",
+      "description": "OpenAI balanced everyday model"
     },
     {
       "id": "gpt-5.5",
       "name": "GPT-5.5",
-      "description": "OpenAI reasoning model"
+      "description": "OpenAI previous-generation frontier model"
+    },
+    {
+      "id": "gpt-5.6-luna",
+      "name": "GPT-5.6 Luna",
+      "description": "OpenAI fast, affordable model"
     },
     {
       "id": "gpt-5.3-codex-spark",
@@ -25,9 +30,12 @@
   "env": {
     "ANTHROPIC_BASE_URL": "http://127.0.0.1:6473",
     "ANTHROPIC_AUTH_TOKEN": "dummy",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "gpt-5.4-mini",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL": "gpt-5.4",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL": "gpt-5.5",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "gpt-5.6-luna",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "gpt-5.5",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "gpt-5.6-terra",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL": "gpt-5.6-sol",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME": "GPT-5.6 Sol",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION": "OpenAI flagship coding model via Gateway",
     "DISABLE_TELEMETRY": "1",
     "ANTHROPIC_DEFAULT_HAIKU_MAX_TOKENS": 360000,
     "ANTHROPIC_DEFAULT_SONNET_MAX_TOKENS": 945000,

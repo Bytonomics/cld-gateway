@@ -2,7 +2,7 @@ use crate::claude_code_inclusion::{
     ClaudeCodeCommandClassification, CommandEnvelope, apply_conversation_inclusion_policy,
     classify_claude_code_command, parse_command_envelope,
 };
-use crate::types::{AnthropicContent, AnthropicMessage};
+use crate::types::{AnthropicContent, AnthropicMessage, AnthropicSystemBlock};
 use gateway_core::config::{ClaudeCodeSlashCommandMode, ClaudeCodeWorkflowConfig};
 use std::collections::HashMap;
 
@@ -18,15 +18,18 @@ const TRANSLATED_COMMAND_BODIES: &[(&str, &str)] = &[("status", PACKAGED_CODEX_S
 
 #[derive(Debug, Clone)]
 pub(crate) struct NormalizedClaudeCodeContext {
+    pub(crate) system: Vec<AnthropicSystemBlock>,
     pub(crate) messages: Vec<AnthropicMessage>,
     pub(crate) instruction_fragments: Vec<String>,
     pub(crate) client_metadata: HashMap<String, String>,
 }
 
 pub(crate) fn normalize_claude_code_context(
+    system: &[AnthropicSystemBlock],
     messages: &[AnthropicMessage],
     config: &ClaudeCodeWorkflowConfig,
 ) -> NormalizedClaudeCodeContext {
+    let system = system.to_vec();
     let mut normalized = messages.to_vec();
     let mut instruction_fragments = Vec::new();
     let mut client_metadata = HashMap::new();
@@ -46,6 +49,7 @@ pub(crate) fn normalize_claude_code_context(
     }
 
     NormalizedClaudeCodeContext {
+        system,
         messages: normalized,
         instruction_fragments,
         client_metadata,

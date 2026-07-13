@@ -24,6 +24,7 @@ pub struct WorkflowConfig {
     pub fast_mode: bool,
     pub context_management: ContextManagementConfig,
     pub claude_code: ClaudeCodeWorkflowConfig,
+    pub conversation_state: ConversationStateConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -77,6 +78,29 @@ pub struct ProviderConfigs {
     pub openai: OpenAiProviderConfig,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ConversationStateConfig {
+    pub enabled: bool,
+    pub persistence_root: Option<PathBuf>,
+    pub corruption_policy: ConversationStateCorruptionPolicy,
+    pub retention: ConversationStateRetentionConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct ConversationStateRetentionConfig {
+    pub max_session_age_days: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationStateCorruptionPolicy {
+    #[default]
+    FailClosed,
+    QuarantineAndReset,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct NetworkConfig {
@@ -92,6 +116,22 @@ pub struct OpenAiProviderConfig {
     pub default_model: String,
     #[serde(default = "default_unsupported_models")]
     pub unsupported_models: Vec<String>,
+    pub incremental_transport: OpenAiIncrementalTransportConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct OpenAiIncrementalTransportConfig {
+    pub mode: OpenAiIncrementalTransportMode,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenAiIncrementalTransportMode {
+    #[default]
+    Auto,
+    AlwaysFull,
+    RequireDelta,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -155,6 +195,18 @@ impl Default for OpenAiProviderConfig {
         Self {
             default_model: default_openai_model(),
             unsupported_models: default_unsupported_models(),
+            incremental_transport: OpenAiIncrementalTransportConfig::default(),
+        }
+    }
+}
+
+impl Default for ConversationStateConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            persistence_root: None,
+            corruption_policy: ConversationStateCorruptionPolicy::FailClosed,
+            retention: ConversationStateRetentionConfig::default(),
         }
     }
 }
@@ -261,6 +313,79 @@ pub fn service_tier_for_config(config: &GatewayConfig) -> Option<String> {
 }
 
 #[cfg(test)]
+mod conversation_state_tests {
+    use super::*;
+
+    #[test]
+    fn conversation_state_defaults_to_enabled() {
+        let config = GatewayConfig::default();
+        assert!(config.workflow.conversation_state.enabled);
+        assert_eq!(
+            config.workflow.conversation_state.corruption_policy,
+            ConversationStateCorruptionPolicy::FailClosed
+        );
+        assert_eq!(
+            config
+                .workflow
+                .conversation_state
+                .retention
+                .max_session_age_days,
+            None
+        );
+        assert_eq!(
+            config.providers.openai.incremental_transport.mode,
+            OpenAiIncrementalTransportMode::Auto
+        );
+    }
+
+    #[test]
+    fn parses_conversation_state_and_incremental_transport_config() {
+        let raw = r"
+version: 1
+workflow:
+  conversation_state:
+    enabled: true
+    persistence_root: /tmp/gateway-state
+    corruption_policy: quarantine_and_reset
+    retention:
+      max_session_age_days: 14
+providers:
+  openai:
+    default_model: gpt-5.6-sol
+    unsupported_models: []
+    incremental_transport:
+      mode: require_delta
+network:
+  listen_addr: 127.0.0.1:8080
+  allowed_hosts: []
+";
+
+        let parsed: GatewayConfig = serde_yaml::from_str(raw).expect("parse config");
+        assert!(parsed.workflow.conversation_state.enabled);
+        assert_eq!(
+            parsed.workflow.conversation_state.persistence_root,
+            Some(PathBuf::from("/tmp/gateway-state"))
+        );
+        assert_eq!(
+            parsed.workflow.conversation_state.corruption_policy,
+            ConversationStateCorruptionPolicy::QuarantineAndReset
+        );
+        assert_eq!(
+            parsed
+                .workflow
+                .conversation_state
+                .retention
+                .max_session_age_days,
+            Some(14)
+        );
+        assert_eq!(
+            parsed.providers.openai.incremental_transport.mode,
+            OpenAiIncrementalTransportMode::RequireDelta
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -332,7 +457,11 @@ mod tests {
         assert_eq!(config.providers.openai.default_model, DEFAULT_BACKEND_MODEL);
         assert_eq!(
             config.providers.openai.unsupported_models,
-            vec!["gpt-5.2".to_string()]
+            vec![
+                "gpt-5.2".to_string(),
+                "gpt-5.3-codex".to_string(),
+                "gpt-5.4".to_string()
+            ]
         );
     }
 
@@ -348,6 +477,7 @@ mod tests {
                 openai: OpenAiProviderConfig {
                     default_model: "gpt-test-default".to_string(),
                     unsupported_models: vec!["gpt-test-old".to_string()],
+                    incremental_transport: OpenAiIncrementalTransportConfig::default(),
                 },
             },
             ..GatewayConfig::default()
@@ -383,7 +513,11 @@ mod tests {
         assert_eq!(config.providers.openai.default_model, "gpt-test-default");
         assert_eq!(
             config.providers.openai.unsupported_models,
-            vec!["gpt-5.2".to_string()]
+            vec![
+                "gpt-5.2".to_string(),
+                "gpt-5.3-codex".to_string(),
+                "gpt-5.4".to_string()
+            ]
         );
         std::fs::remove_file(path).expect("remove config");
     }
@@ -529,6 +663,7 @@ mod tests {
                 openai: OpenAiProviderConfig {
                     default_model: "gpt-test-default".to_string(),
                     unsupported_models: vec!["gpt-test-old".to_string()],
+                    incremental_transport: OpenAiIncrementalTransportConfig::default(),
                 },
             },
             ..GatewayConfig::default()

@@ -51,7 +51,10 @@ where
     let mut fallback_text: Option<String> = None;
     let mut saw_output_text_delta = false;
     let mut tool_calls: Vec<CodexToolCall> = Vec::new();
+    let mut output_items: Vec<serde_json::Value> = Vec::new();
+    let mut output_item_fingerprints = BTreeSet::new();
     let mut last_usage: Option<CodexTokenUsage> = None;
+    let mut last_response_id: Option<String> = None;
     let mut web_search_call_ids = BTreeSet::new();
     let mut seen_events = Vec::new();
 
@@ -78,6 +81,9 @@ where
         {
             last_usage = Some(usage);
         }
+        if event.event == "response.completed" {
+            last_response_id = extract_response_id_from_completed_event(data);
+        }
         record_completed_web_search_call_ids(&mut web_search_call_ids, &event.event, data);
         match event.event.as_str() {
             "response.output_text.delta" => {
@@ -92,6 +98,12 @@ where
                 }
             }
             "response.output_item.added" | "response.output_item.done" => {
+                collect_output_item(
+                    &mut output_items,
+                    &mut output_item_fingerprints,
+                    &event.event,
+                    data,
+                );
                 if let Some(tool_call) = parse_output_item_tool_call(&event.event, data) {
                     upsert_tool_call(&mut tool_calls, tool_call);
                 }
@@ -102,6 +114,13 @@ where
                 }
             }
             _ => {
+                if event.event == "response.completed" {
+                    collect_completed_output_items(
+                        &mut output_items,
+                        &mut output_item_fingerprints,
+                        data,
+                    );
+                }
                 if !is_tool_input_delta_event(&event.event)
                     && event.event != "response.completed"
                     && let Some(text) = extract_text_from_data(data)
@@ -126,8 +145,10 @@ where
 
     Ok(CodexUnaryDecoded {
         final_text,
+        response_id: last_response_id,
         backend_model: None,
         token_usage: last_usage,
+        output_items,
         tool_calls,
     })
 }
@@ -146,6 +167,8 @@ struct CompletedEnvelope {
 
 #[derive(Debug, Deserialize)]
 struct CompletedResponse {
+    #[serde(default)]
+    id: Option<String>,
     usage: Option<CompletedUsage>,
 }
 
@@ -192,6 +215,13 @@ pub fn extract_usage_from_completed_event(data: &str) -> Option<CodexTokenUsage>
         total_tokens,
         web_search_requests: 0,
     })
+}
+
+#[must_use]
+pub fn extract_response_id_from_completed_event(data: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(data).ok()?;
+    let env: CompletedEnvelope = serde_json::from_value(value).ok()?;
+    env.response?.id
 }
 
 pub fn record_completed_web_search_call_ids(
@@ -311,6 +341,57 @@ fn upsert_tool_call(tool_calls: &mut Vec<CodexToolCall>, tool_call: CodexToolCal
     tool_calls.push(tool_call);
 }
 
+fn collect_output_item(
+    output_items: &mut Vec<serde_json::Value>,
+    fingerprints: &mut BTreeSet<String>,
+    event_name: &str,
+    data: &str,
+) {
+    if event_name != "response.output_item.done" {
+        return;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else {
+        return;
+    };
+    let Some(item) = value.get("item") else {
+        return;
+    };
+    append_unique_output_item(output_items, fingerprints, item.clone());
+}
+
+fn collect_completed_output_items(
+    output_items: &mut Vec<serde_json::Value>,
+    fingerprints: &mut BTreeSet<String>,
+    data: &str,
+) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else {
+        return;
+    };
+    let Some(items) = value
+        .get("response")
+        .and_then(|response| response.get("output"))
+        .and_then(serde_json::Value::as_array)
+    else {
+        return;
+    };
+    for item in items {
+        append_unique_output_item(output_items, fingerprints, item.clone());
+    }
+}
+
+fn append_unique_output_item(
+    output_items: &mut Vec<serde_json::Value>,
+    fingerprints: &mut BTreeSet<String>,
+    item: serde_json::Value,
+) {
+    let Ok(fingerprint) = serde_json::to_string(&item) else {
+        return;
+    };
+    if fingerprints.insert(fingerprint) {
+        output_items.push(item);
+    }
+}
+
 fn record_seen_event(seen_events: &mut Vec<String>, event_name: &str) {
     if seen_events.iter().any(|seen| seen == event_name) {
         return;
@@ -321,8 +402,8 @@ fn record_seen_event(seen_events: &mut Vec<String>, event_name: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        SseDecodeError, completed_web_search_call_ids, extract_usage_from_completed_event,
-        format_event_stream_error, read_sse_to_completion,
+        SseDecodeError, completed_web_search_call_ids, extract_response_id_from_completed_event,
+        extract_usage_from_completed_event, format_event_stream_error, read_sse_to_completion,
     };
     use crate::types::CodexToolCallKind;
     use bytes::Bytes;
@@ -366,6 +447,7 @@ mod tests {
         let byte_stream = stream::iter(vec![Ok::<Bytes, std::io::Error>(Bytes::from(sse))]);
         let decoded = read_sse_to_completion(byte_stream).await.unwrap();
         assert_eq!(decoded.final_text, "hello world");
+        assert_eq!(decoded.response_id, None);
     }
 
     #[tokio::test]
@@ -380,6 +462,14 @@ mod tests {
         let byte_stream = stream::iter(vec![Ok::<Bytes, std::io::Error>(Bytes::from(sse))]);
         let decoded = read_sse_to_completion(byte_stream).await.unwrap();
         assert_eq!(decoded.final_text, "message text");
+        assert_eq!(decoded.response_id, None);
+        assert_eq!(decoded.output_items.len(), 1);
+        assert_eq!(
+            decoded.output_items[0]
+                .get("type")
+                .and_then(serde_json::Value::as_str),
+            Some("message")
+        );
     }
 
     #[tokio::test]
@@ -443,6 +533,8 @@ mod tests {
         let byte_stream = stream::iter(vec![Ok::<Bytes, std::io::Error>(Bytes::from(sse))]);
         let decoded = read_sse_to_completion(byte_stream).await.unwrap();
         assert_eq!(decoded.final_text, "");
+        assert_eq!(decoded.response_id, None);
+        assert_eq!(decoded.output_items.len(), 1);
         assert_eq!(decoded.tool_calls.len(), 1);
         assert_eq!(decoded.tool_calls[0].kind, CodexToolCallKind::Function);
         assert_eq!(decoded.tool_calls[0].name, "Read");
@@ -516,8 +608,40 @@ mod tests {
         let byte_stream = stream::iter(vec![Ok::<Bytes, std::io::Error>(Bytes::from(sse))]);
         let decoded = read_sse_to_completion(byte_stream).await.unwrap();
         assert_eq!(decoded.final_text, "Search complete.");
+        assert_eq!(decoded.response_id, None);
+        assert_eq!(decoded.output_items.len(), 1);
         assert!(decoded.tool_calls.is_empty());
         assert_eq!(decoded.token_usage.expect("usage").web_search_requests, 1);
+    }
+
+    #[tokio::test]
+    async fn completed_output_items_are_captured_without_duplicates() {
+        let sse = concat!(
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"Read\",\"arguments\":\"{\\\"file_path\\\":\\\"/tmp/a.txt\\\"}\"}}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_123\",\"output\":[{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"Read\",\"arguments\":\"{\\\"file_path\\\":\\\"/tmp/a.txt\\\"}\"}],\"usage\":{\"input_tokens\":1,\"output_tokens\":0,\"total_tokens\":1}}}\n\n",
+        );
+
+        let byte_stream = stream::iter(vec![Ok::<Bytes, std::io::Error>(Bytes::from(sse))]);
+        let decoded = read_sse_to_completion(byte_stream).await.unwrap();
+        assert_eq!(decoded.response_id.as_deref(), Some("resp_123"));
+        assert_eq!(decoded.output_items.len(), 1);
+        assert_eq!(
+            decoded.output_items[0]
+                .get("type")
+                .and_then(serde_json::Value::as_str),
+            Some("function_call")
+        );
+    }
+
+    #[test]
+    fn response_id_extracts_from_completed_event() {
+        let json = r#"{"type":"response.completed","response":{"id":"resp_123","usage":{"input_tokens":3,"output_tokens":5}}}"#;
+        assert_eq!(
+            extract_response_id_from_completed_event(json).as_deref(),
+            Some("resp_123")
+        );
     }
 
     #[test]

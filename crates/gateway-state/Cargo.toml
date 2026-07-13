@@ -8,5 +8,12 @@ workspace = true
 
 [dependencies]
 dirs.workspace = true
+gateway-core = { path = "../gateway-core" }
+serde.workspace = true
+serde_json.workspace = true
 rusqlite = { version = "0.32", default-features = false, features = ["bundled"] }
 thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

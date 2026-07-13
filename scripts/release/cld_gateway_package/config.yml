@@ -51,11 +51,31 @@ workflow:
       enabled: true
       mode: promote_latest
 
+  conversation_state:
+    # Persist Claude Code session/branch state locally by default.
+    enabled: true
+
+    # Leave unset to use the default Gateway state path under GATEWAY_HOME.
+    # persistence_root: /Users/me/.gateway/sessions/claudecode
+
+    # fail_closed: reject unsafe persisted state reuse.
+    # quarantine_and_reset: move corrupted session state aside and rebuild live state.
+    corruption_policy: fail_closed
+
+    # Optional retention for entire Claude session buckets. Omit to disable cleanup.
+    retention: {}
+    # retention:
+    #   max_session_age_days: 14
+
 providers:
   openai:
-    default_model: gpt-5.4
+    default_model: gpt-5.6-sol
     unsupported_models:
       - gpt-5.2
+      - gpt-5.3-codex
+      - gpt-5.4
+    incremental_transport:
+      mode: auto
 
 network:
   listen_addr: 127.0.0.1:6473

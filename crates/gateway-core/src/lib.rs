@@ -7,8 +7,8 @@
 
 pub mod config;
 
-pub const DEFAULT_BACKEND_MODEL: &str = "gpt-5.4";
-pub const UNSUPPORTED_BACKEND_MODELS: &[&str] = &["gpt-5.2"];
+pub const DEFAULT_BACKEND_MODEL: &str = "gpt-5.6-sol";
+pub const UNSUPPORTED_BACKEND_MODELS: &[&str] = &["gpt-5.2", "gpt-5.3-codex", "gpt-5.4"];
 
 #[derive(Debug)]
 pub enum Error {

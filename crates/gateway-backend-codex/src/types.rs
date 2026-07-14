@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+use futures_util::stream::BoxStream;
 use gateway_core::Secret;
 use std::collections::HashMap;
 
@@ -42,6 +43,15 @@ pub struct CodexBackendResponse {
     pub status: u16,
     pub body: String,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexBackendEvent {
+    pub event: String,
+    pub data: String,
+}
+
+pub type CodexBackendEventStream =
+    BoxStream<'static, Result<CodexBackendEvent, crate::client::BackendError>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexUnaryDecoded {

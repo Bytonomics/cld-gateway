@@ -123,6 +123,22 @@ The workspace is organized as small crates with explicit â€œallowed/not allowedâ
 
 ### Auth + configuration locations
 
+- Developer mode (`cldc` / `clddc`):
+  - `cldc` is a shell alias for `claude --settings ~/.claude_codex/settings.json`.
+  - `clddc` is a shell alias for `cldc --dangerously-skip-permissions`.
+  - This path is for the cargo-run gateway on `http://127.0.0.1:8080`.
+  - Claude model aliases and the `/model` menu for this mode come from `~/.claude_codex/settings.json`.
+  - Runtime gateway config for cargo-run mode defaults to `~/.gateway/config-dev.yml` unless `GATEWAY_CONFIG_PATH` or `GATEWAY_HOME` is set.
+  - When changing model defaults, update `~/.claude_codex/settings.json` in addition to the release package settings.
+
+- Homebrew/package mode (`cldg` / `clddg`):
+  - `cldg` runs `claude --settings ~/.claude_gateway/settings.json`.
+  - `clddg` runs `cldg --dangerously-skip-permissions`.
+  - This path is for the packaged/Homebrew gateway on `http://127.0.0.1:6473`.
+  - Claude model aliases and the `/model` menu for this mode come from `~/.claude_gateway/settings.json`.
+  - Runtime gateway config for this mode is `~/.gateway/config.yml`.
+  - Packaged defaults live in `scripts/release/cld_gateway_package/settings.json` and `scripts/release/cld_gateway_package/config.yml`.
+
 - Gateway auth:
   - Default: `~/.gateway/auth.json`
   - Override via env:

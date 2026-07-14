@@ -3,7 +3,7 @@
 use crate::backend_error::parse_backend_failure_event;
 use crate::output_text::{extract_text_from_data, parse_output_item_message_texts};
 use crate::tool_calls::parse_output_item_tool_call;
-use crate::types::{CodexTokenUsage, CodexToolCall, CodexUnaryDecoded};
+use crate::types::{CodexBackendEvent, CodexTokenUsage, CodexToolCall, CodexUnaryDecoded};
 use bytes::Bytes;
 use eventsource_stream::EventStreamError;
 use eventsource_stream::Eventsource as _;
@@ -46,7 +46,33 @@ where
     S: Stream<Item = Result<Bytes, E>> + Send,
     E: Error + Send + Sync + 'static,
 {
-    let mut event_stream = Box::pin(byte_stream.eventsource());
+    let event_stream = byte_stream.eventsource().map(|item| {
+        item.map(|event| CodexBackendEvent {
+            event: event.event,
+            data: event.data,
+        })
+        .map_err(event_stream_decode_error)
+    });
+    read_backend_events_to_completion(event_stream).await
+}
+
+/// Read already-decoded backend events to completion and produce a single unary decoded value.
+///
+/// This is used by both HTTP/SSE and WebSocket transports so continuation mode cannot diverge from
+/// the established response decoder.
+///
+/// # Errors
+///
+/// Returns an error if the event stream fails, the backend reports an error event, or no text/tool
+/// output is found.
+pub async fn read_backend_events_to_completion<S, E>(
+    event_stream: S,
+) -> Result<CodexUnaryDecoded, SseDecodeError>
+where
+    S: Stream<Item = Result<CodexBackendEvent, E>> + Send,
+    E: Error + Send + Sync + 'static,
+{
+    let mut event_stream = Box::pin(event_stream);
     let mut final_text = String::new();
     let mut fallback_text: Option<String> = None;
     let mut saw_output_text_delta = false;
@@ -59,7 +85,7 @@ where
     let mut seen_events = Vec::new();
 
     while let Some(item) = event_stream.next().await {
-        let event = item.map_err(event_stream_decode_error)?;
+        let event = item.map_err(generic_event_stream_decode_error)?;
         let data = event.data.trim();
         record_seen_event(&mut seen_events, &event.event);
 
@@ -311,6 +337,17 @@ where
     E: Error + Send + Sync + 'static,
 {
     let message = format_event_stream_error(&source);
+    SseDecodeError::EventStream {
+        message,
+        source: Box::new(source),
+    }
+}
+
+fn generic_event_stream_decode_error<E>(source: E) -> SseDecodeError
+where
+    E: Error + Send + Sync + 'static,
+{
+    let message = format_error_chain(&source);
     SseDecodeError::EventStream {
         message,
         source: Box::new(source),

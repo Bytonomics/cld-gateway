@@ -128,7 +128,7 @@ async fn sends_service_tier_when_configured() {
 }
 
 #[tokio::test]
-async fn sends_previous_response_id_when_provided() {
+async fn http_request_omits_previous_response_id_when_provided() {
     if std::env::var("RUN_WIREMOCK").is_err() {
         return;
     }
@@ -144,7 +144,6 @@ async fn sends_previous_response_id_when_provided() {
             "tools": [],
             "tool_choice": "auto",
             "parallel_tool_calls": true,
-            "previous_response_id": "resp_123",
             "store": false,
             "stream": true,
             "include": []

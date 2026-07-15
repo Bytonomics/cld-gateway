@@ -523,6 +523,11 @@ async fn v1_messages(
         translated_preview.client_metadata.as_ref(),
     );
     log_conversation_branch_resolution(request_id.as_ref(), prepared_branch.as_ref());
+    if claude_session_id.is_some() && prepared_branch.is_none() {
+        return service_unavailable_error(
+            "Claude Code conversation requests require a WebSocket conversation-state branch",
+        );
+    }
     let render_req = prepared_branch.as_ref().map_or_else(
         || req.clone(),
         |prepared_branch| request_with_messages(&req, prepared_branch.active_messages.clone()),
@@ -894,7 +899,6 @@ fn request_compatibility_fingerprint(
         "text": translated.text,
         "reasoning": translated.reasoning,
         "include": translated.include,
-        "client_metadata": translated.client_metadata,
         "service_tier": service_tier_for_config(config),
         "incremental_transport_mode": config.providers.openai.incremental_transport.mode,
     });
@@ -1085,7 +1089,7 @@ async fn send_backend_stream_with_delta_fallback(
                     previous_response_id = ?attempted_previous_response_id,
                     error = %err,
                     fallback_reason = "delta_checkpoint_rejected",
-                    "backend rejected incremental checkpoint; retrying once with a full request"
+                    "backend rejected incremental checkpoint; retrying once with a full websocket baseline"
                 );
             } else {
                 warn!(
@@ -1094,7 +1098,7 @@ async fn send_backend_stream_with_delta_fallback(
                     previous_response_id = ?attempted_previous_response_id,
                     error = %err,
                     fallback_reason = "delta_checkpoint_rejected",
-                    "backend rejected incremental checkpoint; retrying once with a full request"
+                    "backend rejected incremental checkpoint; retrying once with a full websocket baseline"
                 );
             }
 
@@ -1106,6 +1110,71 @@ async fn send_backend_stream_with_delta_fallback(
             Ok((full_response, None))
         }
         Err(err) => Err(BackendRequestFailure::Backend(err)),
+    }
+}
+
+async fn send_backend_stream_for_streaming(
+    state: &AppState,
+    request_id: Option<String>,
+    prepared_branch: Option<&PreparedConversationBranch>,
+    backend_req: gateway_backend_codex::types::CodexBackendRequest,
+) -> Result<
+    (
+        gateway_backend_codex::types::CodexBackendEventStream,
+        Option<String>,
+    ),
+    BackendRequestFailure,
+> {
+    let retry_req = backend_req.clone();
+    let (mut events, effective_previous_response_id) = send_backend_stream_with_delta_fallback(
+        state,
+        request_id.clone(),
+        prepared_branch,
+        backend_req,
+    )
+    .await?;
+
+    let Some(first_item) = events.next().await else {
+        return Ok((events, effective_previous_response_id));
+    };
+
+    match first_item {
+        Ok(event)
+            if is_known_delta_failure_event(&event, effective_previous_response_id.as_deref()) =>
+        {
+            let retry_events = retry_full_after_delta_rejection(
+                state,
+                request_id,
+                prepared_branch,
+                retry_req,
+                effective_previous_response_id,
+            )
+            .await?;
+            Ok((retry_events, None))
+        }
+        Ok(event) => {
+            let prefixed = futures_util::stream::once(async move { Ok(event) })
+                .chain(events)
+                .boxed();
+            Ok((prefixed, effective_previous_response_id))
+        }
+        Err(err) if is_known_delta_rejection(&err, effective_previous_response_id.as_deref()) => {
+            let retry_events = retry_full_after_delta_rejection(
+                state,
+                request_id,
+                prepared_branch,
+                retry_req,
+                effective_previous_response_id,
+            )
+            .await?;
+            Ok((retry_events, None))
+        }
+        Err(err) => {
+            let prefixed = futures_util::stream::once(async move { Err(err) })
+                .chain(events)
+                .boxed();
+            Ok((prefixed, effective_previous_response_id))
+        }
     }
 }
 
@@ -1241,6 +1310,25 @@ fn is_known_delta_decode_rejection(
         &BackendError::UnexpectedStatusWithBody {
             status: 400,
             body: message.clone(),
+        },
+        attempted_previous_response_id,
+    )
+}
+
+fn is_known_delta_failure_event(
+    event: &gateway_backend_codex::types::CodexBackendEvent,
+    attempted_previous_response_id: Option<&str>,
+) -> bool {
+    let Some(message) = gateway_backend_codex::backend_error::parse_backend_failure_event(
+        &event.event,
+        &event.data,
+    ) else {
+        return false;
+    };
+    is_known_delta_rejection(
+        &BackendError::UnexpectedStatusWithBody {
+            status: 400,
+            body: message,
         },
         attempted_previous_response_id,
     )
@@ -1502,6 +1590,12 @@ async fn stream_messages(
         translated_preview.client_metadata.as_ref(),
     );
     log_conversation_branch_resolution(request_id.as_ref(), prepared_branch.as_ref());
+    if claude_session_id.is_some() && prepared_branch.is_none() {
+        return sse_error(
+            "service_unavailable_error",
+            "Claude Code conversation requests require a WebSocket conversation-state branch",
+        );
+    }
     let render_req = prepared_branch.as_ref().map_or_else(
         || req.clone(),
         |prepared_branch| request_with_messages(&req, prepared_branch.active_messages.clone()),
@@ -1632,7 +1726,7 @@ async fn stream_messages(
         request_previous_response_id.clone(),
     );
 
-    let backend_response = match send_backend_stream_with_delta_fallback(
+    let (backend_events, effective_previous_response_id) = match send_backend_stream_for_streaming(
         &state,
         request_id_str(request_id.as_ref()).map(ToString::to_string),
         prepared_branch.as_ref(),
@@ -1640,7 +1734,7 @@ async fn stream_messages(
     )
     .await
     {
-        Ok((events, _effective_previous_response_id)) => Ok(events),
+        Ok(response) => response,
         Err(err) => return backend_request_failure_to_sse(err),
     };
 
@@ -1672,46 +1766,19 @@ async fn stream_messages(
             fingerprints: prepared_branch.fingerprints.clone(),
             provider_model_fingerprint: resolution.selected_backend_model.clone(),
             request_compatibility_fingerprint: request_compatibility_fingerprint.clone(),
-            previous_response_id: request_previous_response_id.clone(),
+            previous_response_id: effective_previous_response_id.clone(),
             request_id: request_id_str(request_id.as_ref()).map(ToString::to_string),
         });
 
     let tail: futures_util::stream::BoxStream<'static, Result<Event, std::convert::Infallible>> =
-        match backend_response {
-            Ok(events) => backend_events_to_anthropic_events(
-                events,
-                state.conversation_state.clone(),
-                tool_calls,
-                rid_str,
-                context_management_report.response_value(),
-                stream_commit,
-            ),
-            Err(err) => {
-                match err {
-                    BackendError::AuthFailed { stage: _, message } => {
-                        return sse_auth_error(&message);
-                    }
-                    BackendError::UnexpectedStatusWithBody { status: 401, body } => {
-                        return sse_auth_error(&body);
-                    }
-                    BackendError::UnexpectedStatus(401) => {
-                        return sse_auth_error("Authentication failed");
-                    }
-                    _ => {}
-                }
-                let payload = serde_json::json!({
-                    "type": "error",
-                    "error": { "type": "upstream_error", "message": format!("{err}") }
-                })
-                .to_string();
-                Box::pin(futures_util::stream::iter([Ok::<
-                    Event,
-                    std::convert::Infallible,
-                >(
-                    Event::default().event("error").data(payload),
-                )]))
-            }
-        };
+        backend_events_to_anthropic_events(
+            backend_events,
+            state.conversation_state.clone(),
+            tool_calls,
+            rid_str,
+            context_management_report.response_value(),
+            stream_commit,
+        );
 
     let stream = initial.chain(tail).boxed();
     Sse::new(stream).keep_alive(KeepAlive::default())
@@ -1736,7 +1803,6 @@ enum ConversationPersistenceClass {
     DurableMain,
     ReadOnlySideTurn,
     TransientInternal,
-    TransientAmbiguous,
 }
 
 #[derive(Debug, Clone)]
@@ -1956,30 +2022,15 @@ fn prepare_conversation_branch(
     state: &AppState,
     claude_session_id: Option<&str>,
     req: &AnthropicMessagesRequest,
-    client_metadata: Option<&HashMap<String, String>>,
+    _client_metadata: Option<&HashMap<String, String>>,
 ) -> Option<PreparedConversationBranch> {
-    if !state.gateway_config.workflow.conversation_state.enabled {
-        return None;
-    }
     let claude_session_id = claude_session_id?;
-    if client_metadata
-        .is_some_and(|metadata| metadata.contains_key("claude_code_translated_slash_command"))
-    {
-        return None;
-    }
 
     let normalized = normalize_claude_code_context(
         &req.system,
         &req.messages,
         &state.gateway_config.workflow.claude_code,
     );
-    if normalized
-        .client_metadata
-        .get("gateway_conversation_inclusion")
-        .is_some_and(|mode| mode == "local_only")
-    {
-        return None;
-    }
     let compaction_command_seen = has_local_only_command(&normalized.client_metadata, "/compact");
     let turn_scope = match normalized
         .client_metadata
@@ -2038,16 +2089,19 @@ fn prepare_conversation_branch(
     }
 
     if !existing_branches.is_empty() {
-        return latest_context_branch.map(|branch| {
-            transient_prepared_branch(
-                claude_session_id,
-                branch,
-                ConversationPersistenceClass::TransientAmbiguous,
-                "no_common_prefix_with_existing_branches",
-                fingerprints,
-                normalized.messages.clone(),
-            )
-        });
+        return latest_context_branch
+            .or_else(|| latest_branch(&existing_branches))
+            .and_then(|branch| {
+                prepare_rebaseline_durable_branch(
+                    state,
+                    claude_session_id,
+                    branch,
+                    turn_scope,
+                    fingerprints,
+                    active_canonical_messages?,
+                    compaction_command_seen,
+                )
+            });
     }
 
     prepare_initial_durable_branch(
@@ -2057,6 +2111,43 @@ fn prepare_conversation_branch(
         fingerprints,
         active_canonical_messages?,
         compaction_command_seen,
+    )
+}
+
+fn prepare_rebaseline_durable_branch(
+    state: &AppState,
+    claude_session_id: &str,
+    branch: BranchMetadata,
+    turn_scope: ConversationTurnScope,
+    fingerprints: BranchFingerprintSet,
+    active_canonical_messages: serde_json::Value,
+    compaction_command_seen: bool,
+) -> Option<PreparedConversationBranch> {
+    let branch = apply_compaction_if_needed(
+        state,
+        claude_session_id,
+        branch,
+        &fingerprints,
+        compaction_command_seen,
+    )?;
+    let branch = state
+        .conversation_state
+        .reconcile_branch_snapshot(
+            claude_session_id,
+            &branch.branch_id,
+            &ReconcileSnapshotParams {
+                messages: active_canonical_messages,
+                fingerprints: fingerprints.clone(),
+            },
+        )
+        .ok()?;
+    durable_prepared_branch(
+        claude_session_id,
+        branch,
+        BranchSelectionAction::ContinuedExisting,
+        turn_scope,
+        "ambiguous_rebaseline_latest_branch",
+        fingerprints,
     )
 }
 
@@ -2302,6 +2393,13 @@ fn latest_checkpoint_branch(branches: &[BranchMetadata]) -> Option<BranchMetadat
     branches
         .iter()
         .filter(|branch| branch.openai_checkpoint.is_some())
+        .max_by_key(|branch| branch.updated_at_unix_seconds)
+        .cloned()
+}
+
+fn latest_branch(branches: &[BranchMetadata]) -> Option<BranchMetadata> {
+    branches
+        .iter()
         .max_by_key(|branch| branch.updated_at_unix_seconds)
         .cloned()
 }
@@ -2717,6 +2815,7 @@ fn auth_error(message: &str) -> axum::response::Response {
 mod messages_tests {
     use super::branch_fingerprints_from_messages;
     use super::build_tool_translation_context;
+    use super::prepare_conversation_branch;
     use super::request_compatibility_fingerprint;
     use super::tool_call_content_block;
     use super::translate::{
@@ -2736,6 +2835,7 @@ mod messages_tests {
         BranchCreateParams, BranchMetadata, CommitTurnParams, ConversationStateStore,
         ConversationTurnScope, ToolCallStore,
     };
+    use std::collections::HashMap;
     use tokio_tungstenite::tungstenite::Message;
     use tower::ServiceExt as _;
     use wiremock::matchers::{header, method, path};
@@ -3282,6 +3382,12 @@ mod messages_tests {
         mock.mount(server).await;
     }
 
+    async fn verify_ws(server: &WsMockServer) {
+        tokio::time::timeout(TEST_RESPONSE_TIMEOUT, server.verify())
+            .await
+            .expect("timed out waiting for websocket mock verification");
+    }
+
     fn function_tool_call_sse(
         call_id: &str,
         name: &str,
@@ -3567,19 +3673,24 @@ mod messages_tests {
         if let Some(claude_session_id) = claude_session_id {
             builder = builder.header("x-claude-code-session-id", claude_session_id);
         }
-        app.oneshot(builder.body(Body::from(req_body.to_string())).unwrap())
-            .await
-            .unwrap()
+        tokio::time::timeout(
+            TEST_RESPONSE_TIMEOUT,
+            app.oneshot(builder.body(Body::from(req_body.to_string())).unwrap()),
+        )
+        .await
+        .expect("timed out waiting for unary response")
+        .unwrap()
     }
 
-    async fn send_streaming_message(
+    async fn send_streaming_message_with_model(
         state: &super::AppState,
         claude_session_id: Option<&str>,
+        model: &str,
         messages: serde_json::Value,
     ) -> Vec<(String, serde_json::Value)> {
         let app = super::router(state.clone());
         let req_body = serde_json::json!({
-            "model": DEFAULT_BACKEND_MODEL,
+            "model": model,
             "stream": true,
             "messages": messages
         });
@@ -3591,11 +3702,28 @@ mod messages_tests {
         if let Some(claude_session_id) = claude_session_id {
             builder = builder.header("x-claude-code-session-id", claude_session_id);
         }
-        let res = app
-            .oneshot(builder.body(Body::from(req_body.to_string())).unwrap())
-            .await
-            .unwrap();
+        let res = tokio::time::timeout(
+            TEST_RESPONSE_TIMEOUT,
+            app.oneshot(builder.body(Body::from(req_body.to_string())).unwrap()),
+        )
+        .await
+        .expect("timed out waiting for streaming response")
+        .unwrap();
+        collect_streaming_response(res).await
+    }
 
+    async fn send_streaming_message(
+        state: &super::AppState,
+        claude_session_id: Option<&str>,
+        messages: serde_json::Value,
+    ) -> Vec<(String, serde_json::Value)> {
+        send_streaming_message_with_model(state, claude_session_id, DEFAULT_BACKEND_MODEL, messages)
+            .await
+    }
+
+    async fn collect_streaming_response(
+        res: axum::response::Response,
+    ) -> Vec<(String, serde_json::Value)> {
         assert!(
             res.status().is_success(),
             "expected successful SSE response"
@@ -4021,7 +4149,7 @@ mod messages_tests {
             serde_json::json!([{ "role": "user", "content": "hello" }]),
         )
         .await;
-        harness.ws_mock.verify().await;
+        verify_ws(&harness.ws_mock).await;
         assert_unary_text(&json, "hello from fallback");
         assert_branch_checkpoint(&harness.branch(), "resp_new", None);
     }
@@ -4051,7 +4179,7 @@ mod messages_tests {
             ]),
         )
         .await;
-        harness.ws_mock.verify().await;
+        verify_ws(&harness.ws_mock).await;
 
         assert_unary_text(&json, "hello after compaction");
         let branch = harness.branch();
@@ -4090,7 +4218,7 @@ mod messages_tests {
             ]),
         )
         .await;
-        harness.ws_mock.verify().await;
+        verify_ws(&harness.ws_mock).await;
 
         assert_unary_text(&json, "side answer");
 
@@ -4131,7 +4259,7 @@ mod messages_tests {
             ]),
         )
         .await;
-        harness.ws_mock.verify().await;
+        verify_ws(&harness.ws_mock).await;
 
         assert_unary_text(&json, "<block>no</block>");
         assert_eq!(harness.branch_count(), 1);
@@ -4145,7 +4273,7 @@ mod messages_tests {
     }
 
     #[tokio::test]
-    async fn ambiguous_unmatched_request_borrows_context_without_creating_branch() {
+    async fn ambiguous_unmatched_request_rebaselines_latest_branch_without_creating_branch() {
         if !wiremock_enabled() {
             return;
         }
@@ -4163,11 +4291,15 @@ mod messages_tests {
             serde_json::json!([{ "role": "user", "content": "Map project structure" }]),
         )
         .await;
-        harness.ws_mock.verify().await;
+        verify_ws(&harness.ws_mock).await;
 
         assert_unary_text(&json, "orthogonal answer");
         assert_eq!(harness.branch_count(), 1);
-        assert_branch_checkpoint(&harness.branch(), "resp_prev", Some("resp_seed"));
+        assert_branch_checkpoint(&harness.branch(), "resp_orthogonal", Some("resp_prev"));
+        assert_eq!(
+            harness.branch().active_canonical_messages,
+            Some(serde_json::json!([{ "role": "user", "content": "Map project structure" }]))
+        );
     }
 
     #[tokio::test]
@@ -4194,7 +4326,7 @@ mod messages_tests {
             messages.clone(),
         )
         .await;
-        harness.ws_mock.verify().await;
+        verify_ws(&harness.ws_mock).await;
         assert_unary_text(&first, "full mode answer");
 
         let restart_ws_mock = WsMockServer::start().await;
@@ -4213,7 +4345,7 @@ mod messages_tests {
             messages,
         )
         .await;
-        restart_ws_mock.verify().await;
+        verify_ws(&restart_ws_mock).await;
         assert_unary_text(&second, "full mode answer");
 
         assert_eq!(harness.branch_count(), 1);
@@ -4254,7 +4386,7 @@ mod messages_tests {
             ]),
         )
         .await;
-        harness.ws_mock.verify().await;
+        verify_ws(&harness.ws_mock).await;
 
         assert_unary_text(&json, "side answer");
         let branch = harness.branch();
@@ -4297,7 +4429,7 @@ mod messages_tests {
             messages.clone(),
         )
         .await;
-        harness.ws_mock.verify().await;
+        verify_ws(&harness.ws_mock).await;
 
         assert_unary_text(&json, "hello after full compaction");
         let branch = harness.branch();
@@ -4336,7 +4468,7 @@ mod messages_tests {
             serde_json::json!([{ "role": "user", "content": "hello" }]),
         )
         .await;
-        harness.ws_mock.verify().await;
+        verify_ws(&harness.ws_mock).await;
 
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
         let branch = harness.branch();
@@ -4373,7 +4505,7 @@ mod messages_tests {
             serde_json::json!([{ "role": "user", "content": "hello" }]),
         )
         .await;
-        harness.ws_mock.verify().await;
+        verify_ws(&harness.ws_mock).await;
 
         assert!(!events.is_empty(), "expected partial SSE events");
         let branch = harness.branch();
@@ -4530,7 +4662,7 @@ mod messages_tests {
             serde_json::json!([{ "role": "user", "content": "hello" }]),
         )
         .await;
-        harness.ws_mock.verify().await;
+        verify_ws(&harness.ws_mock).await;
 
         assert!(
             events.iter().any(|(event, _)| event == "message_stop"),
@@ -4543,6 +4675,47 @@ mod messages_tests {
             Some("resp_stream_next")
         );
         assert_branch_checkpoint(&branch, "resp_stream_next", Some("resp_prev"));
+    }
+
+    #[tokio::test]
+    async fn streaming_delta_rejection_rebaselines_over_websocket_and_commits_checkpoint() {
+        if !wiremock_enabled() {
+            return;
+        }
+        let harness = BranchRouteTestHarness::new("gateway_stream_delta_rebaseline").await;
+        mount_ws_response(
+            &harness.ws_mock,
+            PreviousResponseIdWsMatcher::some("resp_prev"),
+            vec![failed_websocket_event(
+                "previous_response_id resp_prev not found",
+            )],
+        )
+        .await;
+        mount_ws_response(
+            &harness.ws_mock,
+            PreviousResponseIdWsMatcher::none(),
+            success_websocket_events("hello after stream rebaseline", "resp_stream_rebaseline"),
+        )
+        .await;
+
+        let events = send_streaming_message(
+            harness.state(),
+            Some(harness.claude_session_id()),
+            serde_json::json!([{ "role": "user", "content": "hello" }]),
+        )
+        .await;
+        verify_ws(&harness.ws_mock).await;
+
+        assert!(
+            events.iter().any(|(_, data)| {
+                data.get("delta")
+                    .and_then(|delta| delta.get("text"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some("hello after stream rebaseline")
+            }),
+            "expected fallback response text in SSE stream"
+        );
+        assert_branch_checkpoint(&harness.branch(), "resp_stream_rebaseline", None);
     }
 
     #[tokio::test]
@@ -4716,6 +4889,104 @@ mod messages_tests {
         // The Mock::expect(1) above ensures this.
 
         let _ = std::fs::remove_file(&auth_path);
+    }
+
+    #[test]
+    fn status_command_prepares_conversation_branch_instead_of_skipping_state() {
+        let conversation_root =
+            std::env::temp_dir().join(format!("gateway_status_branch_{}", uuid::Uuid::new_v4()));
+        let claude_session_id = "session-1";
+        let (conversation_state, _branch_id) =
+            seed_incremental_branch(&conversation_root, claude_session_id);
+        let state = build_state_with_mode(
+            &url::Url::parse("ws://127.0.0.1:9").expect("url"),
+            std::path::Path::new("/tmp/nonexistent-auth.json"),
+            conversation_state,
+            OpenAiIncrementalTransportMode::Auto,
+        );
+        let req = AnthropicMessagesRequest {
+            model: DEFAULT_BACKEND_MODEL.to_string(),
+            messages: vec![AnthropicMessage {
+                role: "user".to_string(),
+                content: AnthropicContent::Text(
+                    "<command-message>status</command-message>\n<command-name>/status</command-name>\n<command-args></command-args>"
+                        .to_string(),
+                ),
+            }],
+            system: Vec::new(),
+            stream: true,
+            stop_sequences: Vec::new(),
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            metadata: None,
+            tools: Vec::new(),
+            tool_choice: None,
+            thinking: None,
+            context_management: None,
+            output_config: None,
+        };
+        let translated =
+            translate_request_with_context(&req, &build_tool_translation_context(&state, &req))
+                .expect("translate status request");
+
+        let prepared = prepare_conversation_branch(
+            &state,
+            Some(claude_session_id),
+            &req,
+            translated.client_metadata.as_ref(),
+        )
+        .expect("status should prepare a branch");
+
+        assert!(prepared.commit_turn);
+        assert_eq!(prepared.turn_scope, ConversationTurnScope::Main);
+
+        let _ = std::fs::remove_dir_all(&conversation_root);
+    }
+
+    #[test]
+    fn request_compatibility_fingerprint_ignores_client_metadata() {
+        let config = GatewayConfig::default();
+        let resolution = resolve_model(&config, DEFAULT_BACKEND_MODEL);
+        let req = AnthropicMessagesRequest {
+            model: DEFAULT_BACKEND_MODEL.to_string(),
+            messages: vec![AnthropicMessage {
+                role: "user".to_string(),
+                content: AnthropicContent::Text("hello".to_string()),
+            }],
+            system: Vec::new(),
+            stream: true,
+            stop_sequences: Vec::new(),
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            metadata: None,
+            tools: Vec::new(),
+            tool_choice: None,
+            thinking: None,
+            context_management: None,
+            output_config: None,
+        };
+        let mut translated = translate_request_with_context(
+            &req,
+            &ToolTranslationContext::default()
+                .with_claude_code_config(config.workflow.claude_code.clone()),
+        )
+        .expect("translate");
+        let without_metadata = request_compatibility_fingerprint(&config, &resolution, &translated);
+
+        translated
+            .client_metadata
+            .get_or_insert_with(HashMap::new)
+            .insert(
+                "claude_code_translated_slash_command".to_string(),
+                "/status".to_string(),
+            );
+        let with_metadata = request_compatibility_fingerprint(&config, &resolution, &translated);
+
+        assert_eq!(without_metadata, with_metadata);
     }
 }
 

@@ -60,8 +60,9 @@ If a commit fails because a hook modified files, re-stage the hook-changed files
 
 `gatewayd` is the runnable daemon that wires everything together:
 
-- Starts an Axum HTTP server on `127.0.0.1:8080`.
-- Ensures auth exists (interactive login if needed).
+- Binds an Axum HTTP server to `network.listen_addr` from gateway config, defaulting to `127.0.0.1:8080`.
+- Performs a non-interactive OpenAI auth preflight in `serve` mode; missing or invalid auth is logged and startup continues.
+- Runs interactive auth only through `cld-gateway login [openai|gemini]`.
 - Wraps the router with observability middleware that logs exchanges.
 
 Key entrypoint:
@@ -86,7 +87,8 @@ The workspace is organized as small crates with explicit ‚Äúallowed/not allowed‚
 - `crates/gateway-backend-codex`
   - HTTP client for the upstream ChatGPT/Codex backend endpoint:
     - `POST {base_url}/backend-api/codex/responses` (default `https://chatgpt.com`).
-  - Uses SSE (`Accept: text/event-stream`) and supports refresh+retry on 401.
+  - Uses HTTP SSE (`Accept: text/event-stream`) for full request transport.
+  - Supports reusable Codex Responses WebSocket sessions for incremental/delta transport, including refresh+retry on 401.
   - Key file:
     - `crates/gateway-backend-codex/src/client.rs`
 
@@ -101,16 +103,28 @@ The workspace is organized as small crates with explicit ‚Äúallowed/not allowed‚
   - Responsibilities:
     - Parse Anthropic-ish request types (`types.rs`).
     - Translate requests into Codex backend request shape (`translate.rs`).
-    - Bridge backend SSE event stream into Anthropic streaming events (`sse_bridge.rs`).
+    - Bridge backend SSE/WebSocket event streams into Anthropic streaming events (`sse_bridge.rs`).
+    - Apply Claude Code context normalization, slash-command translation, and Gateway context-management edits.
+    - Select conversation branches, reconcile checkpoints, choose full vs incremental transport, reuse per-branch WebSocket sessions, and commit provider checkpoints through `gateway-state`.
     - Persist tool-call IDs/correlation via `gateway-state`.
   - Key file:
     - `crates/gateway-http-anthropic/src/lib.rs`
 
 - `crates/gateway-state`
-  - Minimal local persistence (SQLite via `rusqlite`) for correlation/IDs.
-  - Currently used for tool call storage (`ToolCallStore`) under `~/.gateway/state/tool_calls.sqlite`.
-  - Key file:
+  - Local persistence for gateway runtime state.
+  - Stores tool-call metadata/correlation in SQLite (`ToolCallStore`) under `~/.gateway/state/tool_calls.sqlite` by default.
+  - Stores conversation-state sessions, branches, sparse checkpoints, OpenAI provider checkpoints, fingerprints, reconciliation metadata, compaction/reset state, corruption policy, and retention cleanup under the configured conversation-state root.
+  - Key files:
     - `crates/gateway-state/src/lib.rs`
+    - `crates/gateway-state/src/conversation.rs`
+    - `crates/gateway-state/src/tool_calls.rs`
+
+- `crates/gateway-net`
+  - Central outbound network policy and `reqwest` wrapper.
+  - Allows default OpenAI/ChatGPT hosts, localhost, and configured additional hosts.
+  - Blocks Anthropic/Claude hosts even if configured as allowed.
+  - Key file:
+    - `crates/gateway-net/src/lib.rs`
 
 - `crates/gateway-observability`
   - Request/response capture middleware (no business logic).
@@ -144,6 +158,8 @@ The workspace is organized as small crates with explicit ‚Äúallowed/not allowed‚
   - Override via env:
     - `GATEWAY_AUTH_JSON_PATH` (full path)
     - `GATEWAY_HOME` (directory; auth.json is under it)
+  - `cld-gateway login` and `cld-gateway login openai` perform the implemented OpenAI/Codex auth flow.
+  - `cld-gateway login gemini` is accepted by the CLI, but Gemini is not configured for serve-mode runtime auth/backend use yet.
 
 - Gateway config:
   - Default: `~/.gateway/config-dev.yml`
@@ -151,14 +167,25 @@ The workspace is organized as small crates with explicit ‚Äúallowed/not allowed‚
     - `GATEWAY_CONFIG_PATH` (full path)
     - `GATEWAY_HOME` (directory; config-dev.yml is under it)
   - Current fields:
+    - `version`
     - `providers.openai.default_model`
     - `providers.openai.unsupported_models`
+    - `providers.openai.incremental_transport.mode` (`auto`, `always_full`, `require_delta`)
     - `workflow.fast_mode`
+    - `workflow.context_management` (request/context pruning mode, edits, and hard limits)
     - `workflow.claude_code.slash_commands`
-  - Details: `docs/gateway_config.md`
+    - `workflow.conversation_state` (enablement, persistence root, corruption policy, retention)
+    - `network.listen_addr`
+    - `network.allowed_hosts`
+  - User-facing details: `README.md` config section.
+  - Authoritative implementation: `crates/gateway-core/src/config.rs`
 
 - Exchange logs:
   - `~/.gateway/logs/http-exchange.jsonl`
+
+- Conversation state:
+  - Default root is under the gateway home unless `workflow.conversation_state.persistence_root` or `CLD_GATEWAY_CONVERSATION_STATE_ROOT` overrides it.
+  - Used to map Claude sessions to conversation branches and provider checkpoints for incremental transport.
 
 ### Intentional ‚Äúunsupported‚Äù surface area
 

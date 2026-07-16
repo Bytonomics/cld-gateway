@@ -832,6 +832,11 @@ async fn v1_messages(
                 previous_response_id: request_previous_response_id,
                 provider_model_fingerprint: Some(provider_model_fingerprint),
                 request_compatibility_fingerprint: Some(request_compatibility_fingerprint),
+                canonical_message_count: Some(prepared_branch.active_messages.len()),
+                canonical_prefix_hash: Some(canonical_messages_prefix_hash(
+                    &prepared_branch.active_messages,
+                    prepared_branch.active_messages.len(),
+                )),
                 provider_output_items: decoded.output_items.clone(),
             },
         )
@@ -1986,6 +1991,11 @@ async fn stream_messages(
             provider_model_fingerprint: resolution.selected_backend_model.clone(),
             request_compatibility_fingerprint: request_compatibility_fingerprint.clone(),
             previous_response_id: effective_previous_response_id.clone(),
+            canonical_message_count: prepared_branch.active_messages.len(),
+            canonical_prefix_hash: canonical_messages_prefix_hash(
+                &prepared_branch.active_messages,
+                prepared_branch.active_messages.len(),
+            ),
             transport_identity: transport_identity.clone(),
             websocket_chain_id: current_websocket_chain_id_for_branch(
                 &state,
@@ -2044,6 +2054,8 @@ struct StreamCommitContext {
     provider_model_fingerprint: String,
     request_compatibility_fingerprint: String,
     previous_response_id: Option<String>,
+    canonical_message_count: usize,
+    canonical_prefix_hash: String,
     transport_identity: Option<ConversationTransportIdentity>,
     websocket_chain_id: Option<WebSocketChainId>,
     openai_chain_checkpoints: OpenAiChainCheckpointStore,
@@ -2078,6 +2090,8 @@ fn maybe_commit_stream_completion(
             request_compatibility_fingerprint: Some(
                 commit.request_compatibility_fingerprint.clone(),
             ),
+            canonical_message_count: Some(commit.canonical_message_count),
+            canonical_prefix_hash: Some(commit.canonical_prefix_hash.clone()),
             provider_output_items: extract_completed_output_items(data),
         },
     ) {
@@ -3216,6 +3230,18 @@ fn request_for_selected_transport(
     request_with_messages(req, messages)
 }
 
+fn canonical_messages_prefix_hash(
+    messages: &[crate::types::AnthropicMessage],
+    count: usize,
+) -> String {
+    let prefix = messages
+        .iter()
+        .take(count)
+        .map(canonical_message_value)
+        .collect::<Vec<_>>();
+    hash_serde_value(&serde_json::Value::Array(prefix))
+}
+
 fn sha256_hex(input: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
@@ -4007,6 +4033,11 @@ mod messages_tests {
                     previous_response_id: Some("resp_seed".to_string()),
                     provider_model_fingerprint: Some(DEFAULT_BACKEND_MODEL.to_string()),
                     request_compatibility_fingerprint: Some(request_compatibility_fingerprint),
+                    canonical_message_count: Some(request_messages.len()),
+                    canonical_prefix_hash: Some(super::canonical_messages_prefix_hash(
+                        &request_messages,
+                        request_messages.len(),
+                    )),
                     provider_output_items: Vec::new(),
                 },
             )
@@ -5784,6 +5815,7 @@ mod transport_selection_tests {
                 active_canonical_messages: None,
                 fingerprints: gateway_state::BranchFingerprintSet::default(),
                 openai_checkpoint,
+                turn_openai_checkpoints: Vec::new(),
                 compaction_reset_pending,
                 last_main_turn_id: Some("turn-1".to_string()),
                 created_at_unix_seconds: 0,

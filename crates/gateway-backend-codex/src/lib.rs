@@ -11,6 +11,7 @@ pub mod output_text;
 pub mod sse_unary;
 pub mod tool_calls;
 pub mod types;
+mod websocket_transport;
 
 #[must_use]
 pub fn ping() -> &'static str {

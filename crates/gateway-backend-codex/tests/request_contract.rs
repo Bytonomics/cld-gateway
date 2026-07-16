@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+use gateway_backend_codex::types::STORE_RESPONSES_FOR_CONTINUATION;
 use gateway_core::{DEFAULT_BACKEND_MODEL, Secret};
 use wiremock::matchers::{body_json, header, header_exists, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -33,7 +34,7 @@ async fn sends_required_headers_and_minimal_body() {
             "tools": [],
             "tool_choice": "auto",
             "parallel_tool_calls": true,
-            "store": false,
+            "store": STORE_RESPONSES_FOR_CONTINUATION,
             "stream": true,
             "include": []
         })))
@@ -60,7 +61,6 @@ async fn sends_required_headers_and_minimal_body() {
         text: None,
         reasoning: None,
         previous_response_id: None,
-        store: false,
         stream: true,
         include: Vec::new(),
         service_tier: None,
@@ -90,7 +90,7 @@ async fn sends_service_tier_when_configured() {
             "tools": [],
             "tool_choice": "auto",
             "parallel_tool_calls": true,
-            "store": false,
+            "store": STORE_RESPONSES_FOR_CONTINUATION,
             "stream": true,
             "include": [],
             "service_tier": "priority"
@@ -115,7 +115,6 @@ async fn sends_service_tier_when_configured() {
         text: None,
         reasoning: None,
         previous_response_id: None,
-        store: false,
         stream: true,
         include: Vec::new(),
         service_tier: Some("priority".to_string()),
@@ -144,7 +143,7 @@ async fn http_request_omits_previous_response_id_when_provided() {
             "tools": [],
             "tool_choice": "auto",
             "parallel_tool_calls": true,
-            "store": false,
+            "store": STORE_RESPONSES_FOR_CONTINUATION,
             "stream": true,
             "include": []
         })))
@@ -168,7 +167,6 @@ async fn http_request_omits_previous_response_id_when_provided() {
         text: None,
         reasoning: None,
         previous_response_id: Some("resp_123".to_string()),
-        store: false,
         stream: true,
         include: Vec::new(),
         service_tier: None,

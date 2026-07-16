@@ -4,6 +4,8 @@ use futures_util::stream::BoxStream;
 use gateway_core::Secret;
 use std::collections::HashMap;
 
+pub const STORE_RESPONSES_FOR_CONTINUATION: bool = false;
+
 #[derive(Clone)]
 pub struct CodexBackendRequest {
     pub access_token: Secret<String>,
@@ -26,8 +28,6 @@ pub struct CodexBackendRequest {
     pub reasoning: Option<serde_json::Value>,
     /// Optional previous response checkpoint for incremental transport.
     pub previous_response_id: Option<String>,
-    /// Required by the Codex backend contract: must be `false`.
-    pub store: bool,
     /// If true, request a streaming SSE response.
     pub stream: bool,
     /// Optional include fields.

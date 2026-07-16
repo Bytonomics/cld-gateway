@@ -14,7 +14,9 @@ use axum::response::IntoResponse;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
 use futures_util::StreamExt as _;
-use gateway_backend_codex::client::BackendError;
+use gateway_backend_codex::client::{
+    BackendError, WebSocketChainId, WebSocketRetryPolicy, WebSocketSessionKey,
+};
 use gateway_backend_codex::types::{CodexToolCall, CodexToolCallKind};
 use gateway_core::RequestId;
 use gateway_core::config::{
@@ -25,9 +27,10 @@ use gateway_net::{GatewayHttpClient, GatewayNetworkPolicy};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -58,12 +61,104 @@ pub struct AppState {
     backend: gateway_backend_codex::client::CodexBackendClient,
     tool_calls: ToolCallStore,
     conversation_state: ConversationStateStore,
-    websocket_sessions:
-        Arc<Mutex<HashMap<String, gateway_backend_codex::client::CodexWebSocketSession>>>,
+    openai_chain_checkpoints: OpenAiChainCheckpointStore,
     gateway_config: GatewayConfig,
     claude_gateway_settings_path: Option<PathBuf>,
     #[cfg(test)]
     auth_json_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct OpenAiChainCheckpointStore {
+    checkpoints: Arc<Mutex<HashMap<String, WebSocketChainId>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ConversationTransportIdentity {
+    claude_session_id: String,
+    branch_id: String,
+    provider_model_fingerprint: String,
+    reasoning_effort: String,
+}
+
+impl ConversationTransportIdentity {
+    fn new(
+        claude_session_id: impl Into<String>,
+        branch_id: impl Into<String>,
+        provider_model_fingerprint: impl Into<String>,
+        reasoning_effort: impl Into<String>,
+    ) -> Self {
+        Self {
+            claude_session_id: claude_session_id.into(),
+            branch_id: branch_id.into(),
+            provider_model_fingerprint: provider_model_fingerprint.into(),
+            reasoning_effort: reasoning_effort.into(),
+        }
+    }
+
+    fn key(&self) -> String {
+        format!(
+            "v1:{}:{}:{}:{}",
+            self.claude_session_id,
+            self.branch_id,
+            self.provider_model_fingerprint,
+            self.reasoning_effort
+        )
+    }
+
+    fn websocket_session_key(&self) -> WebSocketSessionKey {
+        WebSocketSessionKey::new(self.key())
+    }
+
+    fn checkpoint_key(&self, response_id: &str) -> String {
+        format!("{}:{response_id}", self.key())
+    }
+}
+
+impl OpenAiChainCheckpointStore {
+    fn associate(
+        &self,
+        identity: &ConversationTransportIdentity,
+        response_id: &str,
+        websocket_chain_id: WebSocketChainId,
+    ) {
+        let websocket_chain_id_for_log = websocket_chain_id.as_str().to_string();
+        self.checkpoints
+            .lock()
+            .expect("openai chain checkpoint mutex poisoned")
+            .insert(identity.checkpoint_key(response_id), websocket_chain_id);
+        tracing::info!(
+            claude_session_id = %identity.claude_session_id,
+            branch_id = %identity.branch_id,
+            provider_model_fingerprint = %identity.provider_model_fingerprint,
+            reasoning_effort = %identity.reasoning_effort,
+            response_id,
+            websocket_chain_id = %websocket_chain_id_for_log,
+            "associated provider response id with websocket chain"
+        );
+        append_transport_diagnostic(serde_json::json!({
+            "event": "checkpoint_associated",
+            "transport_identity": identity.key(),
+            "claude_session_id": identity.claude_session_id,
+            "branch_id": identity.branch_id,
+            "provider_model_fingerprint": identity.provider_model_fingerprint,
+            "reasoning_effort": identity.reasoning_effort,
+            "provider_response_id": response_id,
+            "websocket_chain_id": websocket_chain_id_for_log,
+        }));
+    }
+
+    fn websocket_chain_id_for_response(
+        &self,
+        identity: &ConversationTransportIdentity,
+        response_id: &str,
+    ) -> Option<WebSocketChainId> {
+        self.checkpoints
+            .lock()
+            .expect("openai chain checkpoint mutex poisoned")
+            .get(&identity.checkpoint_key(response_id))
+            .cloned()
+    }
 }
 
 impl AppState {
@@ -528,12 +623,12 @@ async fn v1_messages(
             "Claude Code conversation requests require a WebSocket conversation-state branch",
         );
     }
-    let render_req = prepared_branch.as_ref().map_or_else(
+    let full_render_req = prepared_branch.as_ref().map_or_else(
         || req.clone(),
         |prepared_branch| request_with_messages(&req, prepared_branch.active_messages.clone()),
     );
-    let tool_context = build_tool_translation_context(&state, &render_req);
-    let mut translated = match translate_request_with_context(&render_req, &tool_context) {
+    let tool_context = build_tool_translation_context(&state, &full_render_req);
+    let mut translated = match translate_request_with_context(&full_render_req, &tool_context) {
         Ok(t) => t,
         Err(err) => return bad_request(&err),
     };
@@ -541,6 +636,7 @@ async fn v1_messages(
 
     // Check for translated command BEFORE requiring credentials.
     // This allows /status to work even without valid auth credentials.
+    let mut post_command_input = None;
     if let Some(cmd_name) = translated.client_metadata.as_ref().and_then(|m| {
         m.get("claude_code_translated_slash_command")
             .map(std::string::String::as_str)
@@ -550,7 +646,7 @@ async fn v1_messages(
         let runtime = ExecutorRuntime {
             credentials: maybe_creds.clone(),
             backend_client: state.backend.clone(),
-            current_model: Some(render_req.model.clone()),
+            current_model: Some(full_render_req.model.clone()),
             session_info: translate_executor::SessionInfo {
                 // Thread/session tracking is client-side (Claude Code); the gateway
                 // is a stateless proxy and does not maintain session state across requests.
@@ -594,11 +690,13 @@ async fn v1_messages(
                 let packaged_body = crate::claude_code_context::get_packaged_command_body(cmd_name);
                 let result_text = post_result_fn(&executor_json, packaged_body);
                 // Append result as a user message to the backend input.
-                translated.input.push(serde_json::json!({
+                let command_input = serde_json::json!({
                     "type": "message",
                     "role": "user",
                     "content": [{ "type": "input_text", "text": result_text }]
-                }));
+                });
+                translated.input.push(command_input.clone());
+                post_command_input = Some(command_input);
             }
             Ok(None) => {
                 // Classified as Translate but no executor registered — this is a bug.
@@ -652,10 +750,21 @@ async fn v1_messages(
     };
     let request_compatibility_fingerprint =
         request_compatibility_fingerprint(&state.gateway_config, &resolution, &translated);
+    let transport_identity = transport_identity_for_branch(
+        prepared_branch.as_ref(),
+        &resolution.selected_backend_model,
+        translated.reasoning.as_ref(),
+    );
+    let websocket_chain_decision = websocket_chain_decision_for_branch(
+        &state,
+        prepared_branch.as_ref(),
+        transport_identity.as_ref(),
+    );
 
     let selected_transport = match select_transport(
         &state.gateway_config,
         prepared_branch.as_ref(),
+        &websocket_chain_decision,
         &resolution.selected_backend_model,
         &request_compatibility_fingerprint,
     ) {
@@ -667,28 +776,47 @@ async fn v1_messages(
         prepared_branch.as_ref(),
         &selected_transport,
         &resolution.selected_backend_model,
+        Some(&websocket_chain_decision),
     );
+
+    let backend_render_req =
+        request_for_selected_transport(&req, prepared_branch.as_ref(), &selected_transport);
+    let backend_tool_context = build_tool_translation_context(&state, &backend_render_req);
+    let mut backend_translated =
+        match translate_request_with_context(&backend_render_req, &backend_tool_context) {
+            Ok(t) => t,
+            Err(err) => return bad_request(&err),
+        };
+    attach_context_management_metadata(&mut backend_translated, &context_management_report);
+    if let Some(command_input) = post_command_input {
+        backend_translated.input.push(command_input);
+    }
 
     let backend_req = build_backend_request(
         &state.gateway_config,
         &resolution,
-        translated,
-        creds,
+        backend_translated,
+        creds.clone(),
         selected_transport.previous_response_id.clone(),
     );
+    let bootstrap_backend_req =
+        build_backend_request(&state.gateway_config, &resolution, translated, creds, None);
     let provider_model_fingerprint = resolution.selected_backend_model.clone();
-    let (decoded, request_previous_response_id) = match run_backend_unary(
+    let (decoded, request_previous_response_id) = match Box::pin(run_backend_unary(
         &state,
         request_id.as_ref(),
         prepared_branch.as_ref(),
         backend_req,
-    )
+        bootstrap_backend_req,
+    ))
     .await
     {
         Ok(value) => value,
         Err(resp) => return resp,
     };
     let logged_previous_response_id = request_previous_response_id.clone();
+    let response_websocket_chain_id =
+        current_websocket_chain_id_for_branch(&state, transport_identity.as_ref());
 
     if let Some(prepared_branch) = prepared_branch
         .as_ref()
@@ -712,6 +840,32 @@ async fn v1_messages(
     } else if let Some(prepared_branch) = prepared_branch.as_ref()
         && let Some(response_id) = decoded.response_id.as_deref()
     {
+        let websocket_chain_id_for_log = response_websocket_chain_id
+            .as_ref()
+            .map(WebSocketChainId::as_str)
+            .map(ToString::to_string);
+        if let Some(websocket_chain_id) = response_websocket_chain_id {
+            state.openai_chain_checkpoints.associate(
+                transport_identity
+                    .as_ref()
+                    .expect("transport identity exists for prepared branch"),
+                response_id,
+                websocket_chain_id,
+            );
+        }
+        append_transport_diagnostic(serde_json::json!({
+            "event": "checkpoint_committed",
+            "request_id": request_id_str(request_id.as_ref()),
+            "transport_identity": transport_identity.as_ref().map(ConversationTransportIdentity::key),
+            "claude_session_id": prepared_branch.claude_session_id,
+            "branch_id": prepared_branch.branch.branch_id,
+            "provider_model_fingerprint": transport_identity.as_ref().map(|identity| identity.provider_model_fingerprint.as_str()),
+            "reasoning_effort": transport_identity.as_ref().map(|identity| identity.reasoning_effort.as_str()),
+            "provider_response_id": response_id,
+            "committed_previous_response_id": logged_previous_response_id,
+            "websocket_chain_id": websocket_chain_id_for_log,
+            "streaming": false,
+        }));
         if let Some(request_id) = request_id_str(request_id.as_ref()) {
             info!(
                 request_id = %request_id,
@@ -876,12 +1030,34 @@ fn build_backend_request(
         text: translated.text,
         reasoning: translated.reasoning,
         previous_response_id,
-        store: false,
         stream: true,
         include: translated.include,
         service_tier: service_tier_for_config(config),
         client_metadata: translated.client_metadata,
     }
+}
+
+fn transport_identity_for_branch(
+    prepared_branch: Option<&PreparedConversationBranch>,
+    provider_model_fingerprint: &str,
+    reasoning: Option<&serde_json::Value>,
+) -> Option<ConversationTransportIdentity> {
+    let prepared_branch = prepared_branch?;
+    Some(ConversationTransportIdentity::new(
+        prepared_branch.claude_session_id.clone(),
+        prepared_branch.branch.branch_id.clone(),
+        provider_model_fingerprint.trim(),
+        normalized_reasoning_effort(reasoning),
+    ))
+}
+
+fn normalized_reasoning_effort(reasoning: Option<&serde_json::Value>) -> String {
+    reasoning
+        .and_then(|value| value.get("effort"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map_or_else(|| "default".to_string(), str::to_ascii_lowercase)
 }
 
 fn request_compatibility_fingerprint(
@@ -948,6 +1124,7 @@ async fn run_backend_unary(
     request_id: Option<&axum::extract::Extension<RequestId>>,
     prepared_branch: Option<&PreparedConversationBranch>,
     backend_req: gateway_backend_codex::types::CodexBackendRequest,
+    bootstrap_backend_req: gateway_backend_codex::types::CodexBackendRequest,
 ) -> Result<
     (
         gateway_backend_codex::types::CodexUnaryDecoded,
@@ -955,14 +1132,16 @@ async fn run_backend_unary(
     ),
     axum::response::Response,
 > {
-    let (events, effective_previous_response_id) = send_backend_stream_with_delta_fallback(
-        state,
-        request_id_str(request_id).map(ToString::to_string),
-        prepared_branch,
-        backend_req.clone(),
-    )
-    .await
-    .map_err(backend_request_failure_to_http_response)?;
+    let (events, effective_previous_response_id) =
+        Box::pin(send_backend_stream_with_delta_fallback(
+            state,
+            request_id_str(request_id).map(ToString::to_string),
+            prepared_branch,
+            backend_req.clone(),
+            bootstrap_backend_req.clone(),
+        ))
+        .await
+        .map_err(backend_request_failure_to_http_response)?;
 
     let mut commit_previous_response_id = effective_previous_response_id;
     let decoded = match gateway_backend_codex::sse_unary::read_backend_events_to_completion(events)
@@ -976,7 +1155,7 @@ async fn run_backend_unary(
                 state,
                 request_id_str(request_id).map(ToString::to_string),
                 prepared_branch,
-                backend_req,
+                bootstrap_backend_req,
                 commit_previous_response_id.clone(),
             )
             .await
@@ -1007,46 +1186,34 @@ fn decode_error_to_http_response(
 #[derive(Debug)]
 enum BackendRequestFailure {
     Backend(BackendError),
-    CheckpointInvalidation(String),
 }
 
 async fn retry_full_after_delta_rejection(
     state: &AppState,
     request_id: Option<String>,
     prepared_branch: Option<&PreparedConversationBranch>,
-    mut backend_req: gateway_backend_codex::types::CodexBackendRequest,
+    mut bootstrap_backend_req: gateway_backend_codex::types::CodexBackendRequest,
     attempted_previous_response_id: Option<String>,
 ) -> Result<gateway_backend_codex::types::CodexBackendEventStream, BackendRequestFailure> {
-    let Some(prepared_branch) = prepared_branch else {
-        return Err(BackendRequestFailure::Backend(BackendError::WebSocket {
-            stage: "delta fallback",
-            message: "missing conversation branch for full rebaseline".to_string(),
-        }));
-    };
+    bootstrap_backend_req.previous_response_id = None;
 
-    state
-        .conversation_state
-        .invalidate_openai_checkpoint(
-            &prepared_branch.claude_session_id,
-            &prepared_branch.branch.branch_id,
-        )
-        .map_err(|state_err| {
-            BackendRequestFailure::CheckpointInvalidation(state_err.to_string())
-        })?;
-
-    if let Some(request_id) = request_id.as_deref() {
+    if let Some(prepared_branch) = prepared_branch {
         warn!(
-            request_id = %request_id,
+            request_id = ?request_id,
             claude_session_id = %prepared_branch.claude_session_id,
             branch_id = %prepared_branch.branch.branch_id,
             previous_response_id = ?attempted_previous_response_id,
-            fallback_reason = "delta_checkpoint_rejected",
-            "backend rejected incremental checkpoint event; retrying once with a full websocket baseline"
+            "incremental websocket chain was lost; re-anchoring with full-context websocket bootstrap"
+        );
+    } else {
+        warn!(
+            request_id = ?request_id,
+            previous_response_id = ?attempted_previous_response_id,
+            "incremental websocket chain was lost; re-anchoring with full-context websocket bootstrap"
         );
     }
 
-    backend_req.previous_response_id = None;
-    send_backend_event_stream(state, Some(prepared_branch), backend_req)
+    send_backend_event_stream(state, prepared_branch, bootstrap_backend_req)
         .await
         .map_err(BackendRequestFailure::Backend)
 }
@@ -1055,7 +1222,8 @@ async fn send_backend_stream_with_delta_fallback(
     state: &AppState,
     request_id: Option<String>,
     prepared_branch: Option<&PreparedConversationBranch>,
-    mut backend_req: gateway_backend_codex::types::CodexBackendRequest,
+    backend_req: gateway_backend_codex::types::CodexBackendRequest,
+    bootstrap_backend_req: gateway_backend_codex::types::CodexBackendRequest,
 ) -> Result<
     (
         gateway_backend_codex::types::CodexBackendEventStream,
@@ -1067,47 +1235,15 @@ async fn send_backend_stream_with_delta_fallback(
     match send_backend_event_stream(state, prepared_branch, backend_req.clone()).await {
         Ok(events) => Ok((events, attempted_previous_response_id)),
         Err(err) if is_known_delta_rejection(&err, attempted_previous_response_id.as_deref()) => {
-            let Some(prepared_branch) = prepared_branch else {
-                return Err(BackendRequestFailure::Backend(err));
-            };
-
-            state
-                .conversation_state
-                .invalidate_openai_checkpoint(
-                    &prepared_branch.claude_session_id,
-                    &prepared_branch.branch.branch_id,
-                )
-                .map_err(|state_err| {
-                    BackendRequestFailure::CheckpointInvalidation(state_err.to_string())
-                })?;
-
-            if let Some(request_id) = request_id.as_deref() {
-                warn!(
-                    request_id = %request_id,
-                    claude_session_id = %prepared_branch.claude_session_id,
-                    branch_id = %prepared_branch.branch.branch_id,
-                    previous_response_id = ?attempted_previous_response_id,
-                    error = %err,
-                    fallback_reason = "delta_checkpoint_rejected",
-                    "backend rejected incremental checkpoint; retrying once with a full websocket baseline"
-                );
-            } else {
-                warn!(
-                    claude_session_id = %prepared_branch.claude_session_id,
-                    branch_id = %prepared_branch.branch.branch_id,
-                    previous_response_id = ?attempted_previous_response_id,
-                    error = %err,
-                    fallback_reason = "delta_checkpoint_rejected",
-                    "backend rejected incremental checkpoint; retrying once with a full websocket baseline"
-                );
-            }
-
-            backend_req.previous_response_id = None;
-            let full_response =
-                send_backend_event_stream(state, Some(prepared_branch), backend_req)
-                    .await
-                    .map_err(BackendRequestFailure::Backend)?;
-            Ok((full_response, None))
+            let retry_events = retry_full_after_delta_rejection(
+                state,
+                request_id,
+                prepared_branch,
+                bootstrap_backend_req,
+                attempted_previous_response_id,
+            )
+            .await?;
+            Ok((retry_events, None))
         }
         Err(err) => Err(BackendRequestFailure::Backend(err)),
     }
@@ -1118,6 +1254,7 @@ async fn send_backend_stream_for_streaming(
     request_id: Option<String>,
     prepared_branch: Option<&PreparedConversationBranch>,
     backend_req: gateway_backend_codex::types::CodexBackendRequest,
+    bootstrap_backend_req: gateway_backend_codex::types::CodexBackendRequest,
 ) -> Result<
     (
         gateway_backend_codex::types::CodexBackendEventStream,
@@ -1125,14 +1262,15 @@ async fn send_backend_stream_for_streaming(
     ),
     BackendRequestFailure,
 > {
-    let retry_req = backend_req.clone();
-    let (mut events, effective_previous_response_id) = send_backend_stream_with_delta_fallback(
-        state,
-        request_id.clone(),
-        prepared_branch,
-        backend_req,
-    )
-    .await?;
+    let (mut events, effective_previous_response_id) =
+        Box::pin(send_backend_stream_with_delta_fallback(
+            state,
+            request_id.clone(),
+            prepared_branch,
+            backend_req,
+            bootstrap_backend_req.clone(),
+        ))
+        .await?;
 
     let Some(first_item) = events.next().await else {
         return Ok((events, effective_previous_response_id));
@@ -1142,15 +1280,21 @@ async fn send_backend_stream_for_streaming(
         Ok(event)
             if is_known_delta_failure_event(&event, effective_previous_response_id.as_deref()) =>
         {
-            let retry_events = retry_full_after_delta_rejection(
-                state,
-                request_id,
-                prepared_branch,
-                retry_req,
-                effective_previous_response_id,
-            )
-            .await?;
-            Ok((retry_events, None))
+            if delta_failure_event_to_backend_error(&event).is_some() {
+                let retry_events = retry_full_after_delta_rejection(
+                    state,
+                    request_id,
+                    prepared_branch,
+                    bootstrap_backend_req,
+                    effective_previous_response_id,
+                )
+                .await?;
+                return Ok((retry_events, None));
+            }
+            let prefixed = futures_util::stream::once(async move { Ok(event) })
+                .chain(events)
+                .boxed();
+            Ok((prefixed, effective_previous_response_id))
         }
         Ok(event) => {
             let prefixed = futures_util::stream::once(async move { Ok(event) })
@@ -1163,7 +1307,7 @@ async fn send_backend_stream_for_streaming(
                 state,
                 request_id,
                 prepared_branch,
-                retry_req,
+                bootstrap_backend_req,
                 effective_previous_response_id,
             )
             .await?;
@@ -1183,8 +1327,20 @@ async fn send_backend_event_stream(
     prepared_branch: Option<&PreparedConversationBranch>,
     backend_req: gateway_backend_codex::types::CodexBackendRequest,
 ) -> Result<gateway_backend_codex::types::CodexBackendEventStream, BackendError> {
-    if let Some(session_key) = websocket_session_key(prepared_branch) {
-        return send_branch_websocket_event_stream(state, session_key, backend_req).await;
+    if let Some(identity) = transport_identity_for_branch(
+        prepared_branch,
+        &backend_req.model,
+        backend_req.reasoning.as_ref(),
+    ) {
+        return state
+            .backend
+            .send_pooled_websocket_event_stream(
+                &state.auth,
+                identity.websocket_session_key(),
+                backend_req,
+                WebSocketRetryPolicy::default(),
+            )
+            .await;
     }
 
     let response = state
@@ -1194,72 +1350,94 @@ async fn send_backend_event_stream(
     Ok(gateway_backend_codex::client::CodexBackendClient::response_to_event_stream(response))
 }
 
-async fn send_branch_websocket_event_stream(
+fn websocket_chain_decision_for_branch(
     state: &AppState,
-    session_key: String,
-    backend_req: gateway_backend_codex::types::CodexBackendRequest,
-) -> Result<gateway_backend_codex::types::CodexBackendEventStream, BackendError> {
-    if let Some(session) = state
-        .websocket_sessions
-        .lock()
-        .expect("websocket session mutex poisoned")
-        .get(&session_key)
-        .cloned()
-    {
-        if session.is_alive() {
-            match session.send_event_stream(&backend_req) {
-                Ok(events) => return Ok(events),
-                Err(err) => {
-                    state
-                        .websocket_sessions
-                        .lock()
-                        .expect("websocket session mutex poisoned")
-                        .remove(&session_key);
-                    warn!(
-                        session_key = %session_key,
-                        error = %err,
-                        "cached websocket session rejected request; reconnecting"
-                    );
-                }
-            }
-        } else {
-            state
-                .websocket_sessions
-                .lock()
-                .expect("websocket session mutex poisoned")
-                .remove(&session_key);
-            info!(
-                session_key = %session_key,
-                "cached websocket session is closed; reconnecting"
-            );
+    prepared_branch: Option<&PreparedConversationBranch>,
+    identity: Option<&ConversationTransportIdentity>,
+) -> WebSocketChainDecision {
+    let Some(prepared_branch) = prepared_branch else {
+        return WebSocketChainDecision {
+            match_result: WebSocketChainMatch::Missing,
+            transport_identity: None,
+            live_websocket_chain_id: None,
+            checkpoint_websocket_chain_id: None,
+            checkpoint_response_id: None,
+            reason: "missing_branch",
+        };
+    };
+    let Some(checkpoint) = prepared_branch.branch.openai_checkpoint.as_ref() else {
+        return WebSocketChainDecision {
+            match_result: WebSocketChainMatch::Missing,
+            transport_identity: None,
+            live_websocket_chain_id: None,
+            checkpoint_websocket_chain_id: None,
+            checkpoint_response_id: None,
+            reason: "missing_checkpoint",
+        };
+    };
+    let Some(identity) = identity else {
+        return WebSocketChainDecision {
+            match_result: WebSocketChainMatch::Missing,
+            transport_identity: None,
+            live_websocket_chain_id: None,
+            checkpoint_websocket_chain_id: None,
+            checkpoint_response_id: Some(checkpoint.response_id.clone()),
+            reason: "missing_transport_identity",
+        };
+    };
+    let session_key = identity.websocket_session_key();
+    let Some(live_websocket_chain_id) = state.backend.live_websocket_chain_id(&session_key) else {
+        return WebSocketChainDecision {
+            match_result: WebSocketChainMatch::Missing,
+            transport_identity: Some(identity.key()),
+            live_websocket_chain_id: None,
+            checkpoint_websocket_chain_id: None,
+            checkpoint_response_id: Some(checkpoint.response_id.clone()),
+            reason: "missing_live_websocket_chain",
+        };
+    };
+    let checkpoint_websocket_chain_id = state
+        .openai_chain_checkpoints
+        .websocket_chain_id_for_response(identity, &checkpoint.response_id);
+    let Some(checkpoint_websocket_chain_id) = checkpoint_websocket_chain_id else {
+        return WebSocketChainDecision {
+            match_result: WebSocketChainMatch::Missing,
+            transport_identity: Some(identity.key()),
+            live_websocket_chain_id: Some(live_websocket_chain_id),
+            checkpoint_websocket_chain_id: None,
+            checkpoint_response_id: Some(checkpoint.response_id.clone()),
+            reason: "missing_checkpoint_websocket_chain_association",
+        };
+    };
+
+    if live_websocket_chain_id == checkpoint_websocket_chain_id {
+        WebSocketChainDecision {
+            match_result: WebSocketChainMatch::Matching,
+            transport_identity: Some(identity.key()),
+            live_websocket_chain_id: Some(live_websocket_chain_id),
+            checkpoint_websocket_chain_id: Some(checkpoint_websocket_chain_id),
+            checkpoint_response_id: Some(checkpoint.response_id.clone()),
+            reason: "websocket_chain_match",
+        }
+    } else {
+        WebSocketChainDecision {
+            match_result: WebSocketChainMatch::Mismatching,
+            transport_identity: Some(identity.key()),
+            live_websocket_chain_id: Some(live_websocket_chain_id),
+            checkpoint_websocket_chain_id: Some(checkpoint_websocket_chain_id),
+            checkpoint_response_id: Some(checkpoint.response_id.clone()),
+            reason: "websocket_chain_mismatch",
         }
     }
-
-    state
-        .websocket_sessions
-        .lock()
-        .expect("websocket session mutex poisoned")
-        .remove(&session_key);
-
-    let session = state
-        .backend
-        .open_websocket_session_with_refresh_retry(&state.auth, backend_req.clone())
-        .await?;
-    let events = session.send_event_stream(&backend_req)?;
-    state
-        .websocket_sessions
-        .lock()
-        .expect("websocket session mutex poisoned")
-        .insert(session_key, session);
-    Ok(events)
 }
 
-fn websocket_session_key(prepared_branch: Option<&PreparedConversationBranch>) -> Option<String> {
-    let prepared_branch = prepared_branch?;
-    Some(format!(
-        "{}:{}",
-        prepared_branch.claude_session_id, prepared_branch.branch.branch_id
-    ))
+fn current_websocket_chain_id_for_branch(
+    state: &AppState,
+    identity: Option<&ConversationTransportIdentity>,
+) -> Option<WebSocketChainId> {
+    identity
+        .map(ConversationTransportIdentity::websocket_session_key)
+        .and_then(|session_key| state.backend.live_websocket_chain_id(&session_key))
 }
 
 fn is_known_delta_rejection(
@@ -1295,6 +1473,10 @@ fn is_known_delta_rejection(
 
             mentions_checkpoint && indicates_stale_chain
         }
+        BackendError::WebSocket { message, .. } => {
+            let message = message.to_ascii_lowercase();
+            message.contains("previous_response_id") && message.contains("live websocket session")
+        }
         _ => false,
     }
 }
@@ -1306,6 +1488,7 @@ fn is_known_delta_decode_rejection(
     let gateway_backend_codex::sse_unary::SseDecodeError::BackendFailed { message } = err else {
         return false;
     };
+
     is_known_delta_rejection(
         &BackendError::UnexpectedStatusWithBody {
             status: 400,
@@ -1334,6 +1517,16 @@ fn is_known_delta_failure_event(
     )
 }
 
+fn delta_failure_event_to_backend_error(
+    event: &gateway_backend_codex::types::CodexBackendEvent,
+) -> Option<BackendError> {
+    gateway_backend_codex::backend_error::parse_backend_failure_event(&event.event, &event.data)
+        .map(|message| BackendError::UnexpectedStatusWithBody {
+            status: 400,
+            body: message,
+        })
+}
+
 fn backend_request_failure_to_http_response(
     err: BackendRequestFailure,
 ) -> axum::response::Response {
@@ -1350,9 +1543,6 @@ fn backend_request_failure_to_http_response(
             )
                 .into_response(),
         },
-        BackendRequestFailure::CheckpointInvalidation(message) => {
-            service_unavailable_error(&message)
-        }
     }
 }
 
@@ -1366,9 +1556,6 @@ fn backend_request_failure_to_sse(
             BackendError::UnexpectedStatus(401) => sse_auth_error("Authentication failed"),
             _ => sse_error("backend_error", &err.to_string()),
         },
-        BackendRequestFailure::CheckpointInvalidation(message) => {
-            sse_error("service_unavailable_error", &message)
-        }
     }
 }
 
@@ -1596,12 +1783,12 @@ async fn stream_messages(
             "Claude Code conversation requests require a WebSocket conversation-state branch",
         );
     }
-    let render_req = prepared_branch.as_ref().map_or_else(
+    let full_render_req = prepared_branch.as_ref().map_or_else(
         || req.clone(),
         |prepared_branch| request_with_messages(&req, prepared_branch.active_messages.clone()),
     );
-    let tool_context = build_tool_translation_context(&state, &render_req);
-    let mut translated = match translate_request_with_context(&render_req, &tool_context) {
+    let tool_context = build_tool_translation_context(&state, &full_render_req);
+    let mut translated = match translate_request_with_context(&full_render_req, &tool_context) {
         Ok(t) => t,
         Err(err) => return sse_error("invalid_request_error", &err),
     };
@@ -1609,6 +1796,7 @@ async fn stream_messages(
 
     // Check for translated command BEFORE requiring credentials.
     // This allows /status to work even without valid auth credentials.
+    let mut post_command_input = None;
     if let Some(cmd_name) = translated.client_metadata.as_ref().and_then(|m| {
         m.get("claude_code_translated_slash_command")
             .map(std::string::String::as_str)
@@ -1655,11 +1843,13 @@ async fn stream_messages(
                 let packaged_body = crate::claude_code_context::get_packaged_command_body(cmd_name);
                 let result_text = post_result_fn(&executor_json, packaged_body);
                 // Append result as a user message to the backend input.
-                translated.input.push(serde_json::json!({
+                let command_input = serde_json::json!({
                     "type": "message",
                     "role": "user",
                     "content": [{ "type": "input_text", "text": result_text }]
-                }));
+                });
+                translated.input.push(command_input.clone());
+                post_command_input = Some(command_input);
             }
             Ok(None) => {
                 // Classified as Translate but no executor registered — this is a bug.
@@ -1700,10 +1890,21 @@ async fn stream_messages(
     };
     let request_compatibility_fingerprint =
         request_compatibility_fingerprint(&state.gateway_config, &resolution, &translated);
+    let transport_identity = transport_identity_for_branch(
+        prepared_branch.as_ref(),
+        &resolution.selected_backend_model,
+        translated.reasoning.as_ref(),
+    );
+    let websocket_chain_decision = websocket_chain_decision_for_branch(
+        &state,
+        prepared_branch.as_ref(),
+        transport_identity.as_ref(),
+    );
 
     let selected_transport = match select_transport(
         &state.gateway_config,
         prepared_branch.as_ref(),
+        &websocket_chain_decision,
         &resolution.selected_backend_model,
         &request_compatibility_fingerprint,
     ) {
@@ -1715,28 +1916,46 @@ async fn stream_messages(
         prepared_branch.as_ref(),
         &selected_transport,
         &resolution.selected_backend_model,
+        Some(&websocket_chain_decision),
     );
 
     let request_previous_response_id = selected_transport.previous_response_id.clone();
+    let backend_render_req =
+        request_for_selected_transport(&req, prepared_branch.as_ref(), &selected_transport);
+    let backend_tool_context = build_tool_translation_context(&state, &backend_render_req);
+    let mut backend_translated =
+        match translate_request_with_context(&backend_render_req, &backend_tool_context) {
+            Ok(t) => t,
+            Err(err) => return sse_error("invalid_request_error", &err),
+        };
+    attach_context_management_metadata(&mut backend_translated, &context_management_report);
+    if let Some(command_input) = post_command_input {
+        backend_translated.input.push(command_input);
+    }
+
     let request_to_backend = build_backend_request(
         &state.gateway_config,
         &resolution,
-        translated,
-        creds,
+        backend_translated,
+        creds.clone(),
         request_previous_response_id.clone(),
     );
+    let bootstrap_request_to_backend =
+        build_backend_request(&state.gateway_config, &resolution, translated, creds, None);
 
-    let (backend_events, effective_previous_response_id) = match send_backend_stream_for_streaming(
-        &state,
-        request_id_str(request_id.as_ref()).map(ToString::to_string),
-        prepared_branch.as_ref(),
-        request_to_backend,
-    )
-    .await
-    {
-        Ok(response) => response,
-        Err(err) => return backend_request_failure_to_sse(err),
-    };
+    let (backend_events, effective_previous_response_id) =
+        match Box::pin(send_backend_stream_for_streaming(
+            &state,
+            request_id_str(request_id.as_ref()).map(ToString::to_string),
+            prepared_branch.as_ref(),
+            request_to_backend,
+            bootstrap_request_to_backend,
+        ))
+        .await
+        {
+            Ok(response) => response,
+            Err(err) => return backend_request_failure_to_sse(err),
+        };
 
     // Precompute the Anthropic message and emit the standard event flow.
     //
@@ -1767,6 +1986,12 @@ async fn stream_messages(
             provider_model_fingerprint: resolution.selected_backend_model.clone(),
             request_compatibility_fingerprint: request_compatibility_fingerprint.clone(),
             previous_response_id: effective_previous_response_id.clone(),
+            transport_identity: transport_identity.clone(),
+            websocket_chain_id: current_websocket_chain_id_for_branch(
+                &state,
+                transport_identity.as_ref(),
+            ),
+            openai_chain_checkpoints: state.openai_chain_checkpoints.clone(),
             request_id: request_id_str(request_id.as_ref()).map(ToString::to_string),
         });
 
@@ -1796,6 +2021,12 @@ struct PreparedConversationBranch {
     allow_incremental_context: bool,
     fingerprints: BranchFingerprintSet,
     active_messages: Vec<crate::types::AnthropicMessage>,
+    delta_start_index: usize,
+}
+
+struct DurableBranchSnapshot {
+    active_canonical_messages: serde_json::Value,
+    delta_start_index: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1813,6 +2044,9 @@ struct StreamCommitContext {
     provider_model_fingerprint: String,
     request_compatibility_fingerprint: String,
     previous_response_id: Option<String>,
+    transport_identity: Option<ConversationTransportIdentity>,
+    websocket_chain_id: Option<WebSocketChainId>,
+    openai_chain_checkpoints: OpenAiChainCheckpointStore,
     request_id: Option<String>,
 }
 
@@ -1852,6 +2086,31 @@ fn maybe_commit_stream_completion(
     }
 
     if let Some(response_id) = response_id.as_deref() {
+        let websocket_chain_id_for_log = commit
+            .websocket_chain_id
+            .as_ref()
+            .map(WebSocketChainId::as_str)
+            .map(ToString::to_string);
+        if let Some(websocket_chain_id) = commit.websocket_chain_id.clone()
+            && let Some(identity) = commit.transport_identity.as_ref()
+        {
+            commit
+                .openai_chain_checkpoints
+                .associate(identity, response_id, websocket_chain_id);
+        }
+        append_transport_diagnostic(serde_json::json!({
+            "event": "checkpoint_committed",
+            "request_id": commit.request_id,
+            "transport_identity": commit.transport_identity.as_ref().map(ConversationTransportIdentity::key),
+            "claude_session_id": commit.claude_session_id,
+            "branch_id": commit.branch_id,
+            "provider_model_fingerprint": commit.transport_identity.as_ref().map(|identity| identity.provider_model_fingerprint.as_str()),
+            "reasoning_effort": commit.transport_identity.as_ref().map(|identity| identity.reasoning_effort.as_str()),
+            "provider_response_id": response_id,
+            "committed_previous_response_id": commit.previous_response_id,
+            "websocket_chain_id": websocket_chain_id_for_log,
+            "streaming": true,
+        }));
         if let Some(request_id) = commit.request_id.as_deref() {
             info!(
                 request_id = %request_id,
@@ -1901,9 +2160,27 @@ struct SelectedTransport {
     reason: &'static str,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WebSocketChainMatch {
+    Matching,
+    Mismatching,
+    Missing,
+}
+
+#[derive(Debug, Clone)]
+struct WebSocketChainDecision {
+    match_result: WebSocketChainMatch,
+    transport_identity: Option<String>,
+    live_websocket_chain_id: Option<WebSocketChainId>,
+    checkpoint_websocket_chain_id: Option<WebSocketChainId>,
+    checkpoint_response_id: Option<String>,
+    reason: &'static str,
+}
+
 fn select_transport(
     config: &GatewayConfig,
     prepared_branch: Option<&PreparedConversationBranch>,
+    chain_decision: &WebSocketChainDecision,
     provider_model_fingerprint: &str,
     request_compatibility_fingerprint: &str,
 ) -> Result<SelectedTransport, String> {
@@ -1917,54 +2194,47 @@ fn select_transport(
         );
     };
 
-    if mode == OpenAiIncrementalTransportMode::AlwaysFull {
+    let Some(checkpoint) = prepared_branch.branch.openai_checkpoint.as_ref() else {
         return Ok(SelectedTransport {
             mode: TransportMode::Full,
             previous_response_id: None,
-            reason: "always_full_mode",
+            reason: "branch_bootstrap_missing_checkpoint",
         });
+    };
+
+    if checkpoint.provider_model_fingerprint != provider_model_fingerprint {
+        return Ok(SelectedTransport {
+            mode: TransportMode::Full,
+            previous_response_id: None,
+            reason: "branch_bootstrap_model_drift",
+        });
+    }
+
+    match chain_decision.match_result {
+        WebSocketChainMatch::Matching => {}
+        WebSocketChainMatch::Mismatching => {
+            return Ok(SelectedTransport {
+                mode: TransportMode::Full,
+                previous_response_id: None,
+                reason: "branch_bootstrap_websocket_chain_mismatch",
+            });
+        }
+        WebSocketChainMatch::Missing => {
+            return Ok(SelectedTransport {
+                mode: TransportMode::Full,
+                previous_response_id: None,
+                reason: "branch_bootstrap_missing_websocket_chain",
+            });
+        }
     }
 
     if prepared_branch.turn_scope != ConversationTurnScope::Main
         && !prepared_branch.allow_incremental_context
     {
-        return full_or_require_delta_error(
-            mode,
-            "incremental transport is required, but side-turn requests are not eligible for previous_response_id reuse",
-            "side_turn",
+        return Err(
+            "conversation branch has a stored OpenAI checkpoint, but this request is not eligible for checkpoint reuse"
+                .to_string(),
         );
-    }
-
-    if prepared_branch.commit_turn && prepared_branch.branch.compaction_reset_pending {
-        return full_or_require_delta_error(
-            mode,
-            "incremental transport is required, but this branch is waiting for its post-compaction full reset",
-            "compaction_reset_pending",
-        );
-    }
-
-    let Some(checkpoint) = prepared_branch.branch.openai_checkpoint.as_ref() else {
-        return full_or_require_delta_error(
-            mode,
-            "incremental transport is required, but this branch has no stored OpenAI checkpoint",
-            "missing_checkpoint",
-        );
-    };
-
-    if checkpoint.provider_model_fingerprint != provider_model_fingerprint {
-        return match mode {
-            OpenAiIncrementalTransportMode::RequireDelta => Err(format!(
-                "incremental transport is required, but branch checkpoint model '{}' does not match current model '{}'",
-                checkpoint.provider_model_fingerprint, provider_model_fingerprint
-            )),
-            OpenAiIncrementalTransportMode::AlwaysFull | OpenAiIncrementalTransportMode::Auto => {
-                Ok(SelectedTransport {
-                    mode: TransportMode::Full,
-                    previous_response_id: None,
-                    reason: "provider_model_mismatch",
-                })
-            }
-        };
     }
 
     if !prepared_branch.commit_turn && prepared_branch.allow_incremental_context {
@@ -1975,20 +2245,28 @@ fn select_transport(
         });
     }
 
-    if checkpoint.request_compatibility_fingerprint.as_deref()
+    if prepared_branch.commit_turn && prepared_branch.delta_start_index == 0 {
+        return Ok(SelectedTransport {
+            mode: TransportMode::Full,
+            previous_response_id: None,
+            reason: "branch_bootstrap_no_prefix_match",
+        });
+    }
+
+    let reason = if prepared_branch.commit_turn && prepared_branch.branch.compaction_reset_pending {
+        "branch_checkpoint_reuse_compaction_pending"
+    } else if checkpoint.request_compatibility_fingerprint.as_deref()
         != Some(request_compatibility_fingerprint)
     {
-        return full_or_require_delta_error(
-            mode,
-            "incremental transport is required, but the current request's non-input compatibility fingerprint does not match the stored branch checkpoint",
-            "request_compatibility_mismatch",
-        );
-    }
+        "branch_checkpoint_reuse_compatibility_drift"
+    } else {
+        "branch_checkpoint_reuse"
+    };
 
     Ok(SelectedTransport {
         mode: TransportMode::Incremental,
         previous_response_id: Some(checkpoint.response_id.clone()),
-        reason: "branch_checkpoint_reuse",
+        reason,
     })
 }
 
@@ -2049,6 +2327,7 @@ fn prepare_conversation_branch(
 
     if let Some(reason) = internal_reason {
         return latest_context_branch.map(|branch| {
+            let delta_start_index = active_message_count(&branch);
             transient_prepared_branch(
                 claude_session_id,
                 branch,
@@ -2056,25 +2335,33 @@ fn prepare_conversation_branch(
                 reason,
                 fingerprints,
                 normalized.messages.clone(),
+                delta_start_index,
             )
         });
     }
 
     if turn_scope == ConversationTurnScope::Side {
         return latest_context_branch.map(|branch| {
+            let delta_start_index = active_message_count(&branch);
             side_prepared_branch(
                 claude_session_id,
                 branch,
                 turn_scope,
                 fingerprints,
                 normalized.messages.clone(),
+                delta_start_index,
             )
         });
     }
 
-    if let Some(branch) = prefix_match.or_else(|| {
+    if let Some((branch, delta_start_index)) = prefix_match.or_else(|| {
         compaction_command_seen
-            .then(|| latest_context_branch.clone())
+            .then(|| {
+                latest_context_branch.clone().map(|branch| {
+                    let delta_start_index = active_message_count(&branch);
+                    (branch, delta_start_index)
+                })
+            })
             .flatten()
     }) {
         return prepare_matched_durable_branch(
@@ -2083,7 +2370,10 @@ fn prepare_conversation_branch(
             branch,
             turn_scope,
             fingerprints,
-            active_canonical_messages?,
+            DurableBranchSnapshot {
+                active_canonical_messages: active_canonical_messages?,
+                delta_start_index,
+            },
             compaction_command_seen,
         );
     }
@@ -2148,6 +2438,7 @@ fn prepare_rebaseline_durable_branch(
         turn_scope,
         "ambiguous_rebaseline_latest_branch",
         fingerprints,
+        0,
     )
 }
 
@@ -2177,6 +2468,7 @@ fn transient_prepared_branch(
     persistence_reason: &'static str,
     fingerprints: BranchFingerprintSet,
     active_messages: Vec<crate::types::AnthropicMessage>,
+    delta_start_index: usize,
 ) -> PreparedConversationBranch {
     PreparedConversationBranch {
         claude_session_id: claude_session_id.to_string(),
@@ -2189,6 +2481,7 @@ fn transient_prepared_branch(
         allow_incremental_context: true,
         fingerprints,
         active_messages,
+        delta_start_index,
     }
 }
 
@@ -2198,6 +2491,7 @@ fn side_prepared_branch(
     turn_scope: ConversationTurnScope,
     fingerprints: BranchFingerprintSet,
     active_messages: Vec<crate::types::AnthropicMessage>,
+    delta_start_index: usize,
 ) -> PreparedConversationBranch {
     PreparedConversationBranch {
         claude_session_id: claude_session_id.to_string(),
@@ -2210,6 +2504,7 @@ fn side_prepared_branch(
         allow_incremental_context: true,
         fingerprints,
         active_messages,
+        delta_start_index,
     }
 }
 
@@ -2220,6 +2515,7 @@ fn durable_prepared_branch(
     turn_scope: ConversationTurnScope,
     persistence_reason: &'static str,
     fingerprints: BranchFingerprintSet,
+    delta_start_index: usize,
 ) -> Option<PreparedConversationBranch> {
     let active_messages = deserialize_active_messages(branch.active_canonical_messages.as_ref())?;
     Some(PreparedConversationBranch {
@@ -2233,6 +2529,7 @@ fn durable_prepared_branch(
         allow_incremental_context: true,
         fingerprints,
         active_messages,
+        delta_start_index,
     })
 }
 
@@ -2242,7 +2539,7 @@ fn prepare_matched_durable_branch(
     branch: BranchMetadata,
     turn_scope: ConversationTurnScope,
     fingerprints: BranchFingerprintSet,
-    active_canonical_messages: serde_json::Value,
+    snapshot: DurableBranchSnapshot,
     compaction_command_seen: bool,
 ) -> Option<PreparedConversationBranch> {
     let branch = apply_compaction_if_needed(
@@ -2258,7 +2555,7 @@ fn prepare_matched_durable_branch(
             claude_session_id,
             &branch.branch_id,
             &ReconcileSnapshotParams {
-                messages: active_canonical_messages,
+                messages: snapshot.active_canonical_messages,
                 fingerprints: fingerprints.clone(),
             },
         )
@@ -2270,6 +2567,7 @@ fn prepare_matched_durable_branch(
         turn_scope,
         "matched_existing_prefix",
         fingerprints,
+        snapshot.delta_start_index,
     )
 }
 
@@ -2317,6 +2615,7 @@ fn prepare_initial_durable_branch(
         turn_scope,
         "initial_or_selected_durable_branch",
         fingerprints,
+        0,
     )
 }
 
@@ -2373,7 +2672,7 @@ fn apply_compaction_if_needed(
 fn best_prefix_matched_branch(
     branches: &[BranchMetadata],
     incoming_messages: &[crate::types::AnthropicMessage],
-) -> Option<BranchMetadata> {
+) -> Option<(BranchMetadata, usize)> {
     branches
         .iter()
         .filter_map(|branch| {
@@ -2386,7 +2685,12 @@ fn best_prefix_matched_branch(
             ))
         })
         .max_by_key(|(message_count, updated_at, _)| (*message_count, *updated_at))
-        .map(|(_, _, branch)| branch)
+        .map(|(message_count, _, branch)| (branch, message_count))
+}
+
+fn active_message_count(branch: &BranchMetadata) -> usize {
+    deserialize_active_messages(branch.active_canonical_messages.as_ref())
+        .map_or(0, |messages| messages.len())
 }
 
 fn latest_checkpoint_branch(branches: &[BranchMetadata]) -> Option<BranchMetadata> {
@@ -2420,7 +2724,100 @@ fn stored_messages_are_prefix(
 }
 
 fn canonical_message_value(message: &crate::types::AnthropicMessage) -> serde_json::Value {
-    serde_json::to_value(message).unwrap_or(serde_json::Value::Null)
+    serde_json::json!({
+        "role": message.role,
+        "content": canonical_content_value(&message.content),
+    })
+}
+
+fn canonical_content_value(content: &crate::types::AnthropicContent) -> serde_json::Value {
+    match content {
+        crate::types::AnthropicContent::Text(text) => {
+            serde_json::json!([{ "type": "text", "text": text }])
+        }
+        crate::types::AnthropicContent::Blocks(blocks) => serde_json::Value::Array(
+            blocks
+                .iter()
+                .map(canonical_content_block_value)
+                .collect::<Vec<_>>(),
+        ),
+    }
+}
+
+fn canonical_content_block_value(block: &crate::types::AnthropicContentBlock) -> serde_json::Value {
+    let mut object = serde_json::Map::new();
+    object.insert(
+        "type".to_string(),
+        serde_json::Value::String(block.block_type.clone()),
+    );
+    insert_optional_string(&mut object, "text", block.text.as_deref());
+    insert_optional_string(&mut object, "id", block.id.as_deref());
+    insert_optional_string(&mut object, "name", block.name.as_deref());
+    insert_optional_value(&mut object, "input", block.input.as_ref());
+    insert_optional_string(&mut object, "tool_use_id", block.tool_use_id.as_deref());
+    insert_optional_value(&mut object, "content", block.content.as_ref());
+    if let Some(is_error) = block.is_error {
+        object.insert("is_error".to_string(), serde_json::Value::Bool(is_error));
+    }
+    if let Some(source) = block.source.as_ref()
+        && let Ok(source_value) = serde_json::to_value(source)
+    {
+        object.insert(
+            "source".to_string(),
+            strip_transient_message_metadata(source_value),
+        );
+    }
+    for (key, value) in &block.extra {
+        if key != "cache_control" {
+            object.insert(key.clone(), strip_transient_message_metadata(value.clone()));
+        }
+    }
+    serde_json::Value::Object(object)
+}
+
+fn insert_optional_string(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    value: Option<&str>,
+) {
+    if let Some(value) = value {
+        object.insert(
+            key.to_string(),
+            serde_json::Value::String(value.to_string()),
+        );
+    }
+}
+
+fn insert_optional_value(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    value: Option<&serde_json::Value>,
+) {
+    if let Some(value) = value {
+        object.insert(
+            key.to_string(),
+            strip_transient_message_metadata(value.clone()),
+        );
+    }
+}
+
+fn strip_transient_message_metadata(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(object) => serde_json::Value::Object(
+            object
+                .into_iter()
+                .filter(|(key, _)| key != "cache_control")
+                .map(|(key, value)| (key, strip_transient_message_metadata(value)))
+                .collect(),
+        ),
+        serde_json::Value::Array(values) => serde_json::Value::Array(
+            values
+                .into_iter()
+                .map(strip_transient_message_metadata)
+                .collect(),
+        ),
+        value => value,
+    }
 }
 
 fn classify_transient_internal_request(
@@ -2504,11 +2901,20 @@ fn log_transport_selection(
     prepared_branch: Option<&PreparedConversationBranch>,
     selected_transport: &SelectedTransport,
     provider_model_fingerprint: &str,
+    chain_decision: Option<&WebSocketChainDecision>,
 ) {
     let transport_mode = match selected_transport.mode {
         TransportMode::Full => "full",
         TransportMode::Incremental => "incremental",
     };
+    append_transport_selection_diagnostic(
+        request_id,
+        prepared_branch,
+        selected_transport,
+        provider_model_fingerprint,
+        chain_decision,
+        transport_mode,
+    );
 
     if let Some(prepared_branch) = prepared_branch {
         if let Some(request_id) = request_id_str(request_id) {
@@ -2521,6 +2927,11 @@ fn log_transport_selection(
                 previous_response_id = ?selected_transport.previous_response_id,
                 provider_model_fingerprint,
                 compaction_reset_pending = prepared_branch.branch.compaction_reset_pending,
+                websocket_chain_match = ?chain_decision.map(|decision| decision.match_result),
+                websocket_chain_reason = ?chain_decision.map(|decision| decision.reason),
+                live_websocket_chain_id = ?chain_decision.and_then(|decision| decision.live_websocket_chain_id.as_ref()).map(WebSocketChainId::as_str),
+                checkpoint_websocket_chain_id = ?chain_decision.and_then(|decision| decision.checkpoint_websocket_chain_id.as_ref()).map(WebSocketChainId::as_str),
+                checkpoint_response_id = ?chain_decision.and_then(|decision| decision.checkpoint_response_id.as_deref()),
                 "selected conversation-state transport mode"
             );
         } else {
@@ -2532,6 +2943,11 @@ fn log_transport_selection(
                 previous_response_id = ?selected_transport.previous_response_id,
                 provider_model_fingerprint,
                 compaction_reset_pending = prepared_branch.branch.compaction_reset_pending,
+                websocket_chain_match = ?chain_decision.map(|decision| decision.match_result),
+                websocket_chain_reason = ?chain_decision.map(|decision| decision.reason),
+                live_websocket_chain_id = ?chain_decision.and_then(|decision| decision.live_websocket_chain_id.as_ref()).map(WebSocketChainId::as_str),
+                checkpoint_websocket_chain_id = ?chain_decision.and_then(|decision| decision.checkpoint_websocket_chain_id.as_ref()).map(WebSocketChainId::as_str),
+                checkpoint_response_id = ?chain_decision.and_then(|decision| decision.checkpoint_response_id.as_deref()),
                 "selected conversation-state transport mode"
             );
         }
@@ -2542,6 +2958,11 @@ fn log_transport_selection(
             transport_reason = selected_transport.reason,
             previous_response_id = ?selected_transport.previous_response_id,
             provider_model_fingerprint,
+            websocket_chain_match = ?chain_decision.map(|decision| decision.match_result),
+            websocket_chain_reason = ?chain_decision.map(|decision| decision.reason),
+            live_websocket_chain_id = ?chain_decision.and_then(|decision| decision.live_websocket_chain_id.as_ref()).map(WebSocketChainId::as_str),
+            checkpoint_websocket_chain_id = ?chain_decision.and_then(|decision| decision.checkpoint_websocket_chain_id.as_ref()).map(WebSocketChainId::as_str),
+            checkpoint_response_id = ?chain_decision.and_then(|decision| decision.checkpoint_response_id.as_deref()),
             "selected conversation-state transport mode without branch context"
         );
     } else {
@@ -2550,9 +2971,130 @@ fn log_transport_selection(
             transport_reason = selected_transport.reason,
             previous_response_id = ?selected_transport.previous_response_id,
             provider_model_fingerprint,
+            websocket_chain_match = ?chain_decision.map(|decision| decision.match_result),
+            websocket_chain_reason = ?chain_decision.map(|decision| decision.reason),
+            live_websocket_chain_id = ?chain_decision.and_then(|decision| decision.live_websocket_chain_id.as_ref()).map(WebSocketChainId::as_str),
+            checkpoint_websocket_chain_id = ?chain_decision.and_then(|decision| decision.checkpoint_websocket_chain_id.as_ref()).map(WebSocketChainId::as_str),
+            checkpoint_response_id = ?chain_decision.and_then(|decision| decision.checkpoint_response_id.as_deref()),
             "selected conversation-state transport mode without branch context"
         );
     }
+}
+
+fn append_transport_selection_diagnostic(
+    request_id: Option<&axum::extract::Extension<RequestId>>,
+    prepared_branch: Option<&PreparedConversationBranch>,
+    selected_transport: &SelectedTransport,
+    provider_model_fingerprint: &str,
+    chain_decision: Option<&WebSocketChainDecision>,
+    transport_mode: &str,
+) {
+    let mut event = serde_json::json!({
+        "event": "transport_selected",
+        "request_id": request_id_str(request_id),
+        "transport_mode": transport_mode,
+        "transport_reason": selected_transport.reason,
+        "previous_response_id": selected_transport.previous_response_id,
+        "provider_model_fingerprint": provider_model_fingerprint,
+        "transport_identity": chain_decision.and_then(|decision| decision.transport_identity.as_deref()),
+        "websocket_chain_match": chain_decision.map(|decision| match decision.match_result {
+            WebSocketChainMatch::Matching => "matching",
+            WebSocketChainMatch::Mismatching => "mismatching",
+            WebSocketChainMatch::Missing => "missing",
+        }),
+        "websocket_chain_reason": chain_decision.map(|decision| decision.reason),
+        "live_websocket_chain_id": chain_decision
+            .and_then(|decision| decision.live_websocket_chain_id.as_ref())
+            .map(WebSocketChainId::as_str),
+        "checkpoint_websocket_chain_id": chain_decision
+            .and_then(|decision| decision.checkpoint_websocket_chain_id.as_ref())
+            .map(WebSocketChainId::as_str),
+        "checkpoint_response_id": chain_decision
+            .and_then(|decision| decision.checkpoint_response_id.as_deref()),
+    });
+
+    if let Some(prepared_branch) = prepared_branch
+        && let Some(object) = event.as_object_mut()
+    {
+        object.insert(
+            "claude_session_id".to_string(),
+            serde_json::Value::String(prepared_branch.claude_session_id.clone()),
+        );
+        object.insert(
+            "branch_id".to_string(),
+            serde_json::Value::String(prepared_branch.branch.branch_id.clone()),
+        );
+        object.insert(
+            "turn_scope".to_string(),
+            serde_json::Value::String(format!("{:?}", prepared_branch.turn_scope)),
+        );
+        object.insert(
+            "commit_turn".to_string(),
+            serde_json::Value::Bool(prepared_branch.commit_turn),
+        );
+        object.insert(
+            "delta_start_index".to_string(),
+            serde_json::Value::from(prepared_branch.delta_start_index),
+        );
+        object.insert(
+            "active_messages_len".to_string(),
+            serde_json::Value::from(prepared_branch.active_messages.len()),
+        );
+        object.insert(
+            "compaction_reset_pending".to_string(),
+            serde_json::Value::Bool(prepared_branch.branch.compaction_reset_pending),
+        );
+    }
+
+    append_transport_diagnostic(event);
+}
+
+fn append_transport_diagnostic(mut event: serde_json::Value) {
+    if let Some(object) = event.as_object_mut() {
+        object.insert(
+            "timestamp_unix_ms".to_string(),
+            serde_json::Value::from(now_unix_millis()),
+        );
+    }
+
+    let Some(path) = transport_diagnostics_log_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent()
+        && fs::create_dir_all(parent).is_err()
+    {
+        return;
+    }
+    let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) else {
+        return;
+    };
+    if serde_json::to_writer(&mut file, &event).is_ok() {
+        let _ = writeln!(file);
+    }
+}
+
+fn transport_diagnostics_log_path() -> Option<PathBuf> {
+    if let Ok(gateway_home) = std::env::var("GATEWAY_HOME") {
+        return Some(
+            PathBuf::from(gateway_home)
+                .join("logs")
+                .join("transport-decisions.jsonl"),
+        );
+    }
+    std::env::var_os("HOME").map(|home| {
+        PathBuf::from(home)
+            .join(".gateway")
+            .join("logs")
+            .join("transport-decisions.jsonl")
+    })
+}
+
+fn now_unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            duration.as_millis().try_into().unwrap_or(u64::MAX)
+        })
 }
 
 fn branch_fingerprints_from_messages(
@@ -2651,6 +3193,27 @@ fn request_with_messages(
         context_management: req.context_management.clone(),
         output_config: req.output_config.clone(),
     }
+}
+
+fn request_for_selected_transport(
+    req: &AnthropicMessagesRequest,
+    prepared_branch: Option<&PreparedConversationBranch>,
+    selected_transport: &SelectedTransport,
+) -> AnthropicMessagesRequest {
+    let Some(prepared_branch) = prepared_branch else {
+        return req.clone();
+    };
+
+    let messages = match selected_transport.mode {
+        TransportMode::Full => prepared_branch.active_messages.clone(),
+        TransportMode::Incremental => prepared_branch
+            .active_messages
+            .get(prepared_branch.delta_start_index..)
+            .unwrap_or_default()
+            .to_vec(),
+    };
+
+    request_with_messages(req, messages)
 }
 
 fn sha256_hex(input: &str) -> String {
@@ -2817,6 +3380,7 @@ mod messages_tests {
     use super::build_tool_translation_context;
     use super::prepare_conversation_branch;
     use super::request_compatibility_fingerprint;
+    use super::stored_messages_are_prefix;
     use super::tool_call_content_block;
     use super::translate::{
         ToolTranslationContext, TranslateResult, translate_request_with_context,
@@ -3345,10 +3909,6 @@ mod messages_tests {
     struct PreviousResponseIdWsMatcher(Option<String>);
 
     impl PreviousResponseIdWsMatcher {
-        fn some(value: &str) -> Self {
-            Self(Some(value.to_string()))
-        }
-
         fn none() -> Self {
             Self(None)
         }
@@ -4124,38 +4684,33 @@ mod messages_tests {
     }
 
     #[tokio::test]
-    async fn unary_delta_rejection_invalidates_checkpoint_and_retries_full_once() {
+    async fn unary_delta_rejection_does_not_retry_with_null_previous_response_id() {
         if !wiremock_enabled() {
             return;
         }
         let harness = BranchRouteTestHarness::new("gateway_conversation_state").await;
         mount_ws_response(
             &harness.ws_mock,
-            PreviousResponseIdWsMatcher::some("resp_prev"),
+            PreviousResponseIdWsMatcher::none(),
             vec![failed_websocket_event(
                 "previous_response_id resp_prev not found",
             )],
         )
         .await;
-        mount_ws_response(
-            &harness.ws_mock,
-            PreviousResponseIdWsMatcher::none(),
-            success_websocket_events("hello from fallback", "resp_new"),
-        )
-        .await;
-        let json = send_unary_message(
+
+        let response = send_unary_message_response(
             harness.state(),
             Some(harness.claude_session_id()),
             serde_json::json!([{ "role": "user", "content": "hello" }]),
         )
         .await;
         verify_ws(&harness.ws_mock).await;
-        assert_unary_text(&json, "hello from fallback");
-        assert_branch_checkpoint(&harness.branch(), "resp_new", None);
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_branch_checkpoint(&harness.branch(), "resp_prev", Some("resp_seed"));
     }
 
     #[tokio::test]
-    async fn compact_history_forces_one_full_request_and_clears_reset_after_success() {
+    async fn compact_history_uses_delta_and_clears_reset_after_success() {
         if !wiremock_enabled() {
             return;
         }
@@ -4197,7 +4752,7 @@ mod messages_tests {
         let harness = BranchRouteTestHarness::new("gateway_side_turn_state").await;
         mount_ws_response(
             &harness.ws_mock,
-            PreviousResponseIdWsMatcher::some("resp_prev"),
+            PreviousResponseIdWsMatcher::none(),
             success_websocket_events("side answer", "resp_side_turn"),
         )
         .await;
@@ -4239,7 +4794,7 @@ mod messages_tests {
         let harness = BranchRouteTestHarness::new("gateway_permission_classifier_state").await;
         mount_ws_response(
             &harness.ws_mock,
-            PreviousResponseIdWsMatcher::some("resp_prev"),
+            PreviousResponseIdWsMatcher::none(),
             success_websocket_events("<block>no</block>", "resp_internal_classifier"),
         )
         .await;
@@ -4280,7 +4835,7 @@ mod messages_tests {
         let harness = BranchRouteTestHarness::new("gateway_ambiguous_transient_state").await;
         mount_ws_response(
             &harness.ws_mock,
-            PreviousResponseIdWsMatcher::some("resp_prev"),
+            PreviousResponseIdWsMatcher::none(),
             success_websocket_events("orthogonal answer", "resp_orthogonal"),
         )
         .await;
@@ -4295,7 +4850,7 @@ mod messages_tests {
 
         assert_unary_text(&json, "orthogonal answer");
         assert_eq!(harness.branch_count(), 1);
-        assert_branch_checkpoint(&harness.branch(), "resp_orthogonal", Some("resp_prev"));
+        assert_branch_checkpoint(&harness.branch(), "resp_orthogonal", None);
         assert_eq!(
             harness.branch().active_canonical_messages,
             Some(serde_json::json!([{ "role": "user", "content": "Map project structure" }]))
@@ -4303,7 +4858,7 @@ mod messages_tests {
     }
 
     #[tokio::test]
-    async fn full_mode_restart_replay_reuses_same_branch_without_duplicate_snapshot_events() {
+    async fn checkpointed_restart_replay_uses_delta_without_duplicate_snapshot_events() {
         if !wiremock_enabled() {
             return;
         }
@@ -4315,7 +4870,7 @@ mod messages_tests {
         mount_ws_response(
             &harness.ws_mock,
             PreviousResponseIdWsMatcher::none(),
-            success_websocket_events("full mode answer", "resp_full_mode"),
+            success_websocket_events("delta answer", "resp_delta_mode"),
         )
         .await;
 
@@ -4327,13 +4882,13 @@ mod messages_tests {
         )
         .await;
         verify_ws(&harness.ws_mock).await;
-        assert_unary_text(&first, "full mode answer");
+        assert_unary_text(&first, "delta answer");
 
         let restart_ws_mock = WsMockServer::start().await;
         mount_ws_response(
             &restart_ws_mock,
             PreviousResponseIdWsMatcher::none(),
-            success_websocket_events("full mode answer", "resp_full_mode"),
+            success_websocket_events("delta answer after restart", "resp_delta_mode_restart"),
         )
         .await;
         let restart_base_url =
@@ -4346,14 +4901,14 @@ mod messages_tests {
         )
         .await;
         verify_ws(&restart_ws_mock).await;
-        assert_unary_text(&second, "full mode answer");
+        assert_unary_text(&second, "delta answer after restart");
 
         assert_eq!(harness.branch_count(), 1);
         assert_eq!(inbound_snapshot_reconcile_count(&harness.ledger()), 0);
     }
 
     #[tokio::test]
-    async fn full_mode_side_turn_restart_keeps_main_checkpoint_and_snapshot() {
+    async fn checkpointed_side_turn_restart_uses_delta_and_keeps_main_checkpoint() {
         if !wiremock_enabled() {
             return;
         }
@@ -4399,7 +4954,7 @@ mod messages_tests {
     }
 
     #[tokio::test]
-    async fn full_mode_compaction_restart_replaces_active_state_safely() {
+    async fn checkpointed_compaction_restart_uses_delta_and_replaces_active_state_safely() {
         if !wiremock_enabled() {
             return;
         }
@@ -4457,7 +5012,7 @@ mod messages_tests {
         let harness = BranchRouteTestHarness::new("gateway_generic_backend_error").await;
         mount_ws_response(
             &harness.ws_mock,
-            PreviousResponseIdWsMatcher::some("resp_prev"),
+            PreviousResponseIdWsMatcher::none(),
             vec![failed_websocket_event("tool schema validation failed")],
         )
         .await;
@@ -4484,7 +5039,7 @@ mod messages_tests {
         let harness = BranchRouteTestHarness::new("gateway_interrupted_stream").await;
         mount_ws_response(
             &harness.ws_mock,
-            PreviousResponseIdWsMatcher::some("resp_prev"),
+            PreviousResponseIdWsMatcher::none(),
             vec![
                 Message::Text(
                     serde_json::json!({
@@ -4495,6 +5050,69 @@ mod messages_tests {
                     .into(),
                 ),
                 failed_websocket_event("stream interrupted"),
+            ],
+        )
+        .await;
+
+        let events = send_streaming_message(
+            harness.state(),
+            Some(harness.claude_session_id()),
+            serde_json::json!([{ "role": "user", "content": "hello" }]),
+        )
+        .await;
+        verify_ws(&harness.ws_mock).await;
+
+        assert!(!events.is_empty(), "expected partial SSE events");
+        let branch = harness.branch();
+        assert_branch_checkpoint(&branch, "resp_prev", Some("resp_seed"));
+        assert_eq!(branch.last_main_turn_id.as_deref(), Some("seed-turn"));
+    }
+
+    #[tokio::test]
+    async fn websocket_bootstrap_without_chain_proof_succeeds_and_commits() {
+        if !wiremock_enabled() {
+            return;
+        }
+        let harness = BranchRouteTestHarness::new("gateway_bootstrap_without_chain_proof").await;
+        mount_ws_response(
+            &harness.ws_mock,
+            PreviousResponseIdWsMatcher::none(),
+            success_websocket_events("hello after bootstrap", "resp_bootstrap"),
+        )
+        .await;
+
+        let json = send_unary_message(
+            harness.state(),
+            Some(harness.claude_session_id()),
+            serde_json::json!([{ "role": "user", "content": "hello" }]),
+        )
+        .await;
+        verify_ws(&harness.ws_mock).await;
+
+        assert_unary_text(&json, "hello after bootstrap");
+        let branch = harness.branch();
+        assert_branch_checkpoint(&branch, "resp_bootstrap", None);
+    }
+
+    #[tokio::test]
+    async fn stale_websocket_after_visible_output_does_not_replay_or_commit() {
+        if !wiremock_enabled() {
+            return;
+        }
+        let harness = BranchRouteTestHarness::new("gateway_stale_ws_after_output").await;
+        mount_ws_response(
+            &harness.ws_mock,
+            PreviousResponseIdWsMatcher::none(),
+            vec![
+                Message::Text(
+                    serde_json::json!({
+                        "type": "response.output_text.delta",
+                        "delta": "partial",
+                    })
+                    .to_string()
+                    .into(),
+                ),
+                Message::Close(None),
             ],
         )
         .await;
@@ -4581,6 +5199,78 @@ mod messages_tests {
     }
 
     #[test]
+    fn prefix_match_normalizes_text_string_and_text_block_shapes() {
+        let stored = vec![AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Blocks(vec![AnthropicContentBlock {
+                block_type: "text".to_string(),
+                text: Some("Tell me a joke about 2 monkeys".to_string()),
+                id: None,
+                name: None,
+                input: None,
+                tool_use_id: None,
+                content: None,
+                is_error: None,
+                source: None,
+                extra: std::collections::BTreeMap::new(),
+            }]),
+        }];
+        let incoming = vec![
+            AnthropicMessage {
+                role: "user".to_string(),
+                content: AnthropicContent::Text("Tell me a joke about 2 monkeys".to_string()),
+            },
+            AnthropicMessage {
+                role: "user".to_string(),
+                content: AnthropicContent::Text("Tell me a joke about 3 monkeys".to_string()),
+            },
+        ];
+
+        assert!(stored_messages_are_prefix(&stored, &incoming));
+    }
+
+    #[test]
+    fn prefix_match_ignores_ephemeral_cache_control_metadata() {
+        let mut extra = std::collections::BTreeMap::new();
+        extra.insert(
+            "cache_control".to_string(),
+            serde_json::json!({ "type": "ephemeral" }),
+        );
+        let stored = vec![AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Blocks(vec![AnthropicContentBlock {
+                block_type: "text".to_string(),
+                text: Some("Tell me a joke about 3 monkeys".to_string()),
+                id: None,
+                name: None,
+                input: None,
+                tool_use_id: None,
+                content: None,
+                is_error: None,
+                source: None,
+                extra,
+            }]),
+        }];
+        let incoming = vec![AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Blocks(vec![AnthropicContentBlock {
+                block_type: "text".to_string(),
+                text: Some("Tell me a joke about 3 monkeys".to_string()),
+                id: None,
+                name: None,
+                input: None,
+                tool_use_id: None,
+                content: None,
+                is_error: None,
+                source: None,
+                extra: std::collections::BTreeMap::new(),
+            }]),
+        }];
+
+        assert!(stored_messages_are_prefix(&stored, &incoming));
+    }
+
+    #[test]
     fn persisted_canonical_messages_render_same_backend_request_as_direct_request() {
         let req = AnthropicMessagesRequest {
             model: DEFAULT_BACKEND_MODEL.to_string(),
@@ -4651,7 +5341,7 @@ mod messages_tests {
         let harness = BranchRouteTestHarness::new("gateway_stream_commit_state").await;
         mount_ws_response(
             &harness.ws_mock,
-            PreviousResponseIdWsMatcher::some("resp_prev"),
+            PreviousResponseIdWsMatcher::none(),
             success_websocket_events("hello from stream", "resp_stream_next"),
         )
         .await;
@@ -4674,27 +5364,21 @@ mod messages_tests {
             branch.current_checkpoint_id.as_deref(),
             Some("resp_stream_next")
         );
-        assert_branch_checkpoint(&branch, "resp_stream_next", Some("resp_prev"));
+        assert_branch_checkpoint(&branch, "resp_stream_next", None);
     }
 
     #[tokio::test]
-    async fn streaming_delta_rejection_rebaselines_over_websocket_and_commits_checkpoint() {
+    async fn streaming_delta_rejection_does_not_retry_with_null_previous_response_id() {
         if !wiremock_enabled() {
             return;
         }
         let harness = BranchRouteTestHarness::new("gateway_stream_delta_rebaseline").await;
         mount_ws_response(
             &harness.ws_mock,
-            PreviousResponseIdWsMatcher::some("resp_prev"),
+            PreviousResponseIdWsMatcher::none(),
             vec![failed_websocket_event(
                 "previous_response_id resp_prev not found",
             )],
-        )
-        .await;
-        mount_ws_response(
-            &harness.ws_mock,
-            PreviousResponseIdWsMatcher::none(),
-            success_websocket_events("hello after stream rebaseline", "resp_stream_rebaseline"),
         )
         .await;
 
@@ -4708,14 +5392,14 @@ mod messages_tests {
 
         assert!(
             events.iter().any(|(_, data)| {
-                data.get("delta")
-                    .and_then(|delta| delta.get("text"))
+                data.get("error")
+                    .and_then(|error| error.get("type"))
                     .and_then(serde_json::Value::as_str)
-                    == Some("hello after stream rebaseline")
+                    == Some("backend_error")
             }),
-            "expected fallback response text in SSE stream"
+            "expected backend error SSE without null previous_response_id retry"
         );
-        assert_branch_checkpoint(&harness.branch(), "resp_stream_rebaseline", None);
+        assert_branch_checkpoint(&harness.branch(), "resp_prev", Some("resp_seed"));
     }
 
     #[tokio::test]
@@ -5060,10 +5744,12 @@ mod models_api_tests {
 #[cfg(test)]
 mod transport_selection_tests {
     use super::{
-        BranchSelectionAction, ConversationPersistenceClass, PreparedConversationBranch,
-        SelectedTransport, TransportMode, is_known_delta_rejection, select_transport,
+        BranchSelectionAction, ConversationPersistenceClass, OpenAiChainCheckpointStore,
+        PreparedConversationBranch, SelectedTransport, TransportMode, WebSocketChainMatch,
+        is_known_delta_rejection, normalized_reasoning_effort, select_transport,
+        transport_identity_for_branch,
     };
-    use gateway_backend_codex::client::BackendError;
+    use gateway_backend_codex::client::{BackendError, WebSocketChainId};
     use gateway_core::config::{
         GatewayConfig, OpenAiIncrementalTransportConfig, OpenAiIncrementalTransportMode,
         OpenAiProviderConfig, ProviderConfigs,
@@ -5111,7 +5797,118 @@ mod transport_selection_tests {
             allow_incremental_context: turn_scope == ConversationTurnScope::Main,
             fingerprints: gateway_state::BranchFingerprintSet::default(),
             active_messages: Vec::new(),
+            delta_start_index: 1,
         }
+    }
+
+    fn chain_decision(match_result: WebSocketChainMatch) -> super::WebSocketChainDecision {
+        super::WebSocketChainDecision {
+            match_result,
+            transport_identity: Some("test-identity".to_string()),
+            live_websocket_chain_id: None,
+            checkpoint_websocket_chain_id: None,
+            checkpoint_response_id: None,
+            reason: "test",
+        }
+    }
+
+    fn checkpoint(response_id: &str, model: &str, fingerprint: &str) -> OpenAiCheckpoint {
+        OpenAiCheckpoint {
+            response_id: response_id.to_string(),
+            previous_response_id: Some("resp_parent".to_string()),
+            provider_model_fingerprint: model.to_string(),
+            request_compatibility_fingerprint: Some(fingerprint.to_string()),
+        }
+    }
+
+    #[test]
+    fn transport_identity_key_includes_session_branch_model_and_effort() {
+        let prepared = prepared_branch(ConversationTurnScope::Main, None, false);
+        let reasoning = serde_json::json!({ "effort": "HIGH" });
+
+        let identity =
+            transport_identity_for_branch(Some(&prepared), "gpt-5.6-terra", Some(&reasoning))
+                .expect("identity should be available for prepared branches");
+
+        assert_eq!(identity.key(), "v1:session-1:branch-1:gpt-5.6-terra:high");
+    }
+
+    #[test]
+    fn transport_identity_defaults_missing_effort_to_stable_sentinel() {
+        let prepared = prepared_branch(ConversationTurnScope::Main, None, false);
+
+        let identity = transport_identity_for_branch(Some(&prepared), "gpt-5.5", None)
+            .expect("identity should be available for prepared branches");
+
+        assert_eq!(identity.key(), "v1:session-1:branch-1:gpt-5.5:default");
+        assert_eq!(normalized_reasoning_effort(None), "default");
+    }
+
+    #[test]
+    fn websocket_chain_association_is_keyed_by_response_id() {
+        let store = OpenAiChainCheckpointStore::default();
+        let identity =
+            super::ConversationTransportIdentity::new("session-1", "branch-1", "gpt-5", "default");
+        store.associate(&identity, "resp_main", WebSocketChainId::new("chain-1"));
+        store.associate(&identity, "resp_side", WebSocketChainId::new("chain-1"));
+
+        assert_eq!(
+            store
+                .websocket_chain_id_for_response(&identity, "resp_main")
+                .as_ref()
+                .map(WebSocketChainId::as_str),
+            Some("chain-1")
+        );
+        assert_eq!(
+            store
+                .websocket_chain_id_for_response(&identity, "resp_side")
+                .as_ref()
+                .map(WebSocketChainId::as_str),
+            Some("chain-1")
+        );
+    }
+
+    #[test]
+    fn side_response_association_does_not_authorize_main_checkpoint() {
+        let store = OpenAiChainCheckpointStore::default();
+        let identity =
+            super::ConversationTransportIdentity::new("session-1", "branch-1", "gpt-5", "default");
+
+        store.associate(&identity, "resp_side", WebSocketChainId::new("chain-1"));
+
+        assert!(
+            store
+                .websocket_chain_id_for_response(&identity, "resp_main")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn websocket_chain_association_is_scoped_by_transport_identity() {
+        let store = OpenAiChainCheckpointStore::default();
+        let default_effort =
+            super::ConversationTransportIdentity::new("session-1", "branch-1", "gpt-5", "default");
+        let high_effort =
+            super::ConversationTransportIdentity::new("session-1", "branch-1", "gpt-5", "high");
+
+        store.associate(
+            &default_effort,
+            "resp_1",
+            WebSocketChainId::new("chain-default"),
+        );
+
+        assert_eq!(
+            store
+                .websocket_chain_id_for_response(&default_effort, "resp_1")
+                .as_ref()
+                .map(WebSocketChainId::as_str),
+            Some("chain-default")
+        );
+        assert!(
+            store
+                .websocket_chain_id_for_response(&high_effort, "resp_1")
+                .is_none()
+        );
     }
 
     #[test]
@@ -5119,6 +5916,7 @@ mod transport_selection_tests {
         let selected = select_transport(
             &config_with_mode(OpenAiIncrementalTransportMode::Auto),
             None,
+            &chain_decision(WebSocketChainMatch::Missing),
             "gpt-5",
             "fp-1",
         )
@@ -5135,19 +5933,15 @@ mod transport_selection_tests {
     }
 
     #[test]
-    fn auto_mode_with_matching_checkpoint_uses_incremental_transport() {
+    fn existing_canonical_session_with_matching_chain_uses_delta() {
         let selected = select_transport(
             &config_with_mode(OpenAiIncrementalTransportMode::Auto),
             Some(&prepared_branch(
                 ConversationTurnScope::Main,
-                Some(OpenAiCheckpoint {
-                    response_id: "resp_123".to_string(),
-                    previous_response_id: Some("resp_122".to_string()),
-                    provider_model_fingerprint: "gpt-5".to_string(),
-                    request_compatibility_fingerprint: Some("fp-1".to_string()),
-                }),
+                Some(checkpoint("resp_123", "gpt-5", "fp-1")),
                 false,
             )),
+            &chain_decision(WebSocketChainMatch::Matching),
             "gpt-5",
             "fp-1",
         )
@@ -5164,47 +5958,173 @@ mod transport_selection_tests {
     }
 
     #[test]
-    fn auto_mode_forces_full_transport_when_compaction_reset_is_pending() {
+    fn existing_canonical_session_after_gateway_restart_bootstraps_without_previous_response_id() {
         let selected = select_transport(
             &config_with_mode(OpenAiIncrementalTransportMode::Auto),
             Some(&prepared_branch(
                 ConversationTurnScope::Main,
-                Some(OpenAiCheckpoint {
-                    response_id: "resp_123".to_string(),
-                    previous_response_id: Some("resp_122".to_string()),
-                    provider_model_fingerprint: "gpt-5".to_string(),
-                    request_compatibility_fingerprint: Some("fp-1".to_string()),
-                }),
-                true,
+                Some(checkpoint("resp_123", "gpt-5", "fp-1")),
+                false,
             )),
+            &chain_decision(WebSocketChainMatch::Missing),
             "gpt-5",
             "fp-1",
         )
-        .expect("auto mode should fall back to full transport after compaction");
+        .expect("missing websocket chain should force bootstrap");
 
         assert_eq!(
             selected,
             SelectedTransport {
                 mode: TransportMode::Full,
                 previous_response_id: None,
-                reason: "compaction_reset_pending",
+                reason: "branch_bootstrap_missing_websocket_chain",
             }
         );
     }
 
     #[test]
-    fn require_delta_without_checkpoint_returns_error() {
-        let err = select_transport(
-            &config_with_mode(OpenAiIncrementalTransportMode::RequireDelta),
-            Some(&prepared_branch(ConversationTurnScope::Main, None, false)),
+    fn existing_canonical_session_with_mismatched_chain_bootstraps_without_previous_response_id() {
+        let selected = select_transport(
+            &config_with_mode(OpenAiIncrementalTransportMode::Auto),
+            Some(&prepared_branch(
+                ConversationTurnScope::Main,
+                Some(checkpoint("resp_123", "gpt-5", "fp-1")),
+                false,
+            )),
+            &chain_decision(WebSocketChainMatch::Mismatching),
             "gpt-5",
             "fp-1",
         )
-        .expect_err("require_delta must reject branches without checkpoints");
+        .expect("mismatched websocket chain should force bootstrap");
 
         assert_eq!(
-            err,
-            "incremental transport is required, but this branch has no stored OpenAI checkpoint"
+            selected,
+            SelectedTransport {
+                mode: TransportMode::Full,
+                previous_response_id: None,
+                reason: "branch_bootstrap_websocket_chain_mismatch",
+            }
+        );
+    }
+
+    #[test]
+    fn checkpointed_branch_uses_delta_when_compaction_reset_is_pending() {
+        let selected = select_transport(
+            &config_with_mode(OpenAiIncrementalTransportMode::Auto),
+            Some(&prepared_branch(
+                ConversationTurnScope::Main,
+                Some(checkpoint("resp_123", "gpt-5", "fp-1")),
+                true,
+            )),
+            &chain_decision(WebSocketChainMatch::Matching),
+            "gpt-5",
+            "fp-1",
+        )
+        .expect("checkpointed compaction turn should keep delta transport");
+
+        assert_eq!(
+            selected,
+            SelectedTransport {
+                mode: TransportMode::Incremental,
+                previous_response_id: Some("resp_123".to_string()),
+                reason: "branch_checkpoint_reuse_compaction_pending",
+            }
+        );
+    }
+
+    #[test]
+    fn checkpointed_branch_bootstraps_when_model_changes() {
+        let selected = select_transport(
+            &config_with_mode(OpenAiIncrementalTransportMode::Auto),
+            Some(&prepared_branch(
+                ConversationTurnScope::Main,
+                Some(checkpoint("resp_123", "gpt-5.5", "fp-1")),
+                false,
+            )),
+            &chain_decision(WebSocketChainMatch::Matching),
+            "gpt-5.6-terra",
+            "fp-1",
+        )
+        .expect("model drift should bootstrap a fresh provider chain");
+
+        assert_eq!(
+            selected,
+            SelectedTransport {
+                mode: TransportMode::Full,
+                previous_response_id: None,
+                reason: "branch_bootstrap_model_drift",
+            }
+        );
+    }
+
+    #[test]
+    fn resumed_session_without_gateway_canonical_history_bootstraps_without_previous_response_id() {
+        let selected = select_transport(
+            &config_with_mode(OpenAiIncrementalTransportMode::RequireDelta),
+            Some(&prepared_branch(ConversationTurnScope::Main, None, false)),
+            &chain_decision(WebSocketChainMatch::Missing),
+            "gpt-5",
+            "fp-1",
+        )
+        .expect("missing checkpoint is the only branch bootstrap case");
+
+        assert_eq!(
+            selected,
+            SelectedTransport {
+                mode: TransportMode::Full,
+                previous_response_id: None,
+                reason: "branch_bootstrap_missing_checkpoint",
+            }
+        );
+    }
+
+    #[test]
+    fn resumed_session_after_baseline_commit_uses_delta_on_same_live_chain() {
+        let selected = select_transport(
+            &config_with_mode(OpenAiIncrementalTransportMode::Auto),
+            Some(&prepared_branch(
+                ConversationTurnScope::Main,
+                Some(checkpoint("resp_resumed_baseline", "gpt-5", "fp-1")),
+                false,
+            )),
+            &chain_decision(WebSocketChainMatch::Matching),
+            "gpt-5",
+            "fp-1",
+        )
+        .expect("fresh resumed baseline checkpoint should be reusable on same live chain");
+
+        assert_eq!(
+            selected,
+            SelectedTransport {
+                mode: TransportMode::Incremental,
+                previous_response_id: Some("resp_resumed_baseline".to_string()),
+                reason: "branch_checkpoint_reuse",
+            }
+        );
+    }
+
+    #[test]
+    fn effort_change_bootstraps_because_identity_scoped_chain_association_is_missing() {
+        let selected = select_transport(
+            &config_with_mode(OpenAiIncrementalTransportMode::Auto),
+            Some(&prepared_branch(
+                ConversationTurnScope::Main,
+                Some(checkpoint("resp_123", "gpt-5", "fp-1")),
+                false,
+            )),
+            &chain_decision(WebSocketChainMatch::Missing),
+            "gpt-5",
+            "fp-1",
+        )
+        .expect("effort drift appears as missing chain proof for the new transport identity");
+
+        assert_eq!(
+            selected,
+            SelectedTransport {
+                mode: TransportMode::Full,
+                previous_response_id: None,
+                reason: "branch_bootstrap_missing_websocket_chain",
+            }
         );
     }
 
@@ -5214,14 +6134,10 @@ mod transport_selection_tests {
             &config_with_mode(OpenAiIncrementalTransportMode::RequireDelta),
             Some(&prepared_branch(
                 ConversationTurnScope::Side,
-                Some(OpenAiCheckpoint {
-                    response_id: "resp_123".to_string(),
-                    previous_response_id: Some("resp_122".to_string()),
-                    provider_model_fingerprint: "gpt-5".to_string(),
-                    request_compatibility_fingerprint: Some("fp-1".to_string()),
-                }),
+                Some(checkpoint("resp_123", "gpt-5", "fp-1")),
                 false,
             )),
+            &chain_decision(WebSocketChainMatch::Matching),
             "gpt-5",
             "fp-1",
         )
@@ -5229,24 +6145,20 @@ mod transport_selection_tests {
 
         assert_eq!(
             err,
-            "incremental transport is required, but side-turn requests are not eligible for previous_response_id reuse"
+            "conversation branch has a stored OpenAI checkpoint, but this request is not eligible for checkpoint reuse"
         );
     }
 
     #[test]
-    fn always_full_ignores_available_checkpoint() {
+    fn always_full_mode_cannot_bypass_checkpointed_delta_transport() {
         let selected = select_transport(
             &config_with_mode(OpenAiIncrementalTransportMode::AlwaysFull),
             Some(&prepared_branch(
                 ConversationTurnScope::Main,
-                Some(OpenAiCheckpoint {
-                    response_id: "resp_123".to_string(),
-                    previous_response_id: Some("resp_122".to_string()),
-                    provider_model_fingerprint: "gpt-5".to_string(),
-                    request_compatibility_fingerprint: Some("fp-1".to_string()),
-                }),
+                Some(checkpoint("resp_123", "gpt-5", "fp-1")),
                 false,
             )),
+            &chain_decision(WebSocketChainMatch::Matching),
             "gpt-5",
             "fp-1",
         )
@@ -5255,38 +6167,34 @@ mod transport_selection_tests {
         assert_eq!(
             selected,
             SelectedTransport {
-                mode: TransportMode::Full,
-                previous_response_id: None,
-                reason: "always_full_mode",
+                mode: TransportMode::Incremental,
+                previous_response_id: Some("resp_123".to_string()),
+                reason: "branch_checkpoint_reuse",
             }
         );
     }
 
     #[test]
-    fn auto_mode_forces_full_transport_when_request_compatibility_changes() {
+    fn checkpointed_branch_uses_delta_when_request_compatibility_changes() {
         let selected = select_transport(
             &config_with_mode(OpenAiIncrementalTransportMode::Auto),
             Some(&prepared_branch(
                 ConversationTurnScope::Main,
-                Some(OpenAiCheckpoint {
-                    response_id: "resp_123".to_string(),
-                    previous_response_id: Some("resp_122".to_string()),
-                    provider_model_fingerprint: "gpt-5".to_string(),
-                    request_compatibility_fingerprint: Some("fp-old".to_string()),
-                }),
+                Some(checkpoint("resp_123", "gpt-5", "fp-old")),
                 false,
             )),
+            &chain_decision(WebSocketChainMatch::Matching),
             "gpt-5",
             "fp-new",
         )
-        .expect("auto mode should fall back to full transport on compatibility mismatch");
+        .expect("compatibility drift must not bypass checkpointed delta transport");
 
         assert_eq!(
             selected,
             SelectedTransport {
-                mode: TransportMode::Full,
-                previous_response_id: None,
-                reason: "request_compatibility_mismatch",
+                mode: TransportMode::Incremental,
+                previous_response_id: Some("resp_123".to_string()),
+                reason: "branch_checkpoint_reuse_compatibility_drift",
             }
         );
     }

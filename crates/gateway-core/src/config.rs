@@ -457,11 +457,7 @@ mod tests {
         assert_eq!(config.providers.openai.default_model, DEFAULT_BACKEND_MODEL);
         assert_eq!(
             config.providers.openai.unsupported_models,
-            vec![
-                "gpt-5.2".to_string(),
-                "gpt-5.3-codex".to_string(),
-                "gpt-5.4".to_string()
-            ]
+            vec!["gpt-5.2".to_string(), "gpt-5.3-codex".to_string()]
         );
     }
 
@@ -513,11 +509,7 @@ mod tests {
         assert_eq!(config.providers.openai.default_model, "gpt-test-default");
         assert_eq!(
             config.providers.openai.unsupported_models,
-            vec![
-                "gpt-5.2".to_string(),
-                "gpt-5.3-codex".to_string(),
-                "gpt-5.4".to_string()
-            ]
+            vec!["gpt-5.2".to_string(), "gpt-5.3-codex".to_string()]
         );
         std::fs::remove_file(path).expect("remove config");
     }

@@ -133,7 +133,6 @@ providers:
     unsupported_models:
       - gpt-5.2
       - gpt-5.3-codex
-      - gpt-5.4
 workflow:
   fast_mode: false
   claude_code:
@@ -152,7 +151,9 @@ YAML fields use code defaults. The packaged Homebrew config can still choose dif
 The companion `~/.claude_gateway/settings.json` file is the source of truth for the model catalog returned by
 `GET /v1/models`. The gateway reads that file locally instead of calling `api.openai.com/v1/models`.
 The packaged settings map Claude Code's `haiku`, `sonnet`, `opus`, and `fable` aliases to Gateway-served
-OpenAI model IDs through `ANTHROPIC_DEFAULT_*_MODEL` environment variables.
+OpenAI model IDs through `ANTHROPIC_DEFAULT_*_MODEL` environment variables. `gpt-5.4` is retained as the
+Sonnet-equivalent long-context option because GPT-5.6 Terra/Luna are limited to 128K in ChatGPT/Codex
+subscription usage and GPT-5.6 Sol is limited to 272K there.
 
 ### Root config
 
@@ -169,11 +170,12 @@ OpenAI model IDs through `ANTHROPIC_DEFAULT_*_MODEL` environment variables.
 | 1  | `providers.openai.default_model`      | Purpose                     | Backend model used when a requested model is listed in `providers.openai.unsupported_models`. | This is the compatibility fallback, not a general model alias system.                            |
 |    |                                       | `gpt-5.6-sol`               | Uses the current flagship backend model as the fallback.                                      | Use when quality/default behavior matters more than cost.                                        |
 |    |                                       | `gpt-5.6-terra`             | Uses the balanced everyday backend model as the fallback.                                     | Use when you want strong quality without paying for the flagship every time.                     |
+|    |                                       | `gpt-5.4`                   | Uses the experimental long-context Codex model as the fallback.                               | Use when long context matters more than using the newest GPT-5.6 family.                         |
 |    |                                       | `gpt-5.5`                   | Uses the previous-generation frontier model as the fallback.                                   | Use when you want a familiar, conservative default that is still strong.                         |
 |    |                                       | `gpt-5.6-luna`              | Uses the fastest backend model as the fallback.                                                | Use only if you want lower latency and lower cost over raw capability.                            |
 | 2  | `providers.openai.unsupported_models` | Purpose                     | Requested model names in this list are rewritten to `providers.openai.default_model`.         | Add only model IDs that the backend rejects or that you intentionally want centrally redirected. |
 |    |                                       | `[]`                        | No compatibility rewrites.                                                                    | Use only when every Claude Code model name you send is accepted by the backend.                  |
-|    |                                       | `[gpt-5.2, gpt-5.3-codex, gpt-5.4]` | Requests for deprecated or rejected models are sent as `default_model` instead.                 | This is the code default.                                                                        |
+|    |                                       | `[gpt-5.2, gpt-5.3-codex]` | Requests for deprecated or rejected models are sent as `default_model` instead.                 | This is the code default.                                                                        |
 |    |                                       | `[gpt-5.2, some-old-alias]` | Multiple requested names are rewritten to `default_model`.                                    | Use during migrations from old client-side model names.                                          |
 
 ### `workflow`

@@ -9,7 +9,7 @@
     {
       "id": "gpt-5.6-terra",
       "name": "GPT-5.6 Terra",
-      "description": "OpenAI balanced everyday model"
+      "description": "OpenAI balanced everyday model; ChatGPT/Codex context is 128K"
     },
     {
       "id": "gpt-5.5",
@@ -17,9 +17,14 @@
       "description": "OpenAI previous-generation frontier model"
     },
     {
+      "id": "gpt-5.4",
+      "name": "GPT-5.4 1M",
+      "description": "OpenAI long-context Codex model; experimental 1M context"
+    },
+    {
       "id": "gpt-5.6-luna",
       "name": "GPT-5.6 Luna",
-      "description": "OpenAI fast, affordable model"
+      "description": "OpenAI fast, affordable model; ChatGPT/Codex context is 128K"
     },
     {
       "id": "gpt-5.3-codex-spark",
@@ -31,14 +36,19 @@
     "ANTHROPIC_BASE_URL": "http://127.0.0.1:6473",
     "ANTHROPIC_AUTH_TOKEN": "dummy",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL": "gpt-5.6-luna",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL": "gpt-5.5",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "gpt-5.4",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME": "GPT-5.4 1M",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION": "OpenAI long-context Codex model; experimental 1M context",
     "ANTHROPIC_DEFAULT_OPUS_MODEL": "gpt-5.6-terra",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME": "GPT-5.6 Terra",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION": "OpenAI balanced everyday model via Gateway; ChatGPT/Codex context is 128K",
     "ANTHROPIC_DEFAULT_FABLE_MODEL": "gpt-5.6-sol",
     "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME": "GPT-5.6 Sol",
-    "ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION": "OpenAI flagship coding model via Gateway",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION": "OpenAI flagship coding model via Gateway; ChatGPT/Codex context is 272K",
     "DISABLE_TELEMETRY": "1",
-    "ANTHROPIC_DEFAULT_HAIKU_MAX_TOKENS": 360000,
+    "ANTHROPIC_DEFAULT_HAIKU_MAX_TOKENS": 120000,
     "ANTHROPIC_DEFAULT_SONNET_MAX_TOKENS": 945000,
-    "ANTHROPIC_DEFAULT_OPUS_MAX_TOKENS": 945000
+    "ANTHROPIC_DEFAULT_OPUS_MAX_TOKENS": 120000,
+    "ANTHROPIC_DEFAULT_FABLE_MAX_TOKENS": 260000
   }
 }

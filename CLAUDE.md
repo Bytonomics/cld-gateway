@@ -170,7 +170,6 @@ The workspace is organized as small crates with explicit â€œallowed/not allowedâ
     - `version`
     - `providers.openai.default_model`
     - `providers.openai.unsupported_models`
-    - `providers.openai.incremental_transport.mode` (`auto`, `always_full`, `require_delta`)
     - `workflow.fast_mode`
     - `workflow.context_management` (request/context pruning mode, edits, and hard limits)
     - `workflow.claude_code.slash_commands`

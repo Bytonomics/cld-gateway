@@ -20,8 +20,8 @@ use gateway_backend_codex::client::{
 use gateway_backend_codex::types::{CodexToolCall, CodexToolCallKind};
 use gateway_core::RequestId;
 use gateway_core::config::{
-    GatewayConfig, ModelResolution, OpenAiIncrementalTransportMode,
-    load_gateway_config_default_path, resolve_model, service_tier_for_config,
+    GatewayConfig, ModelResolution, load_gateway_config_default_path, resolve_model,
+    service_tier_for_config,
 };
 use gateway_net::{GatewayHttpClient, GatewayNetworkPolicy};
 use serde::{Deserialize, Serialize};
@@ -762,7 +762,6 @@ async fn v1_messages(
     );
 
     let selected_transport = match select_transport(
-        &state.gateway_config,
         prepared_branch.as_ref(),
         &websocket_chain_decision,
         &resolution.selected_backend_model,
@@ -1081,7 +1080,6 @@ fn request_compatibility_fingerprint(
         "reasoning": translated.reasoning,
         "include": translated.include,
         "service_tier": service_tier_for_config(config),
-        "incremental_transport_mode": config.providers.openai.incremental_transport.mode,
     });
     hash_serde_value(&payload)
 }
@@ -1907,7 +1905,6 @@ async fn stream_messages(
     );
 
     let selected_transport = match select_transport(
-        &state.gateway_config,
         prepared_branch.as_ref(),
         &websocket_chain_decision,
         &resolution.selected_backend_model,
@@ -2192,20 +2189,17 @@ struct WebSocketChainDecision {
 }
 
 fn select_transport(
-    config: &GatewayConfig,
     prepared_branch: Option<&PreparedConversationBranch>,
     chain_decision: &WebSocketChainDecision,
     provider_model_fingerprint: &str,
     request_compatibility_fingerprint: &str,
 ) -> Result<SelectedTransport, String> {
-    let mode = config.providers.openai.incremental_transport.mode;
-
     let Some(prepared_branch) = prepared_branch else {
-        return full_or_require_delta_error(
-            mode,
-            "incremental transport is required, but no conversation-state branch is available for this request",
-            "no_branch_available",
-        );
+        return Ok(SelectedTransport {
+            mode: TransportMode::Full,
+            previous_response_id: None,
+            reason: "no_branch_available",
+        });
     };
 
     let Some(checkpoint) = prepared_branch.branch.openai_checkpoint.as_ref() else {
@@ -2282,23 +2276,6 @@ fn select_transport(
         previous_response_id: Some(checkpoint.response_id.clone()),
         reason,
     })
-}
-
-fn full_or_require_delta_error(
-    mode: OpenAiIncrementalTransportMode,
-    require_delta_message: &str,
-    full_reason: &'static str,
-) -> Result<SelectedTransport, String> {
-    match mode {
-        OpenAiIncrementalTransportMode::RequireDelta => Err(require_delta_message.to_string()),
-        OpenAiIncrementalTransportMode::AlwaysFull | OpenAiIncrementalTransportMode::Auto => {
-            Ok(SelectedTransport {
-                mode: TransportMode::Full,
-                previous_response_id: None,
-                reason: full_reason,
-            })
-        }
-    }
 }
 
 fn claude_session_id_from_headers(headers: &axum::http::HeaderMap) -> Option<String> {
@@ -3419,8 +3396,7 @@ mod messages_tests {
     use axum::http::{Request, StatusCode};
     use gateway_backend_codex::types::{CodexToolCall, CodexToolCallKind};
     use gateway_core::DEFAULT_BACKEND_MODEL;
-    use gateway_core::config::resolve_model;
-    use gateway_core::config::{GatewayConfig, OpenAiIncrementalTransportMode};
+    use gateway_core::config::{GatewayConfig, resolve_model};
     use gateway_state::{
         BranchCreateParams, BranchMetadata, CommitTurnParams, ConversationStateStore,
         ConversationTurnScope, ToolCallStore,
@@ -4074,15 +4050,13 @@ mod messages_tests {
         request_compatibility_fingerprint(gateway_config, &resolution, &translated)
     }
 
-    fn build_state_with_mode(
+    fn build_state(
         base_url: &url::Url,
         auth_path: &std::path::Path,
         conversation_state: ConversationStateStore,
-        mode: OpenAiIncrementalTransportMode,
     ) -> super::AppState {
         let mut gateway_config = GatewayConfig::default();
         gateway_config.workflow.conversation_state.enabled = true;
-        gateway_config.providers.openai.incremental_transport.mode = mode;
         super::AppState {
             backend: gateway_backend_codex::client::CodexBackendClient::default()
                 .with_base_url(base_url),
@@ -4100,20 +4074,12 @@ mod messages_tests {
         branch_id: String,
         conversation_state: ConversationStateStore,
         base_url: url::Url,
-        incremental_mode: OpenAiIncrementalTransportMode,
         state: super::AppState,
         ws_mock: WsMockServer,
     }
 
     impl BranchRouteTestHarness {
         async fn new(conversation_prefix: &str) -> Self {
-            Self::new_with_mode(conversation_prefix, OpenAiIncrementalTransportMode::Auto).await
-        }
-
-        async fn new_with_mode(
-            conversation_prefix: &str,
-            incremental_mode: OpenAiIncrementalTransportMode,
-        ) -> Self {
             let auth_path = write_temp_auth_json();
             let conversation_root = std::env::temp_dir()
                 .join(format!("{conversation_prefix}_{}", uuid::Uuid::new_v4()));
@@ -4122,12 +4088,7 @@ mod messages_tests {
             let (conversation_state, branch_id) =
                 seed_incremental_branch(&conversation_root, claude_session_id);
             let base_url = url::Url::parse(&ws_mock.uri().await).expect("websocket mock url");
-            let state = build_state_with_mode(
-                &base_url,
-                &auth_path,
-                conversation_state.clone(),
-                incremental_mode,
-            );
+            let state = build_state(&base_url, &auth_path, conversation_state.clone());
             Self {
                 auth_path,
                 conversation_root,
@@ -4135,7 +4096,6 @@ mod messages_tests {
                 branch_id,
                 conversation_state,
                 base_url,
-                incremental_mode,
                 state,
                 ws_mock,
             }
@@ -4161,12 +4121,7 @@ mod messages_tests {
 
         fn restarted_state_with_base_url(&self, base_url: &url::Url) -> super::AppState {
             let restarted_store = ConversationStateStore::new(&self.conversation_root);
-            build_state_with_mode(
-                base_url,
-                &self.auth_path,
-                restarted_store,
-                self.incremental_mode,
-            )
+            build_state(base_url, &self.auth_path, restarted_store)
         }
 
         fn branch_count(&self) -> usize {
@@ -4893,11 +4848,7 @@ mod messages_tests {
         if !wiremock_enabled() {
             return;
         }
-        let harness = BranchRouteTestHarness::new_with_mode(
-            "gateway_full_mode_restart_replay",
-            OpenAiIncrementalTransportMode::AlwaysFull,
-        )
-        .await;
+        let harness = BranchRouteTestHarness::new("gateway_full_mode_restart_replay").await;
         mount_ws_response(
             &harness.ws_mock,
             PreviousResponseIdWsMatcher::none(),
@@ -4943,11 +4894,7 @@ mod messages_tests {
         if !wiremock_enabled() {
             return;
         }
-        let harness = BranchRouteTestHarness::new_with_mode(
-            "gateway_full_mode_side_restart",
-            OpenAiIncrementalTransportMode::AlwaysFull,
-        )
-        .await;
+        let harness = BranchRouteTestHarness::new("gateway_full_mode_side_restart").await;
         mount_ws_response(
             &harness.ws_mock,
             PreviousResponseIdWsMatcher::none(),
@@ -4989,11 +4936,7 @@ mod messages_tests {
         if !wiremock_enabled() {
             return;
         }
-        let harness = BranchRouteTestHarness::new_with_mode(
-            "gateway_full_mode_compaction_restart",
-            OpenAiIncrementalTransportMode::AlwaysFull,
-        )
-        .await;
+        let harness = BranchRouteTestHarness::new("gateway_full_mode_compaction_restart").await;
         mount_ws_response(
             &harness.ws_mock,
             PreviousResponseIdWsMatcher::none(),
@@ -5613,11 +5556,10 @@ mod messages_tests {
         let claude_session_id = "session-1";
         let (conversation_state, _branch_id) =
             seed_incremental_branch(&conversation_root, claude_session_id);
-        let state = build_state_with_mode(
+        let state = build_state(
             &url::Url::parse("ws://127.0.0.1:9").expect("url"),
             std::path::Path::new("/tmp/nonexistent-auth.json"),
             conversation_state,
-            OpenAiIncrementalTransportMode::Auto,
         );
         let req = AnthropicMessagesRequest {
             model: DEFAULT_BACKEND_MODEL.to_string(),
@@ -5781,23 +5723,7 @@ mod transport_selection_tests {
         transport_identity_for_branch,
     };
     use gateway_backend_codex::client::{BackendError, WebSocketChainId};
-    use gateway_core::config::{
-        GatewayConfig, OpenAiIncrementalTransportConfig, OpenAiIncrementalTransportMode,
-        OpenAiProviderConfig, ProviderConfigs,
-    };
     use gateway_state::{BranchMetadata, ConversationTurnScope, OpenAiCheckpoint};
-
-    fn config_with_mode(mode: OpenAiIncrementalTransportMode) -> GatewayConfig {
-        GatewayConfig {
-            providers: ProviderConfigs {
-                openai: OpenAiProviderConfig {
-                    incremental_transport: OpenAiIncrementalTransportConfig { mode },
-                    ..OpenAiProviderConfig::default()
-                },
-            },
-            ..GatewayConfig::default()
-        }
-    }
 
     fn prepared_branch(
         turn_scope: ConversationTurnScope,
@@ -5944,15 +5870,14 @@ mod transport_selection_tests {
     }
 
     #[test]
-    fn auto_mode_without_branch_uses_full_transport() {
+    fn missing_branch_uses_full_bootstrap_transport() {
         let selected = select_transport(
-            &config_with_mode(OpenAiIncrementalTransportMode::Auto),
             None,
             &chain_decision(WebSocketChainMatch::Missing),
             "gpt-5",
             "fp-1",
         )
-        .expect("auto mode should fall back to full transport");
+        .expect("missing branch should use full bootstrap transport");
 
         assert_eq!(
             selected,
@@ -5967,7 +5892,6 @@ mod transport_selection_tests {
     #[test]
     fn existing_canonical_session_with_matching_chain_uses_delta() {
         let selected = select_transport(
-            &config_with_mode(OpenAiIncrementalTransportMode::Auto),
             Some(&prepared_branch(
                 ConversationTurnScope::Main,
                 Some(checkpoint("resp_123", "gpt-5", "fp-1")),
@@ -5992,7 +5916,6 @@ mod transport_selection_tests {
     #[test]
     fn existing_canonical_session_after_gateway_restart_bootstraps_without_previous_response_id() {
         let selected = select_transport(
-            &config_with_mode(OpenAiIncrementalTransportMode::Auto),
             Some(&prepared_branch(
                 ConversationTurnScope::Main,
                 Some(checkpoint("resp_123", "gpt-5", "fp-1")),
@@ -6017,7 +5940,6 @@ mod transport_selection_tests {
     #[test]
     fn existing_canonical_session_with_mismatched_chain_bootstraps_without_previous_response_id() {
         let selected = select_transport(
-            &config_with_mode(OpenAiIncrementalTransportMode::Auto),
             Some(&prepared_branch(
                 ConversationTurnScope::Main,
                 Some(checkpoint("resp_123", "gpt-5", "fp-1")),
@@ -6042,7 +5964,6 @@ mod transport_selection_tests {
     #[test]
     fn checkpointed_branch_uses_delta_when_compaction_reset_is_pending() {
         let selected = select_transport(
-            &config_with_mode(OpenAiIncrementalTransportMode::Auto),
             Some(&prepared_branch(
                 ConversationTurnScope::Main,
                 Some(checkpoint("resp_123", "gpt-5", "fp-1")),
@@ -6067,7 +5988,6 @@ mod transport_selection_tests {
     #[test]
     fn checkpointed_branch_bootstraps_when_model_changes() {
         let selected = select_transport(
-            &config_with_mode(OpenAiIncrementalTransportMode::Auto),
             Some(&prepared_branch(
                 ConversationTurnScope::Main,
                 Some(checkpoint("resp_123", "gpt-5.5", "fp-1")),
@@ -6092,7 +6012,6 @@ mod transport_selection_tests {
     #[test]
     fn resumed_session_without_gateway_canonical_history_bootstraps_without_previous_response_id() {
         let selected = select_transport(
-            &config_with_mode(OpenAiIncrementalTransportMode::RequireDelta),
             Some(&prepared_branch(ConversationTurnScope::Main, None, false)),
             &chain_decision(WebSocketChainMatch::Missing),
             "gpt-5",
@@ -6113,7 +6032,6 @@ mod transport_selection_tests {
     #[test]
     fn resumed_session_after_baseline_commit_uses_delta_on_same_live_chain() {
         let selected = select_transport(
-            &config_with_mode(OpenAiIncrementalTransportMode::Auto),
             Some(&prepared_branch(
                 ConversationTurnScope::Main,
                 Some(checkpoint("resp_resumed_baseline", "gpt-5", "fp-1")),
@@ -6138,7 +6056,6 @@ mod transport_selection_tests {
     #[test]
     fn effort_change_bootstraps_because_identity_scoped_chain_association_is_missing() {
         let selected = select_transport(
-            &config_with_mode(OpenAiIncrementalTransportMode::Auto),
             Some(&prepared_branch(
                 ConversationTurnScope::Main,
                 Some(checkpoint("resp_123", "gpt-5", "fp-1")),
@@ -6161,9 +6078,8 @@ mod transport_selection_tests {
     }
 
     #[test]
-    fn require_delta_rejects_side_turns() {
+    fn side_turn_without_incremental_context_is_rejected() {
         let err = select_transport(
-            &config_with_mode(OpenAiIncrementalTransportMode::RequireDelta),
             Some(&prepared_branch(
                 ConversationTurnScope::Side,
                 Some(checkpoint("resp_123", "gpt-5", "fp-1")),
@@ -6173,7 +6089,7 @@ mod transport_selection_tests {
             "gpt-5",
             "fp-1",
         )
-        .expect_err("require_delta must reject side turns");
+        .expect_err("side turn without incremental context must be rejected");
 
         assert_eq!(
             err,
@@ -6182,34 +6098,8 @@ mod transport_selection_tests {
     }
 
     #[test]
-    fn always_full_mode_cannot_bypass_checkpointed_delta_transport() {
-        let selected = select_transport(
-            &config_with_mode(OpenAiIncrementalTransportMode::AlwaysFull),
-            Some(&prepared_branch(
-                ConversationTurnScope::Main,
-                Some(checkpoint("resp_123", "gpt-5", "fp-1")),
-                false,
-            )),
-            &chain_decision(WebSocketChainMatch::Matching),
-            "gpt-5",
-            "fp-1",
-        )
-        .expect("always_full should not error when checkpoint exists");
-
-        assert_eq!(
-            selected,
-            SelectedTransport {
-                mode: TransportMode::Incremental,
-                previous_response_id: Some("resp_123".to_string()),
-                reason: "branch_checkpoint_reuse",
-            }
-        );
-    }
-
-    #[test]
     fn checkpointed_branch_uses_delta_when_request_compatibility_changes() {
         let selected = select_transport(
-            &config_with_mode(OpenAiIncrementalTransportMode::Auto),
             Some(&prepared_branch(
                 ConversationTurnScope::Main,
                 Some(checkpoint("resp_123", "gpt-5", "fp-old")),

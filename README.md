@@ -301,7 +301,7 @@ subscription usage and GPT-5.6 Sol is limited to 272K there.
 
 ## Conversation-state config
 
-Gateway conversation-state persistence and incremental transport are controlled through YAML config. Example:
+Gateway conversation-state persistence is controlled through YAML config. Claude Code conversation transport always uses the mandatory WebSocket continuation policy. Example:
 
 ```yaml
 workflow:
@@ -311,10 +311,6 @@ workflow:
     corruption_policy: fail_closed
     retention:
       max_session_age_days: 14
-providers:
-  openai:
-    incremental_transport:
-      mode: auto
 ```
 
 Notes:
@@ -322,7 +318,7 @@ Notes:
 - `workflow.conversation_state.corruption_policy` defaults to `fail_closed`.
 - `retention.max_session_age_days` is optional and disabled by default.
 - If retention is enabled, Gateway removes entire expired Claude session buckets at startup based on `session.json.updated_at_unix_seconds`.
-- `providers.openai.incremental_transport.mode` defaults to `auto` and supports `auto`, `always_full`, and `require_delta`.
+- Claude Code conversation transport is mandatory WebSocket continuation: Gateway uses `previous_response_id` only when live chain proof matches, otherwise it sends a WebSocket bootstrap/re-anchor with full canonical context.
 
 ---
 

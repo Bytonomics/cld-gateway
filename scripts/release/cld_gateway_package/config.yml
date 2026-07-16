@@ -73,8 +73,6 @@ providers:
     unsupported_models:
       - gpt-5.2
       - gpt-5.3-codex
-    incremental_transport:
-      mode: auto
 
 network:
   listen_addr: 127.0.0.1:6473

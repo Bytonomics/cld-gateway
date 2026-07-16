@@ -76,6 +76,8 @@ Gateway handles exactly three chain-proof conditions:
    - The stored checkpoint `response_id` is associated with that same
      `websocket_chain_id`.
    - Gateway may send `previous_response_id = checkpoint.response_id`.
+   - For rewind, the checkpoint may be a historical per-turn checkpoint instead
+     of the branch head checkpoint.
 
 2. `websocket_chain_id` mismatching
    - There is a live WebSocket for the same identity, but the checkpoint
@@ -469,6 +471,66 @@ Provider linked list after resumed baseline:
   ^                  ^                   ^
   |                  |                   |
   previous=none      previous=R5B        previous=R6B
+```
+
+## Regime 4: Rewound Session With Canonical Conversation History
+
+If Claude Code rewinds, the incoming messages are a prefix of the stored active
+messages. Gateway must select the historical per-turn checkpoint for that
+prefix. If that historical checkpoint has matching live WebSocket chain proof,
+Gateway must continue on the same WebSocket by shifting the provider pointer
+with `previous_response_id`; it must not resend the rewound prefix.
+
+```text
+Disk before rewind
+  session S1 / branch B1
+  active_messages = [M1, M2, M3, M4, M5]
+
+Stored per-turn checkpoints:
+  prefix [M1]                 -> R1
+  prefix [M1, M2]             -> R2
+  prefix [M1, M2, M3]         -> R3
+  prefix [M1, M2, M3, M4]     -> R4
+  prefix [M1, M2, M3, M4, M5] -> R5
+
+Provider linked list before rewind:
+
+  R1 ---------------> R2 ---------------> R3 ---------------> R4 ---------------> R5
+  ^                  ^                   ^                   ^                   ^
+  |                  |                   |                   |                   |
+  previous=none      previous=R1         previous=R2         previous=R3         previous=R4
+
+Claude Code rewinds and sends:
+  incoming = [M1, M2, M3]
+
+Gateway detects:
+  incoming is prefix of stored active_messages
+  historical checkpoint for prefix [M1, M2, M3] is R3
+  association[identity, R3] == live websocket_chain_id
+
+Next post-rewind user message:
+  incoming = [M1, M2, M3, M6]
+
+OpenAI WebSocket response.create:
+  previous_response_id = R3
+  input = [M6]
+
+OpenAI returns R6
+
+Provider linked list after rewind continuation:
+
+  R1 ---------------> R2 ---------------> R3 ---------------> R4 ---------------> R5
+                                         |
+                                         |
+                                         +------------------> R6
+                                                              ^
+                                                              |
+                                                              previous=R3
+
+Gateway branch B1 after commit:
+  active_messages = [M1, M2, M3, M6]
+  checkpoint.response_id = R6
+  checkpoint.previous_response_id = R3
 ```
 
 ## Linked-List Guide

@@ -11,6 +11,7 @@ use uuid::Uuid;
 const SESSION_SCHEMA_VERSION: u32 = 1;
 const BRANCH_SCHEMA_VERSION: u32 = 1;
 const SPARSE_CHECKPOINT_SCHEMA_VERSION: u32 = 1;
+const TURN_OPENAI_CHECKPOINT_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ClaudeSessionMetadata {
@@ -38,6 +39,19 @@ pub struct OpenAiCheckpoint {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TurnOpenAiCheckpoint {
+    pub schema_version: u32,
+    pub turn_id: String,
+    pub canonical_message_count: usize,
+    pub canonical_prefix_hash: String,
+    pub response_id: String,
+    pub previous_response_id: Option<String>,
+    pub provider_model_fingerprint: String,
+    pub request_compatibility_fingerprint: Option<String>,
+    pub created_at_unix_seconds: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BranchCheckpointRef {
     pub branch_id: String,
     pub checkpoint_id: String,
@@ -53,6 +67,8 @@ pub struct BranchMetadata {
     pub active_canonical_messages: Option<serde_json::Value>,
     pub fingerprints: BranchFingerprintSet,
     pub openai_checkpoint: Option<OpenAiCheckpoint>,
+    #[serde(default)]
+    pub turn_openai_checkpoints: Vec<TurnOpenAiCheckpoint>,
     pub compaction_reset_pending: bool,
     pub last_main_turn_id: Option<String>,
     pub created_at_unix_seconds: i64,
@@ -107,6 +123,8 @@ pub struct CommitTurnParams {
     pub previous_response_id: Option<String>,
     pub provider_model_fingerprint: Option<String>,
     pub request_compatibility_fingerprint: Option<String>,
+    pub canonical_message_count: Option<usize>,
+    pub canonical_prefix_hash: Option<String>,
     pub provider_output_items: Vec<serde_json::Value>,
 }
 
@@ -395,6 +413,7 @@ impl ConversationStateStore {
             active_canonical_messages: params.active_canonical_messages.clone(),
             fingerprints: params.fingerprints.clone(),
             openai_checkpoint: None,
+            turn_openai_checkpoints: Vec::new(),
             compaction_reset_pending: false,
             last_main_turn_id: None,
             created_at_unix_seconds: now,
@@ -650,7 +669,8 @@ impl ConversationStateStore {
     ) -> Result<BranchMetadata, StateError> {
         let mut branch = self.load_branch_unlocked(claude_session_id, branch_id)?;
         branch.fingerprints = params.fingerprints.clone();
-        branch.updated_at_unix_seconds = now_unix_seconds();
+        let now = now_unix_seconds();
+        branch.updated_at_unix_seconds = now;
         if matches!(params.turn_scope, ConversationTurnScope::Main) {
             branch.last_main_turn_id = Some(params.turn_id.clone());
             if let (Some(response_id), Some(provider_model_fingerprint)) = (
@@ -660,13 +680,41 @@ impl ConversationStateStore {
                 branch.current_checkpoint_id = Some(response_id.clone());
                 branch.compaction_reset_pending = false;
                 branch.openai_checkpoint = Some(OpenAiCheckpoint {
-                    response_id,
+                    response_id: response_id.clone(),
                     previous_response_id: params.previous_response_id.clone(),
-                    provider_model_fingerprint,
+                    provider_model_fingerprint: provider_model_fingerprint.clone(),
                     request_compatibility_fingerprint: params
                         .request_compatibility_fingerprint
                         .clone(),
                 });
+                if let (Some(canonical_message_count), Some(canonical_prefix_hash)) = (
+                    params.canonical_message_count,
+                    params.canonical_prefix_hash.clone(),
+                ) {
+                    branch.turn_openai_checkpoints.retain(|checkpoint| {
+                        checkpoint.canonical_message_count != canonical_message_count
+                            || checkpoint.canonical_prefix_hash != canonical_prefix_hash
+                    });
+                    branch.turn_openai_checkpoints.push(TurnOpenAiCheckpoint {
+                        schema_version: TURN_OPENAI_CHECKPOINT_SCHEMA_VERSION,
+                        turn_id: params.turn_id.clone(),
+                        canonical_message_count,
+                        canonical_prefix_hash,
+                        response_id,
+                        previous_response_id: params.previous_response_id.clone(),
+                        provider_model_fingerprint,
+                        request_compatibility_fingerprint: params
+                            .request_compatibility_fingerprint
+                            .clone(),
+                        created_at_unix_seconds: now,
+                    });
+                    branch.turn_openai_checkpoints.sort_by_key(|checkpoint| {
+                        (
+                            checkpoint.canonical_message_count,
+                            checkpoint.created_at_unix_seconds,
+                        )
+                    });
+                }
             }
         }
 
@@ -676,13 +724,13 @@ impl ConversationStateStore {
                 provider_response_id: params.provider_response_id.clone(),
                 request_fingerprint: branch.fingerprints.recent_message_tail_hash.clone(),
                 provider_output_items: params.provider_output_items.clone(),
-                created_at_unix_seconds: now_unix_seconds(),
+                created_at_unix_seconds: now,
             },
             ConversationTurnScope::Side => CanonicalLedgerEvent::SideTurnObserved {
                 turn_id: params.turn_id.clone(),
                 request_fingerprint: branch.fingerprints.recent_message_tail_hash.clone(),
                 provider_output_items: params.provider_output_items.clone(),
-                created_at_unix_seconds: now_unix_seconds(),
+                created_at_unix_seconds: now,
             },
         };
         self.append_ledger_event_unlocked(claude_session_id, branch_id, &event)?;
@@ -813,6 +861,23 @@ impl ConversationStateStore {
         let events = self.load_branch_ledger_events(claude_session_id, branch_id)?;
         validate_branch_against_ledger(&branch, &events)?;
         Ok(branch)
+    }
+
+    #[must_use]
+    pub fn find_turn_openai_checkpoint(
+        branch: &BranchMetadata,
+        canonical_message_count: usize,
+        canonical_prefix_hash: &str,
+    ) -> Option<TurnOpenAiCheckpoint> {
+        branch
+            .turn_openai_checkpoints
+            .iter()
+            .filter(|checkpoint| {
+                checkpoint.canonical_message_count == canonical_message_count
+                    && checkpoint.canonical_prefix_hash == canonical_prefix_hash
+            })
+            .max_by_key(|checkpoint| checkpoint.created_at_unix_seconds)
+            .cloned()
     }
 
     fn load_branch_ledger_events(
@@ -1364,6 +1429,8 @@ mod tests {
                     previous_response_id: None,
                     provider_model_fingerprint: None,
                     request_compatibility_fingerprint: None,
+                    canonical_message_count: None,
+                    canonical_prefix_hash: None,
                     provider_output_items: Vec::new(),
                 },
             )
@@ -1409,6 +1476,8 @@ mod tests {
                     previous_response_id: Some("resp_1".to_string()),
                     provider_model_fingerprint: Some("gpt-5.4".to_string()),
                     request_compatibility_fingerprint: Some("fingerprint-2".to_string()),
+                    canonical_message_count: None,
+                    canonical_prefix_hash: None,
                     provider_output_items: vec![
                         serde_json::json!({"type":"message","role":"assistant"}),
                     ],
@@ -1454,6 +1523,8 @@ mod tests {
                     previous_response_id: Some("resp_1".to_string()),
                     provider_model_fingerprint: Some("gpt-5".to_string()),
                     request_compatibility_fingerprint: Some("fingerprint-1".to_string()),
+                    canonical_message_count: None,
+                    canonical_prefix_hash: None,
                     provider_output_items: Vec::new(),
                 },
             )
@@ -1577,6 +1648,8 @@ mod tests {
                     previous_response_id: None,
                     provider_model_fingerprint: Some("gpt-5".to_string()),
                     request_compatibility_fingerprint: Some("fingerprint-after".to_string()),
+                    canonical_message_count: None,
+                    canonical_prefix_hash: None,
                     provider_output_items: Vec::new(),
                 },
             )
@@ -1703,6 +1776,8 @@ mod tests {
                     previous_response_id: None,
                     provider_model_fingerprint: Some("gpt-5".to_string()),
                     request_compatibility_fingerprint: Some("fingerprint-1".to_string()),
+                    canonical_message_count: None,
+                    canonical_prefix_hash: None,
                     provider_output_items: Vec::new(),
                 },
             )
@@ -1742,6 +1817,8 @@ mod tests {
                     previous_response_id: None,
                     provider_model_fingerprint: Some("gpt-5".to_string()),
                     request_compatibility_fingerprint: Some("fingerprint-1".to_string()),
+                    canonical_message_count: None,
+                    canonical_prefix_hash: None,
                     provider_output_items: Vec::new(),
                 },
             )
@@ -1843,6 +1920,8 @@ mod tests {
                     previous_response_id: None,
                     provider_model_fingerprint: Some("gpt-5".to_string()),
                     request_compatibility_fingerprint: Some("fingerprint-1".to_string()),
+                    canonical_message_count: None,
+                    canonical_prefix_hash: None,
                     provider_output_items: Vec::new(),
                 },
             )
@@ -1915,6 +1994,8 @@ mod tests {
                     previous_response_id: None,
                     provider_model_fingerprint: Some("gpt-5".to_string()),
                     request_compatibility_fingerprint: Some("fingerprint-1".to_string()),
+                    canonical_message_count: None,
+                    canonical_prefix_hash: None,
                     provider_output_items: Vec::new(),
                 },
             )

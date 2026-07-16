@@ -1,0 +1,605 @@
+# Conversation State Management
+
+This document defines how Gateway maintains Claude Code conversation state when
+driving OpenAI/Codex through WebSocket `response.create` calls.
+
+## Core Invariant
+
+Claude Code conversation/model traffic uses WebSocket only.
+
+HTTP is allowed only for unrelated helper APIs, such as Gateway status/usage
+lookups. HTTP is not used for Claude Code conversation turns, fallback turns,
+rebaseline turns, tool-use turns, hosted web-search model turns, or resumed
+session turns.
+
+Gateway stores canonical conversation history on disk and stores the latest
+OpenAI response checkpoint per durable branch:
+
+- `response_id`: the latest OpenAI response ID returned by a successful main turn.
+- `previous_response_id`: the OpenAI response ID used as the parent for that turn, if any.
+- `provider_model_fingerprint`: the backend model used for that checkpoint.
+- `request_compatibility_fingerprint`: the non-input rendering contract used for that checkpoint.
+
+The checkpoint is durable. The proof that a checkpoint can be reused on a live
+WebSocket is not durable. After Gateway restart, stale socket, model change, or
+effort change, Gateway must assume the provider-side continuation lane is not
+proven and must create a new WebSocket baseline from canonical history.
+
+## Transport Identity
+
+Provider response IDs are not globally reusable conversation pointers. Gateway
+may only send a stored `response_id` as `previous_response_id` when it belongs
+to the same provider continuation lane.
+
+Gateway must build that lane identity in one place. Do not hand-build transport
+keys with ad hoc string formatting at individual call sites.
+
+```text
+ConversationTransportIdentityV1
+  claude_session_id
+  branch_id
+  provider_model_fingerprint
+  reasoning_effort
+```
+
+Defaulting rules:
+
+- `provider_model_fingerprint` must be the resolved backend model ID, not the
+  raw Claude display/model alias.
+- `reasoning_effort` must be the normalized backend effort value. If the client
+  does not provide one, use a stable sentinel such as `default`.
+- Missing identity fields may be used only for bootstrap diagnostics. They must
+  not authorize delta continuation.
+
+All provider-continuation state must be scoped by this identity:
+
+- WebSocket pool key.
+- `response_id -> websocket_chain_id` association key.
+- Transport diagnostics.
+- Future retention/debug grouping.
+
+Adding a new identity field is an intentional linked-list reset. Older
+checkpoints that do not carry the new identity field must bootstrap a fresh
+provider chain instead of being reused blindly.
+
+## WebSocket Chain Proof
+
+`websocket_chain_id` is Gateway's in-memory proof that a provider `response_id`
+was produced on the same live WebSocket continuation lane currently being used.
+It is intentionally not trusted after process restart because the provider-side
+socket state is gone.
+
+Gateway handles exactly three chain-proof conditions:
+
+1. `websocket_chain_id` matching
+   - There is a live WebSocket for the same `ConversationTransportIdentityV1`.
+   - The stored checkpoint `response_id` is associated with that same
+     `websocket_chain_id`.
+   - Gateway may send `previous_response_id = checkpoint.response_id`.
+
+2. `websocket_chain_id` mismatching
+   - There is a live WebSocket for the same identity, but the checkpoint
+     `response_id` is associated with a different `websocket_chain_id`.
+   - Gateway must not send the stored checkpoint as `previous_response_id`.
+   - Gateway sends the full canonical history over WebSocket with
+     `previous_response_id = none`, then commits the returned `response_id` as
+     the new checkpoint and associates it with the current `websocket_chain_id`.
+
+3. `websocket_chain_id` missing
+   - There is no live WebSocket, no association for the checkpoint response, or
+     the transport identity is incomplete.
+   - This includes Gateway restart, stale socket replacement, and old
+     checkpoints created before chain proof existed.
+   - Gateway must not send the stored checkpoint as `previous_response_id`.
+   - Gateway creates or reuses the appropriate WebSocket, sends the full
+     canonical history with `previous_response_id = none`, then uses the fresh
+     returned `response_id` for later deltas on that WebSocket lane.
+
+```text
+Allowed delta:
+
+  identity I1
+  live socket chain = W1
+  checkpoint.response_id = R4
+  association[I1, R4] = W1
+
+  response.create(previous_response_id = R4, input = delta M5)
+        |
+        v
+  returns R5
+  association[I1, R5] = W1
+
+
+Forbidden stale reuse after restart/socket replacement:
+
+  identity I1
+  live socket chain = W2
+  checkpoint.response_id = R4
+  association[I1, R4] = missing or W1
+
+  response.create(previous_response_id = none, input = full canonical history)
+        |
+        v
+  returns R5B
+  association[I1, R5B] = W2
+
+  next turn may use previous_response_id = R5B on W2
+```
+
+### Model And Effort Changes
+
+Changing model starts a fresh provider linked list. Gateway keeps the canonical
+Claude Code history on disk, but the OpenAI `previous_response_id` chain must
+not cross model boundaries.
+
+Changing reasoning effort also starts a fresh provider linked list. A response
+created under one reasoning configuration, for example `gpt-5.5 + high`, must
+not be continued as `gpt-5.5 + low` or `gpt-5.5 + default`.
+
+```text
+Same Claude session and same Gateway branch:
+
+  lane A: model=gpt-5.5, effort=default
+
+    A1 ----------------> A2 ----------------> A3
+    previous=none       previous=A1          previous=A2
+
+  user changes model or effort
+
+  lane B: model=gpt-5.6-terra, effort=default
+
+    B1 ----------------> B2
+    previous=none       previous=B1
+
+Canonical Gateway branch:
+
+  active_messages = [M1, M2, M3, M4, ...]
+  current checkpoint points only to the latest response in the active lane
+```
+
+This behavior matches the user-visible Claude Code expectation: switching the
+model creates a fresh model run over the useful current history, not a
+cross-model continuation edge.
+
+## Compatibility Fingerprint
+
+The request compatibility fingerprint answers one question:
+
+> Can Gateway safely reuse the stored `response_id` as `previous_response_id`
+> for the next WebSocket `response.create`?
+
+It answers this question only after transport identity has already matched. It
+covers the non-input provider-rendering contract. It intentionally does not
+include conversation messages because delta mode sends only the new input while
+OpenAI supplies prior context through `previous_response_id`.
+
+Included in the fingerprint:
+
+- renderer version
+- final OpenAI `instructions`
+- translated `tools`
+- translated `tool_choice`
+- `parallel_tool_calls`
+- `text`
+- `include`
+- `service_tier`
+- incremental transport mode
+
+Transport-identity fields are not compatibility-fingerprint fields:
+
+- selected backend model
+- normalized reasoning effort
+
+Those fields define the provider lane itself. If they change, Gateway must
+bootstrap a new provider linked list instead of treating the change as an
+ordinary compatibility drift.
+
+Not included in the fingerprint:
+
+- conversation messages / OpenAI `input`
+- `previous_response_id`
+- provider `response_id`
+- provider output items
+- auth tokens, account IDs, or credential state
+- Gateway request IDs
+- Claude Code session IDs
+- Gateway branch IDs
+- client metadata, including slash-command metadata such as `/status`
+- local helper API results except where they are appended into actual model input
+
+Client metadata is excluded because it is Gateway/Claude bookkeeping, not part
+of the provider-rendering contract. If a local helper result is appended into
+the model input, it is still excluded from the fingerprint as input content; the
+next successful response ID becomes the new linked-list checkpoint.
+
+## Regime 1: New Session
+
+When Gateway has no canonical history for a Claude Code session, it creates a
+durable branch from the first useful Claude Code request.
+
+```text
+Turn 1: Claude Code request
+  session_id = S1
+  messages   = [M1]
+        |
+        v
+Gateway canonical store
+  session S1
+  branch B1
+  active_messages = [M1]
+  checkpoint = none
+        |
+        v
+OpenAI WebSocket response.create
+  input = [M1]
+  previous_response_id = none
+        |
+        v
+OpenAI returns response.id = R1
+        |
+        v
+Gateway commit
+  B1.checkpoint.response_id = R1
+  B1.checkpoint.previous_response_id = none
+
+Turn 2:
+  Claude Code sends [M1, M2]
+  Gateway prefix-matches stored [M1]
+  WebSocket response.create previous_response_id = R1
+  OpenAI returns R2
+  Gateway commits R2 -> R1
+
+Turn 3:
+  Claude Code sends [M1, M2, M3]
+  Gateway prefix-matches stored [M1, M2]
+  WebSocket response.create previous_response_id = R2
+  OpenAI returns R3
+  Gateway commits R3 -> R2
+
+Turn 4:
+  Claude Code sends [M1, M2, M3, M4]
+  Gateway prefix-matches stored [M1, M2, M3]
+  WebSocket response.create previous_response_id = R3
+  OpenAI returns R4
+  Gateway commits R4 -> R3
+
+Provider linked list after turn 4:
+
+  R1 ---------------> R2 ---------------> R3 ---------------> R4
+  ^                  ^                   ^                   ^
+  |                  |                   |                   |
+  previous=none      previous=R1         previous=R2         previous=R3
+
+Gateway branch B1 after turn 4:
+
+  active_messages = [M1, M2, M3, M4]
+  checkpoint.response_id = R4
+  checkpoint.previous_response_id = R3
+```
+
+## Regime 2: Session With Canonical Conversation History
+
+When Gateway already has canonical history for the Claude Code session, it uses
+prefix matching to select the durable branch. Prefix matching alone does not
+authorize `previous_response_id` reuse. Delta also requires matching transport
+identity and matching live `websocket_chain_id`.
+
+```text
+Disk before request
+  session S1 / branch B1
+  active_messages = [M1, M2, M3, M4]
+  checkpoint.response_id = R4
+  checkpoint.previous_response_id = R3
+
+Existing provider linked list:
+
+  R1 ---------------> R2 ---------------> R3 ---------------> R4
+  ^                  ^                   ^                   ^
+  |                  |                   |                   |
+  previous=none      previous=R1         previous=R2         previous=R3
+
+Claude Code request
+  session_id = S1
+  messages   = [M1, M2, M3, M4, M5]
+        |
+        v
+Prefix match
+  stored   [M1, M2, M3, M4]
+  incoming [M1, M2, M3, M4, M5]
+        |
+        v
+OpenAI WebSocket response.create
+  input = rendered current turn from canonical state
+  previous_response_id = R4
+        |
+        v
+OpenAI returns R5
+        |
+        v
+Gateway commit
+  active_messages = [M1, M2, M3, M4, M5]
+  checkpoint.response_id = R5
+  checkpoint.previous_response_id = R4
+
+Provider linked list after request:
+
+  R1 ---------------> R2 ---------------> R3 ---------------> R4 ---------------> R5
+  ^                  ^                   ^                   ^                   ^
+  |                  |                   |                   |                   |
+  previous=none      previous=R1         previous=R2         previous=R3         previous=R4
+```
+
+If Gateway has canonical history but no live chain proof, for example after a
+Gateway restart, it uses the canonical history as a WebSocket baseline instead
+of reusing the old `response_id`:
+
+```text
+Disk before request
+  session S1 / branch B1
+  active_messages = [M1, M2, M3, M4]
+  checkpoint.response_id = R4
+
+Runtime after Gateway restart
+  no live WebSocket
+  no trusted websocket_chain_id association for R4
+
+Claude Code request
+  session_id = S1
+  messages   = [M1, M2, M3, M4, M5]
+        |
+        v
+Prefix match selects B1
+        |
+        v
+OpenAI WebSocket response.create
+  input = [M1, M2, M3, M4, M5]
+  previous_response_id = none
+        |
+        v
+OpenAI returns R5B
+        |
+        v
+Gateway commit
+  active_messages = [M1, M2, M3, M4, M5]
+  checkpoint.response_id = R5B
+  checkpoint.previous_response_id = none
+  association[identity, R5B] = current websocket_chain_id
+
+Next turn on the same live WebSocket:
+  WebSocket response.create previous_response_id = R5B
+  OpenAI returns R6B
+```
+
+If the incoming messages do not prefix-match, Gateway cannot prove an `n ->
+n+k` continuation. It treats the request as a new provider baseline for that
+selected branch/tab and does not reuse the old checkpoint:
+
+```text
+Stored branch B1 before request:
+
+  active_messages = [M1, M2, M3, M4]
+  checkpoint.response_id = R4
+
+Existing provider linked list:
+
+  R1 ---------------> R2 ---------------> R3 ---------------> R4
+
+Incoming model-bound messages do not prefix-match:
+
+  incoming = [N1, N2, N3]
+        |
+        v
+Gateway reconciles B1 active_messages to incoming canonical messages
+        |
+        v
+OpenAI WebSocket response.create
+  previous_response_id = none
+  input = incoming canonical history
+        |
+        v
+OpenAI returns R5R
+        |
+        v
+Gateway commits R5R as the new B1 checkpoint
+
+Fresh provider linked list after non-prefix baseline:
+
+  R5R
+  ^
+  |
+  previous=none
+
+Gateway branch B1 after rebaseline/continuation:
+
+  active_messages = [N1, N2, N3]
+  checkpoint.response_id = R5R
+  checkpoint.previous_response_id = none
+```
+
+## Regime 3: Resumed Session Without Canonical Gateway History
+
+If Gateway's persisted state was deleted but Claude Code is still running or
+resumes a session, Claude Code can still send the useful conversation history.
+Gateway treats that incoming history as the new canonical baseline.
+
+```text
+Disk before request
+  no session S1
+
+Claude Code resumed request
+  session_id = S1
+  messages   = [M1, M2, M3, M4, M5]
+        |
+        v
+Gateway creates
+  session S1
+  branch B1
+  active_messages = [M1, M2, M3, M4, M5]
+  checkpoint = none
+        |
+        v
+OpenAI WebSocket response.create
+  input = [M1, M2, M3, M4, M5]
+  previous_response_id = none
+        |
+        v
+OpenAI returns R5B
+        |
+        v
+Gateway commit
+  B1.checkpoint.response_id = R5B
+  B1.checkpoint.previous_response_id = none
+
+Next resumed turn:
+  Claude Code sends [M1, M2, M3, M4, M5, M6]
+  Gateway prefix-matches stored [M1, M2, M3, M4, M5]
+  WebSocket response.create previous_response_id = R5B
+  OpenAI returns R6B
+  Gateway commits R6B -> R5B
+
+Following resumed turn:
+  Claude Code sends [M1, M2, M3, M4, M5, M6, M7]
+  WebSocket response.create previous_response_id = R6B
+  OpenAI returns R7B
+  Gateway commits R7B -> R6B
+
+Provider linked list after resumed baseline:
+
+  R5B --------------> R6B --------------> R7B
+  ^                  ^                   ^
+  |                  |                   |
+  previous=none      previous=R5B        previous=R6B
+```
+
+## Linked-List Guide
+
+OpenAI's response IDs form the provider-side linked list. Gateway's durable
+branch stores the latest node and the parent edge used to create it.
+
+```text
+OpenAI provider chain
+
+  baseline       delta          delta          delta          delta
+  prev=none      prev=R1        prev=R2        prev=R3        prev=R4
+      |             |              |              |              |
+      v             v              v              v              v
+     R1 ---------> R2 ----------> R3 ----------> R4 ----------> R5
+
+
+Gateway branch checkpoint after R5
+
+  branch B1
+    active_messages = [M1, M2, M3, M4, M5]
+    openai_checkpoint = {
+      response_id: R5,
+      previous_response_id: R4,
+      provider_model_fingerprint: "...",
+      request_compatibility_fingerprint: "..."
+    }
+```
+
+How the three regimes differ:
+
+```text
+New session:
+  no Gateway branch -> baseline R1 -> delta R2 -> delta R3 -> delta R4
+
+Existing canonical session with live chain proof:
+  prefix match + checkpoint R4 + matching websocket_chain_id
+  -> delta previous_response_id=R4
+  -> commit R5
+
+Existing canonical session without live chain proof:
+  prefix match + checkpoint R4 but no matching websocket_chain_id
+  -> WebSocket baseline previous_response_id=none with canonical history
+  -> commit R5B
+  -> later delta uses R5B
+
+Deleted Gateway state / resumed Claude Code:
+  no Gateway branch but Claude sends useful history
+  -> WebSocket baseline with that history
+  -> commit R5B
+  -> later delta uses R5B -> R6B -> R7B
+```
+
+## Single-Branch Confirmation Calls
+
+Claude Code can send internal confirmation/classifier-style calls that are
+orthogonal to the main conversation journey. These calls may need conversation
+context, but their response IDs must not become the main branch checkpoint.
+
+Gateway handles known internal confirmation calls as transient context reads:
+
+```text
+Main durable conversation chain
+
+  R1 ---------------> R2 ---------------> R3 ---------------> R4
+  ^                  ^                   ^                   ^
+  |                  |                   |                   |
+  previous=none      previous=R1         previous=R2         previous=R3
+
+Transient confirmation call between R3 and R4:
+
+                        previous_response_id = R3
+                                  |
+                                  v
+                    "Should this action be allowed?"
+                                  |
+                                  v
+                                RC1
+                                  |
+                                  v
+                     RC1 is not committed to branch B1
+
+Next durable main turn:
+
+  Gateway still uses branch checkpoint R4, not RC1.
+
+  R1 ---------------> R2 ---------------> R3 ---------------> R4 ---------------> R5
+                                                                            previous=R4
+
+Gateway behavior
+  uses the current main checkpoint as context anchor for confirmation calls
+  does not commit RC1 as branch checkpoint
+  does not allow RC1 to authorize reuse of R4 or any other main checkpoint
+  does not create a new tab for RC1
+  keeps the main linked list on durable main response IDs only
+```
+
+This keeps confirmation/classifier traffic from creating extra tabs or
+advancing the main linked list. Durable model-bound turns still commit their
+returned response IDs. Unknown model-bound turns are prioritized as durable
+rebaseline turns to avoid tab explosion.
+
+## Exceptional Rebaseline
+
+The normal path must prevent bad `previous_response_id` values before sending a
+request by requiring matching transport identity and matching
+`websocket_chain_id`. If OpenAI still rejects a stored `previous_response_id`,
+Gateway treats that as stale chain proof, invalidates the association, and
+retries once over WebSocket without `previous_response_id`.
+
+```text
+Gateway tries delta:
+  previous_response_id = R3
+        |
+        v
+OpenAI rejects R3 as stale/missing
+        |
+        v
+Gateway WebSocket rebaseline:
+  previous_response_id = none
+  input = canonical history/current rendered request
+        |
+        v
+OpenAI returns R4'
+        |
+        v
+Gateway commits R4'
+Next turn resumes delta with previous_response_id = R4'
+```
+
+This is not a journey to HTTP or full-history forever. It is a single WebSocket
+rebaseline that creates a fresh response ID anchor. After the fresh anchor is
+committed and associated with the current `websocket_chain_id`, later turns on
+that same WebSocket return to delta.

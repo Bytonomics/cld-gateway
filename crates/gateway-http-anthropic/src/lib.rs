@@ -816,6 +816,11 @@ async fn v1_messages(
         };
     let logged_previous_response_id = request_previous_response_id.clone();
 
+    let previous_chain_input_tokens = chain_input_tokens_for_previous_response(
+        prepared_branch.as_ref(),
+        logged_previous_response_id.as_deref(),
+    );
+
     let commit_turn_failed = if let Some(prepared_branch) = prepared_branch
         .as_ref()
         .filter(|prepared_branch| prepared_branch.commit_turn)
@@ -831,6 +836,7 @@ async fn v1_messages(
                 previous_response_id: request_previous_response_id,
                 provider_model_fingerprint: Some(provider_model_fingerprint),
                 request_compatibility_fingerprint: Some(request_compatibility_fingerprint),
+                provider_input_tokens: decoded.token_usage.map(|usage| usage.input_tokens),
                 canonical_message_count: Some(prepared_branch.active_messages.len()),
                 canonical_prefix_hash: Some(canonical_messages_prefix_hash(
                     &prepared_branch.active_messages,
@@ -900,7 +906,12 @@ async fn v1_messages(
         }
     }
 
-    let mut response = build_unary_messages_response(&state, &req, request_id.as_ref(), &decoded);
+    let mut decoded_for_response = decoded.clone();
+    if let Some(usage) = decoded_for_response.token_usage.as_mut() {
+        normalize_usage_from_input_token_baseline(usage, previous_chain_input_tokens);
+    }
+    let mut response =
+        build_unary_messages_response(&state, &req, request_id.as_ref(), &decoded_for_response);
     if let Some(context_management) = context_management_report.response_value() {
         response["context_management"] = context_management;
     }
@@ -2001,6 +2012,10 @@ async fn stream_messages(
             provider_model_fingerprint: resolution.selected_backend_model.clone(),
             request_compatibility_fingerprint: request_compatibility_fingerprint.clone(),
             previous_response_id: effective_previous_response_id.clone(),
+            previous_chain_input_tokens: chain_input_tokens_for_previous_response(
+                Some(prepared_branch),
+                effective_previous_response_id.as_deref(),
+            ),
             canonical_message_count: prepared_branch.active_messages.len(),
             canonical_prefix_hash: canonical_messages_prefix_hash(
                 &prepared_branch.active_messages,
@@ -2061,6 +2076,7 @@ struct StreamCommitContext {
     provider_model_fingerprint: String,
     request_compatibility_fingerprint: String,
     previous_response_id: Option<String>,
+    previous_chain_input_tokens: Option<i64>,
     canonical_message_count: usize,
     canonical_prefix_hash: String,
     transport_identity: Option<ConversationTransportIdentity>,
@@ -2097,6 +2113,7 @@ fn maybe_commit_stream_completion(
             request_compatibility_fingerprint: Some(
                 commit.request_compatibility_fingerprint.clone(),
             ),
+            provider_input_tokens: extract_input_tokens_from_completed_event(data),
             canonical_message_count: Some(commit.canonical_message_count),
             canonical_prefix_hash: Some(commit.canonical_prefix_hash.clone()),
             provider_output_items: extract_completed_output_items(data),
@@ -2166,6 +2183,44 @@ fn extract_completed_output_items(data: &str) -> Vec<serde_json::Value> {
                 .cloned()
         })
         .unwrap_or_default()
+}
+
+fn extract_input_tokens_from_completed_event(data: &str) -> Option<i64> {
+    gateway_backend_codex::sse_unary::extract_usage_from_completed_event(data)
+        .map(|usage| usage.input_tokens)
+}
+
+fn chain_input_tokens_for_previous_response(
+    prepared_branch: Option<&PreparedConversationBranch>,
+    previous_response_id: Option<&str>,
+) -> Option<i64> {
+    let previous_response_id = previous_response_id?;
+    let branch = &prepared_branch?.branch;
+    branch
+        .openai_checkpoint
+        .as_ref()
+        .filter(|checkpoint| checkpoint.response_id == previous_response_id)
+        .and_then(|checkpoint| checkpoint.provider_input_tokens)
+        .or_else(|| {
+            branch
+                .turn_openai_checkpoints
+                .iter()
+                .rev()
+                .find(|checkpoint| checkpoint.response_id == previous_response_id)
+                .and_then(|checkpoint| checkpoint.provider_input_tokens)
+        })
+}
+
+fn normalize_usage_from_input_token_baseline(
+    usage: &mut gateway_backend_codex::types::CodexTokenUsage,
+    input_token_baseline: Option<i64>,
+) {
+    let Some(input_token_baseline) = input_token_baseline else {
+        return;
+    };
+    usage.input_tokens = usage.input_tokens.saturating_sub(input_token_baseline);
+    usage.cached_input_tokens = usage.cached_input_tokens.min(usage.input_tokens);
+    usage.total_tokens = usage.input_tokens.saturating_add(usage.output_tokens);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3341,7 +3396,13 @@ fn backend_events_to_anthropic_events(
     stream_commit: Option<StreamCommitContext>,
 ) -> futures_util::stream::BoxStream<'static, Result<Event, std::convert::Infallible>> {
     let state = Arc::new(Mutex::new(
-        crate::sse_bridge::StreamState::new().with_context_management(context_management),
+        crate::sse_bridge::StreamState::new()
+            .with_context_management(context_management)
+            .with_input_token_baseline(
+                stream_commit
+                    .as_ref()
+                    .and_then(|commit| commit.previous_chain_input_tokens),
+            ),
     ));
     let tool_calls = Arc::new(tool_calls);
     let request_id = Arc::new(request_id);
@@ -4113,6 +4174,7 @@ mod messages_tests {
                     previous_response_id: Some("resp_seed".to_string()),
                     provider_model_fingerprint: Some(DEFAULT_BACKEND_MODEL.to_string()),
                     request_compatibility_fingerprint: Some(request_compatibility_fingerprint),
+                    provider_input_tokens: None,
                     canonical_message_count: Some(request_messages.len()),
                     canonical_prefix_hash: Some(super::canonical_messages_prefix_hash(
                         &request_messages,
@@ -6119,6 +6181,7 @@ mod transport_selection_tests {
             previous_response_id: Some("resp_parent".to_string()),
             provider_model_fingerprint: model.to_string(),
             request_compatibility_fingerprint: Some(fingerprint.to_string()),
+            provider_input_tokens: None,
         }
     }
 

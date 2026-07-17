@@ -36,6 +36,8 @@ pub struct OpenAiCheckpoint {
     pub previous_response_id: Option<String>,
     pub provider_model_fingerprint: String,
     pub request_compatibility_fingerprint: Option<String>,
+    #[serde(default)]
+    pub provider_input_tokens: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -48,6 +50,8 @@ pub struct TurnOpenAiCheckpoint {
     pub previous_response_id: Option<String>,
     pub provider_model_fingerprint: String,
     pub request_compatibility_fingerprint: Option<String>,
+    #[serde(default)]
+    pub provider_input_tokens: Option<i64>,
     pub created_at_unix_seconds: i64,
 }
 
@@ -123,6 +127,7 @@ pub struct CommitTurnParams {
     pub previous_response_id: Option<String>,
     pub provider_model_fingerprint: Option<String>,
     pub request_compatibility_fingerprint: Option<String>,
+    pub provider_input_tokens: Option<i64>,
     pub canonical_message_count: Option<usize>,
     pub canonical_prefix_hash: Option<String>,
     pub provider_output_items: Vec<serde_json::Value>,
@@ -686,6 +691,7 @@ impl ConversationStateStore {
                     request_compatibility_fingerprint: params
                         .request_compatibility_fingerprint
                         .clone(),
+                    provider_input_tokens: params.provider_input_tokens,
                 });
                 if let (Some(canonical_message_count), Some(canonical_prefix_hash)) = (
                     params.canonical_message_count,
@@ -706,6 +712,7 @@ impl ConversationStateStore {
                         request_compatibility_fingerprint: params
                             .request_compatibility_fingerprint
                             .clone(),
+                        provider_input_tokens: params.provider_input_tokens,
                         created_at_unix_seconds: now,
                     });
                     branch.turn_openai_checkpoints.sort_by_key(|checkpoint| {
@@ -1429,8 +1436,9 @@ mod tests {
                     previous_response_id: None,
                     provider_model_fingerprint: None,
                     request_compatibility_fingerprint: None,
-                    canonical_message_count: None,
-                    canonical_prefix_hash: None,
+                    provider_input_tokens: None,
+                    canonical_message_count: Some(2),
+                    canonical_prefix_hash: Some("prefix-2".to_string()),
                     provider_output_items: Vec::new(),
                 },
             )
@@ -1476,8 +1484,9 @@ mod tests {
                     previous_response_id: Some("resp_1".to_string()),
                     provider_model_fingerprint: Some("gpt-5.4".to_string()),
                     request_compatibility_fingerprint: Some("fingerprint-2".to_string()),
-                    canonical_message_count: None,
-                    canonical_prefix_hash: None,
+                    provider_input_tokens: Some(123),
+                    canonical_message_count: Some(2),
+                    canonical_prefix_hash: Some("prefix-2".to_string()),
                     provider_output_items: vec![
                         serde_json::json!({"type":"message","role":"assistant"}),
                     ],
@@ -1491,6 +1500,18 @@ mod tests {
                 .as_ref()
                 .and_then(|checkpoint| checkpoint.previous_response_id.as_deref()),
             Some("resp_1")
+        );
+        assert_eq!(
+            committed
+                .openai_checkpoint
+                .as_ref()
+                .and_then(|checkpoint| checkpoint.provider_input_tokens),
+            Some(123)
+        );
+        assert_eq!(committed.turn_openai_checkpoints.len(), 1);
+        assert_eq!(
+            committed.turn_openai_checkpoints[0].provider_input_tokens,
+            Some(123)
         );
     }
 
@@ -1523,6 +1544,7 @@ mod tests {
                     previous_response_id: Some("resp_1".to_string()),
                     provider_model_fingerprint: Some("gpt-5".to_string()),
                     request_compatibility_fingerprint: Some("fingerprint-1".to_string()),
+                    provider_input_tokens: None,
                     canonical_message_count: None,
                     canonical_prefix_hash: None,
                     provider_output_items: Vec::new(),
@@ -1648,6 +1670,7 @@ mod tests {
                     previous_response_id: None,
                     provider_model_fingerprint: Some("gpt-5".to_string()),
                     request_compatibility_fingerprint: Some("fingerprint-after".to_string()),
+                    provider_input_tokens: None,
                     canonical_message_count: None,
                     canonical_prefix_hash: None,
                     provider_output_items: Vec::new(),
@@ -1776,6 +1799,7 @@ mod tests {
                     previous_response_id: None,
                     provider_model_fingerprint: Some("gpt-5".to_string()),
                     request_compatibility_fingerprint: Some("fingerprint-1".to_string()),
+                    provider_input_tokens: None,
                     canonical_message_count: None,
                     canonical_prefix_hash: None,
                     provider_output_items: Vec::new(),
@@ -1817,6 +1841,7 @@ mod tests {
                     previous_response_id: None,
                     provider_model_fingerprint: Some("gpt-5".to_string()),
                     request_compatibility_fingerprint: Some("fingerprint-1".to_string()),
+                    provider_input_tokens: None,
                     canonical_message_count: None,
                     canonical_prefix_hash: None,
                     provider_output_items: Vec::new(),
@@ -1920,6 +1945,7 @@ mod tests {
                     previous_response_id: None,
                     provider_model_fingerprint: Some("gpt-5".to_string()),
                     request_compatibility_fingerprint: Some("fingerprint-1".to_string()),
+                    provider_input_tokens: None,
                     canonical_message_count: None,
                     canonical_prefix_hash: None,
                     provider_output_items: Vec::new(),
@@ -1994,6 +2020,7 @@ mod tests {
                     previous_response_id: None,
                     provider_model_fingerprint: Some("gpt-5".to_string()),
                     request_compatibility_fingerprint: Some("fingerprint-1".to_string()),
+                    provider_input_tokens: None,
                     canonical_message_count: None,
                     canonical_prefix_hash: None,
                     provider_output_items: Vec::new(),

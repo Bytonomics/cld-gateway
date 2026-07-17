@@ -1743,14 +1743,6 @@ fn anthropic_stream_start_events(msg_id: &str, model: &str) -> Vec<Event> {
             })
             .to_string(),
         ),
-        Event::default().event("content_block_start").data(
-            serde_json::json!({
-                "type": "content_block_start",
-                "index": 0,
-                "content_block": { "type": "text", "text": "" }
-            })
-            .to_string(),
-        ),
     ]
 }
 
@@ -3239,8 +3231,7 @@ fn backend_events_to_anthropic_events(
     stream_commit: Option<StreamCommitContext>,
 ) -> futures_util::stream::BoxStream<'static, Result<Event, std::convert::Infallible>> {
     let state = Arc::new(Mutex::new(
-        crate::sse_bridge::StreamState::new_with_text_block0_started()
-            .with_context_management(context_management),
+        crate::sse_bridge::StreamState::new().with_context_management(context_management),
     ));
     let tool_calls = Arc::new(tool_calls);
     let request_id = Arc::new(request_id);

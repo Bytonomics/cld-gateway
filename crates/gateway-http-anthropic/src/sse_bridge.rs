@@ -32,7 +32,7 @@ pub(crate) struct StreamState {
     blocks: Vec<BlockState>,
 
     // Text routing
-    active_text_index: u32,
+    active_text_index: Option<u32>,
     saw_output_text_delta: bool,
 
     // Thinking routing (optional)
@@ -55,14 +55,11 @@ pub(crate) struct StreamState {
 }
 
 impl StreamState {
-    pub(crate) fn new_with_text_block0_started() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
-            next_block_index: 1,
-            blocks: vec![BlockState {
-                index: 0,
-                closed: false,
-            }],
-            active_text_index: 0,
+            next_block_index: 0,
+            blocks: Vec::new(),
+            active_text_index: None,
             saw_output_text_delta: false,
             active_thinking_index: None,
             tool_blocks_by_call_id: HashMap::new(),
@@ -105,6 +102,15 @@ impl StreamState {
         (idx, true)
     }
 
+    fn open_text_block_if_needed(&mut self) -> (u32, bool) {
+        if let Some(idx) = self.active_text_index {
+            return (idx, false);
+        }
+        let idx = self.add_block();
+        self.active_text_index = Some(idx);
+        (idx, true)
+    }
+
     fn ensure_tool_block(&mut self, call_id: &str) -> (u32, bool) {
         if let Some(idx) = self.tool_blocks_by_call_id.get(call_id).copied() {
             return (idx, false);
@@ -118,7 +124,15 @@ impl StreamState {
     }
 }
 
-// Note: the initial text block (index 0) is started by `anthropic_stream_start_events`.
+fn content_block_start_text(index: u32) -> Event {
+    let payload = serde_json::json!({
+        "type": "content_block_start",
+        "index": index,
+        "content_block": { "type": "text", "text": "" }
+    })
+    .to_string();
+    Event::default().event("content_block_start").data(payload)
+}
 
 fn content_block_start_tool_use(index: u32, call_id: &str, name: &str) -> Event {
     let payload = serde_json::json!({
@@ -365,8 +379,17 @@ fn handle_output_text_delta(
     extract_stream_delta_text: impl Fn(&str) -> Option<String>,
 ) -> Option<Vec<Event>> {
     let text = extract_stream_delta_text(data)?;
+    if text.trim().is_empty() {
+        return None;
+    }
+    let (text_index, started) = st.open_text_block_if_needed();
     st.saw_output_text_delta = true;
-    Some(vec![content_block_delta_text(st.active_text_index, &text)])
+    let mut out = Vec::new();
+    if started {
+        out.push(content_block_start_text(text_index));
+    }
+    out.push(content_block_delta_text(text_index, &text));
+    Some(out)
 }
 
 fn handle_output_item(
@@ -430,10 +453,24 @@ fn handle_message_item(st: &mut StreamState, item: &serde_json::Value) -> Option
     if st.saw_output_text_delta {
         return None;
     }
-    let out: Vec<Event> = gateway_backend_codex::output_text::message_item_output_texts(item)
+    let texts = gateway_backend_codex::output_text::message_item_output_texts(item);
+    let texts: Vec<&String> = texts
         .iter()
-        .map(|text| content_block_delta_text(st.active_text_index, text))
+        .filter(|text| !text.trim().is_empty())
         .collect();
+    if texts.is_empty() {
+        return None;
+    }
+    let (text_index, started) = st.open_text_block_if_needed();
+    let mut out = Vec::new();
+    if started {
+        out.push(content_block_start_text(text_index));
+    }
+    out.extend(
+        texts
+            .into_iter()
+            .map(|text| content_block_delta_text(text_index, text)),
+    );
     (!out.is_empty()).then_some(out)
 }
 
@@ -814,14 +851,6 @@ mod tests {
                 })
                 .to_string(),
             ),
-            Event::default().event("content_block_start").data(
-                serde_json::json!({
-                    "type": "content_block_start",
-                    "index": 0,
-                    "content_block": { "type": "text", "text": "" }
-                })
-                .to_string(),
-            ),
         ]
     }
 
@@ -836,7 +865,7 @@ mod tests {
         ))]);
         let mut backend = Box::pin(byte_stream.eventsource());
 
-        let mut state = StreamState::new_with_text_block0_started();
+        let mut state = StreamState::new();
         let tool_calls_path =
             std::env::temp_dir().join(format!("gateway_tool_calls_{}.sqlite", Uuid::new_v4()));
         let tool_calls = ToolCallStore::new(&tool_calls_path);

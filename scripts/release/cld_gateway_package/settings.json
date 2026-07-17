@@ -4,7 +4,7 @@
     {
       "id": "gpt-5.6-sol",
       "name": "GPT-5.6 Sol",
-      "description": "OpenAI flagship coding model"
+      "description": "OpenAI flagship coding model; ChatGPT/Codex context is 272K"
     },
     {
       "id": "gpt-5.6-terra",
@@ -24,7 +24,7 @@
     {
       "id": "gpt-5.6-luna",
       "name": "GPT-5.6 Luna",
-      "description": "OpenAI fast, affordable model; ChatGPT/Codex context is 128K"
+      "description": "OpenAI fast, affordable model; Gateway compaction window is 400K, with higher-cost pricing possible above 272K"
     },
     {
       "id": "gpt-5.3-codex-spark",
@@ -46,9 +46,13 @@
     "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME": "GPT-5.6 Sol",
     "ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION": "OpenAI flagship coding model via Gateway; ChatGPT/Codex context is 272K",
     "DISABLE_TELEMETRY": "1",
-    "ANTHROPIC_DEFAULT_HAIKU_MAX_TOKENS": 120000,
+    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "90",
+    "ANTHROPIC_DEFAULT_HAIKU_MAX_TOKENS": 400000,
     "ANTHROPIC_DEFAULT_SONNET_MAX_TOKENS": 945000,
-    "ANTHROPIC_DEFAULT_OPUS_MAX_TOKENS": 120000,
-    "ANTHROPIC_DEFAULT_FABLE_MAX_TOKENS": 260000
-  }
+    "ANTHROPIC_DEFAULT_OPUS_MAX_TOKENS": 128000,
+    "ANTHROPIC_DEFAULT_FABLE_MAX_TOKENS": 272000,
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "400000",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION": "OpenAI fast, affordable model; Gateway compaction window is 400K, with higher-cost pricing possible above 272K"
+  },
+  "autoCompactWindow": 400000
 }

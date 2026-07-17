@@ -110,6 +110,11 @@ pub(crate) struct WebSocketSessionPool {
     sessions: Arc<Mutex<HashMap<WebSocketSessionKey, CodexWebSocketSession>>>,
 }
 
+pub struct PooledWebSocketEventStream {
+    pub events: CodexBackendEventStream,
+    pub websocket_chain_id: WebSocketChainId,
+}
+
 #[derive(Clone)]
 struct CodexWebSocketSession {
     sender: mpsc::UnboundedSender<WebSocketCommand>,
@@ -151,7 +156,7 @@ impl WebSocketSessionPool {
         session_key: WebSocketSessionKey,
         req: CodexBackendRequest,
         policy: WebSocketRetryPolicy,
-    ) -> Result<CodexBackendEventStream, BackendError> {
+    ) -> Result<PooledWebSocketEventStream, BackendError> {
         let mut recycle_count = 0;
 
         loop {
@@ -177,7 +182,7 @@ impl WebSocketSessionPool {
                 Err(err) => return Err(err),
             };
 
-            let Some(first_item) = stream.next().await else {
+            let Some(first_item) = stream.events.next().await else {
                 let err = BackendError::WebSocket {
                     stage: "read event",
                     message: "websocket stream ended before first event".to_string(),
@@ -196,7 +201,10 @@ impl WebSocketSessionPool {
                     continue;
                 }
                 self.evict(&session_key);
-                return Ok(futures_util::stream::once(async move { Err(err) }).boxed());
+                return Ok(PooledWebSocketEventStream {
+                    events: futures_util::stream::once(async move { Err(err) }).boxed(),
+                    websocket_chain_id: stream.websocket_chain_id,
+                });
             };
 
             match first_item {
@@ -204,6 +212,7 @@ impl WebSocketSessionPool {
                     let tail_pool = self.clone();
                     let tail_key = session_key.clone();
                     let guarded_tail = stream
+                        .events
                         .map(move |item| {
                             if let Err(err) = &item
                                 && is_transport_lifecycle_error(err)
@@ -213,9 +222,12 @@ impl WebSocketSessionPool {
                             item
                         })
                         .boxed();
-                    return Ok(futures_util::stream::once(async move { Ok(first_event) })
-                        .chain(guarded_tail)
-                        .boxed());
+                    return Ok(PooledWebSocketEventStream {
+                        events: futures_util::stream::once(async move { Ok(first_event) })
+                            .chain(guarded_tail)
+                            .boxed(),
+                        websocket_chain_id: stream.websocket_chain_id,
+                    });
                 }
                 Err(err)
                     if should_recycle_websocket_error(&err, &policy)
@@ -234,7 +246,10 @@ impl WebSocketSessionPool {
                     if is_transport_lifecycle_error(&err) {
                         self.evict(&session_key);
                     }
-                    return Ok(futures_util::stream::once(async move { Err(err) }).boxed());
+                    return Ok(PooledWebSocketEventStream {
+                        events: futures_util::stream::once(async move { Err(err) }).boxed(),
+                        websocket_chain_id: stream.websocket_chain_id,
+                    });
                 }
             }
         }
@@ -261,19 +276,23 @@ impl WebSocketSessionPool {
         auth: &CodexAuthManager,
         session_key: &WebSocketSessionKey,
         req: CodexBackendRequest,
-    ) -> Result<CodexBackendEventStream, BackendError> {
+    ) -> Result<PooledWebSocketEventStream, BackendError> {
         if let Some(session) = self.get_alive_session(session_key) {
             match session.send_event_stream(&req) {
                 Ok(events) => {
+                    let websocket_chain_id = session.websocket_chain_id.clone();
                     tracing::info!(
                         session_key = %session_key,
-                        websocket_chain_id = %session.websocket_chain_id.as_str(),
+                        websocket_chain_id = %websocket_chain_id.as_str(),
                         previous_response_id = ?req.previous_response_id,
                         input_items = req.input.len(),
                         store = crate::types::STORE_RESPONSES_FOR_CONTINUATION,
                         "queued codex websocket response.create on live chain"
                     );
-                    return Ok(events);
+                    return Ok(PooledWebSocketEventStream {
+                        events,
+                        websocket_chain_id,
+                    });
                 }
                 Err(err) => {
                     self.evict(session_key);
@@ -296,9 +315,10 @@ impl WebSocketSessionPool {
 
         let session = open_session_with_refresh_retry(base_url, auth, req.clone()).await?;
         let events = session.send_event_stream(&req)?;
+        let websocket_chain_id = session.websocket_chain_id.clone();
         tracing::info!(
             session_key = %session_key,
-            websocket_chain_id = %session.websocket_chain_id.as_str(),
+            websocket_chain_id = %websocket_chain_id.as_str(),
             previous_response_id = ?req.previous_response_id,
             input_items = req.input.len(),
             store = crate::types::STORE_RESPONSES_FOR_CONTINUATION,
@@ -308,7 +328,10 @@ impl WebSocketSessionPool {
             .lock()
             .expect("websocket session mutex poisoned")
             .insert(session_key.clone(), session);
-        Ok(events)
+        Ok(PooledWebSocketEventStream {
+            events,
+            websocket_chain_id,
+        })
     }
 
     fn get_alive_session(

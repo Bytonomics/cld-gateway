@@ -801,26 +801,26 @@ async fn v1_messages(
     let bootstrap_backend_req =
         build_backend_request(&state.gateway_config, &resolution, translated, creds, None);
     let provider_model_fingerprint = resolution.selected_backend_model.clone();
-    let (decoded, request_previous_response_id) = match Box::pin(run_backend_unary(
-        &state,
-        request_id.as_ref(),
-        prepared_branch.as_ref(),
-        backend_req,
-        bootstrap_backend_req,
-    ))
-    .await
-    {
-        Ok(value) => value,
-        Err(resp) => return resp,
-    };
+    let (decoded, request_previous_response_id, response_websocket_chain_id) =
+        match Box::pin(run_backend_unary(
+            &state,
+            request_id.as_ref(),
+            prepared_branch.as_ref(),
+            backend_req,
+            bootstrap_backend_req,
+        ))
+        .await
+        {
+            Ok(value) => value,
+            Err(resp) => return resp,
+        };
     let logged_previous_response_id = request_previous_response_id.clone();
-    let response_websocket_chain_id =
-        current_websocket_chain_id_for_branch(&state, transport_identity.as_ref());
 
-    if let Some(prepared_branch) = prepared_branch
+    let commit_turn_failed = if let Some(prepared_branch) = prepared_branch
         .as_ref()
         .filter(|prepared_branch| prepared_branch.commit_turn)
-        && let Err(err) = state.conversation_state.commit_turn(
+    {
+        if let Err(err) = state.conversation_state.commit_turn(
             &prepared_branch.claude_session_id,
             &prepared_branch.branch.branch_id,
             &CommitTurnParams {
@@ -838,10 +838,18 @@ async fn v1_messages(
                 )),
                 provider_output_items: decoded.output_items.clone(),
             },
-        )
-    {
-        warn!(error = %err, "failed to commit unary conversation-state turn");
-    } else if let Some(prepared_branch) = prepared_branch.as_ref()
+        ) {
+            warn!(error = %err, "failed to commit unary conversation-state turn");
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    if !commit_turn_failed
+        && let Some(prepared_branch) = prepared_branch.as_ref()
         && let Some(response_id) = decoded.response_id.as_deref()
     {
         let websocket_chain_id_for_log = response_websocket_chain_id
@@ -1132,10 +1140,11 @@ async fn run_backend_unary(
     (
         gateway_backend_codex::types::CodexUnaryDecoded,
         Option<String>,
+        Option<WebSocketChainId>,
     ),
     axum::response::Response,
 > {
-    let (events, effective_previous_response_id) =
+    let (events, effective_previous_response_id, mut websocket_chain_id) =
         Box::pin(send_backend_stream_with_delta_fallback(
             state,
             request_id_str(request_id).map(ToString::to_string),
@@ -1154,7 +1163,7 @@ async fn run_backend_unary(
         Err(err)
             if is_known_delta_decode_rejection(&err, commit_previous_response_id.as_deref()) =>
         {
-            let retry_events = retry_full_after_delta_rejection(
+            let retry_stream = retry_full_after_delta_rejection(
                 state,
                 request_id_str(request_id).map(ToString::to_string),
                 prepared_branch,
@@ -1164,14 +1173,15 @@ async fn run_backend_unary(
             .await
             .map_err(backend_request_failure_to_http_response)?;
             commit_previous_response_id = None;
-            gateway_backend_codex::sse_unary::read_backend_events_to_completion(retry_events)
+            websocket_chain_id = retry_stream.websocket_chain_id.clone();
+            gateway_backend_codex::sse_unary::read_backend_events_to_completion(retry_stream.events)
                 .await
                 .map_err(|err| decode_error_to_http_response(&err))?
         }
         Err(err) => return Err(decode_error_to_http_response(&err)),
     };
 
-    Ok((decoded, commit_previous_response_id))
+    Ok((decoded, commit_previous_response_id, websocket_chain_id))
 }
 
 fn decode_error_to_http_response(
@@ -1191,13 +1201,18 @@ enum BackendRequestFailure {
     Backend(BackendError),
 }
 
+struct BackendEventStreamWithChain {
+    events: gateway_backend_codex::types::CodexBackendEventStream,
+    websocket_chain_id: Option<WebSocketChainId>,
+}
+
 async fn retry_full_after_delta_rejection(
     state: &AppState,
     request_id: Option<String>,
     prepared_branch: Option<&PreparedConversationBranch>,
     mut bootstrap_backend_req: gateway_backend_codex::types::CodexBackendRequest,
     attempted_previous_response_id: Option<String>,
-) -> Result<gateway_backend_codex::types::CodexBackendEventStream, BackendRequestFailure> {
+) -> Result<BackendEventStreamWithChain, BackendRequestFailure> {
     bootstrap_backend_req.previous_response_id = None;
 
     if let Some(prepared_branch) = prepared_branch {
@@ -1231,14 +1246,19 @@ async fn send_backend_stream_with_delta_fallback(
     (
         gateway_backend_codex::types::CodexBackendEventStream,
         Option<String>,
+        Option<WebSocketChainId>,
     ),
     BackendRequestFailure,
 > {
     let attempted_previous_response_id = backend_req.previous_response_id.clone();
     match send_backend_event_stream(state, prepared_branch, backend_req.clone()).await {
-        Ok(events) => Ok((events, attempted_previous_response_id)),
+        Ok(stream) => Ok((
+            stream.events,
+            attempted_previous_response_id,
+            stream.websocket_chain_id,
+        )),
         Err(err) if is_known_delta_rejection(&err, attempted_previous_response_id.as_deref()) => {
-            let retry_events = retry_full_after_delta_rejection(
+            let retry_stream = retry_full_after_delta_rejection(
                 state,
                 request_id,
                 prepared_branch,
@@ -1246,7 +1266,7 @@ async fn send_backend_stream_with_delta_fallback(
                 attempted_previous_response_id,
             )
             .await?;
-            Ok((retry_events, None))
+            Ok((retry_stream.events, None, retry_stream.websocket_chain_id))
         }
         Err(err) => Err(BackendRequestFailure::Backend(err)),
     }
@@ -1262,10 +1282,11 @@ async fn send_backend_stream_for_streaming(
     (
         gateway_backend_codex::types::CodexBackendEventStream,
         Option<String>,
+        Option<WebSocketChainId>,
     ),
     BackendRequestFailure,
 > {
-    let (mut events, effective_previous_response_id) =
+    let (mut events, effective_previous_response_id, websocket_chain_id) =
         Box::pin(send_backend_stream_with_delta_fallback(
             state,
             request_id.clone(),
@@ -1276,7 +1297,7 @@ async fn send_backend_stream_for_streaming(
         .await?;
 
     let Some(first_item) = events.next().await else {
-        return Ok((events, effective_previous_response_id));
+        return Ok((events, effective_previous_response_id, websocket_chain_id));
     };
 
     match first_item {
@@ -1284,7 +1305,7 @@ async fn send_backend_stream_for_streaming(
             if is_known_delta_failure_event(&event, effective_previous_response_id.as_deref()) =>
         {
             if delta_failure_event_to_backend_error(&event).is_some() {
-                let retry_events = retry_full_after_delta_rejection(
+                let retry_stream = retry_full_after_delta_rejection(
                     state,
                     request_id,
                     prepared_branch,
@@ -1292,21 +1313,21 @@ async fn send_backend_stream_for_streaming(
                     effective_previous_response_id,
                 )
                 .await?;
-                return Ok((retry_events, None));
+                return Ok((retry_stream.events, None, retry_stream.websocket_chain_id));
             }
             let prefixed = futures_util::stream::once(async move { Ok(event) })
                 .chain(events)
                 .boxed();
-            Ok((prefixed, effective_previous_response_id))
+            Ok((prefixed, effective_previous_response_id, websocket_chain_id))
         }
         Ok(event) => {
             let prefixed = futures_util::stream::once(async move { Ok(event) })
                 .chain(events)
                 .boxed();
-            Ok((prefixed, effective_previous_response_id))
+            Ok((prefixed, effective_previous_response_id, websocket_chain_id))
         }
         Err(err) if is_known_delta_rejection(&err, effective_previous_response_id.as_deref()) => {
-            let retry_events = retry_full_after_delta_rejection(
+            let retry_stream = retry_full_after_delta_rejection(
                 state,
                 request_id,
                 prepared_branch,
@@ -1314,13 +1335,13 @@ async fn send_backend_stream_for_streaming(
                 effective_previous_response_id,
             )
             .await?;
-            Ok((retry_events, None))
+            Ok((retry_stream.events, None, retry_stream.websocket_chain_id))
         }
         Err(err) => {
             let prefixed = futures_util::stream::once(async move { Err(err) })
                 .chain(events)
                 .boxed();
-            Ok((prefixed, effective_previous_response_id))
+            Ok((prefixed, effective_previous_response_id, websocket_chain_id))
         }
     }
 }
@@ -1329,13 +1350,13 @@ async fn send_backend_event_stream(
     state: &AppState,
     prepared_branch: Option<&PreparedConversationBranch>,
     backend_req: gateway_backend_codex::types::CodexBackendRequest,
-) -> Result<gateway_backend_codex::types::CodexBackendEventStream, BackendError> {
+) -> Result<BackendEventStreamWithChain, BackendError> {
     if let Some(identity) = transport_identity_for_branch(
         prepared_branch,
         &backend_req.model,
         backend_req.reasoning.as_ref(),
     ) {
-        return state
+        let stream = state
             .backend
             .send_pooled_websocket_event_stream(
                 &state.auth,
@@ -1343,14 +1364,23 @@ async fn send_backend_event_stream(
                 backend_req,
                 WebSocketRetryPolicy::default(),
             )
-            .await;
+            .await?;
+        return Ok(BackendEventStreamWithChain {
+            events: stream.events,
+            websocket_chain_id: Some(stream.websocket_chain_id),
+        });
     }
 
     let response = state
         .backend
         .send_streaming_with_refresh_retry(&state.auth, backend_req)
         .await?;
-    Ok(gateway_backend_codex::client::CodexBackendClient::response_to_event_stream(response))
+    Ok(BackendEventStreamWithChain {
+        events: gateway_backend_codex::client::CodexBackendClient::response_to_event_stream(
+            response,
+        ),
+        websocket_chain_id: None,
+    })
 }
 
 fn websocket_chain_decision_for_branch(
@@ -1432,15 +1462,6 @@ fn websocket_chain_decision_for_branch(
             reason: "websocket_chain_mismatch",
         }
     }
-}
-
-fn current_websocket_chain_id_for_branch(
-    state: &AppState,
-    identity: Option<&ConversationTransportIdentity>,
-) -> Option<WebSocketChainId> {
-    identity
-        .map(ConversationTransportIdentity::websocket_session_key)
-        .and_then(|session_key| state.backend.live_websocket_chain_id(&session_key))
 }
 
 fn is_known_delta_rejection(
@@ -1937,7 +1958,7 @@ async fn stream_messages(
     let bootstrap_request_to_backend =
         build_backend_request(&state.gateway_config, &resolution, translated, creds, None);
 
-    let (backend_events, effective_previous_response_id) =
+    let (backend_events, effective_previous_response_id, response_websocket_chain_id) =
         match Box::pin(send_backend_stream_for_streaming(
             &state,
             request_id_str(request_id.as_ref()).map(ToString::to_string),
@@ -1986,10 +2007,7 @@ async fn stream_messages(
                 prepared_branch.active_messages.len(),
             ),
             transport_identity: transport_identity.clone(),
-            websocket_chain_id: current_websocket_chain_id_for_branch(
-                &state,
-                transport_identity.as_ref(),
-            ),
+            websocket_chain_id: response_websocket_chain_id.clone(),
             openai_chain_checkpoints: state.openai_chain_checkpoints.clone(),
             request_id: request_id_str(request_id.as_ref()).map(ToString::to_string),
         });
@@ -2245,6 +2263,14 @@ fn select_transport(
         });
     }
 
+    if prepared_branch.commit_turn && prepared_branch.branch.compaction_reset_pending {
+        return Ok(SelectedTransport {
+            mode: TransportMode::Full,
+            previous_response_id: None,
+            reason: "branch_bootstrap_compaction_reset",
+        });
+    }
+
     if prepared_branch.commit_turn && prepared_branch.delta_start_index == 0 {
         return Ok(SelectedTransport {
             mode: TransportMode::Full,
@@ -2253,14 +2279,12 @@ fn select_transport(
         });
     }
 
-    let reason = if prepared_branch.commit_turn && prepared_branch.branch.compaction_reset_pending {
-        "branch_checkpoint_reuse_compaction_pending"
-    } else if checkpoint.request_compatibility_fingerprint.as_deref()
-        != Some(request_compatibility_fingerprint)
+    let reason = if checkpoint.request_compatibility_fingerprint.as_deref()
+        == Some(request_compatibility_fingerprint)
     {
-        "branch_checkpoint_reuse_compatibility_drift"
-    } else {
         "branch_checkpoint_reuse"
+    } else {
+        "branch_checkpoint_reuse_compatibility_drift"
     };
 
     Ok(SelectedTransport {
@@ -2292,7 +2316,7 @@ fn prepare_conversation_branch(
         &req.messages,
         &state.gateway_config.workflow.claude_code,
     );
-    let compaction_command_seen = has_local_only_command(&normalized.client_metadata, "/compact");
+    let durable_messages = durable_canonical_messages(normalized.messages);
     let turn_scope = match normalized
         .client_metadata
         .get("gateway_conversation_inclusion")
@@ -2300,13 +2324,18 @@ fn prepare_conversation_branch(
         Some(mode) if mode == "read_only" => ConversationTurnScope::Side,
         _ => ConversationTurnScope::Main,
     };
-    let fingerprints =
-        branch_fingerprints_from_messages(&normalized.messages, compaction_command_seen);
-    let active_canonical_messages = serde_json::to_value(&normalized.messages).ok();
     let existing_branches = load_existing_branches_for_session(state, claude_session_id);
-    let prefix_match = best_prefix_matched_branch(&existing_branches, &normalized.messages);
+    let prefix_match = best_prefix_matched_branch(&existing_branches, &durable_messages);
+    let compaction_context =
+        compaction_context_for_request(&normalized.client_metadata, prefix_match.as_ref());
+    let fingerprints = branch_fingerprints_from_messages_with_compaction_prefix(
+        &durable_messages,
+        compaction_context.command_seen,
+        compaction_context.summary_message_count,
+    );
+    let active_canonical_messages = serde_json::to_value(&durable_messages).ok();
     let latest_context_branch = latest_checkpoint_branch(&existing_branches);
-    let internal_reason = classify_transient_internal_request(req, &normalized.messages);
+    let internal_reason = classify_transient_internal_request(req, &durable_messages);
 
     if let Some(reason) = internal_reason {
         return latest_context_branch.map(|branch| {
@@ -2317,7 +2346,7 @@ fn prepare_conversation_branch(
                 ConversationPersistenceClass::TransientInternal,
                 reason,
                 fingerprints,
-                normalized.messages.clone(),
+                durable_messages.clone(),
                 delta_start_index,
             )
         });
@@ -2331,14 +2360,15 @@ fn prepare_conversation_branch(
                 branch,
                 turn_scope,
                 fingerprints,
-                normalized.messages.clone(),
+                durable_messages.clone(),
                 delta_start_index,
             )
         });
     }
 
     if let Some((branch, delta_start_index)) = prefix_match.or_else(|| {
-        compaction_command_seen
+        compaction_context
+            .command_seen
             .then(|| {
                 latest_context_branch.clone().map(|branch| {
                     let delta_start_index = active_message_count(&branch);
@@ -2357,7 +2387,7 @@ fn prepare_conversation_branch(
                 active_canonical_messages: active_canonical_messages?,
                 delta_start_index,
             },
-            compaction_command_seen,
+            compaction_context.command_seen,
         );
     }
 
@@ -2372,7 +2402,7 @@ fn prepare_conversation_branch(
                     turn_scope,
                     fingerprints,
                     active_canonical_messages?,
-                    compaction_command_seen,
+                    compaction_context.command_seen,
                 )
             });
     }
@@ -2383,8 +2413,28 @@ fn prepare_conversation_branch(
         turn_scope,
         fingerprints,
         active_canonical_messages?,
-        compaction_command_seen,
+        compaction_context.command_seen,
     )
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CompactionRequestContext {
+    command_seen: bool,
+    summary_message_count: Option<usize>,
+}
+
+fn compaction_context_for_request(
+    client_metadata: &HashMap<String, String>,
+    prefix_match: Option<&(BranchMetadata, usize)>,
+) -> CompactionRequestContext {
+    let command_seen = is_active_slash_command(client_metadata, "/compact")
+        || has_local_only_command(client_metadata, "/compact");
+    CompactionRequestContext {
+        command_seen,
+        summary_message_count: command_seen
+            .then(|| prefix_match.map(|(_, count)| *count))
+            .flatten(),
+    }
 }
 
 fn prepare_rebaseline_durable_branch(
@@ -2704,6 +2754,33 @@ fn stored_messages_are_prefix(
         .all(|(stored, incoming)| {
             canonical_message_value(stored) == canonical_message_value(incoming)
         })
+}
+
+fn durable_canonical_messages(
+    messages: Vec<crate::types::AnthropicMessage>,
+) -> Vec<crate::types::AnthropicMessage> {
+    messages
+        .into_iter()
+        .filter_map(durable_canonical_message)
+        .collect()
+}
+
+fn durable_canonical_message(
+    mut message: crate::types::AnthropicMessage,
+) -> Option<crate::types::AnthropicMessage> {
+    match &mut message.content {
+        crate::types::AnthropicContent::Text(text) => (!text.trim().is_empty()).then_some(message),
+        crate::types::AnthropicContent::Blocks(blocks) => {
+            blocks.retain(|block| {
+                block.block_type != "text"
+                    || block
+                        .text
+                        .as_deref()
+                        .is_some_and(|text| !text.trim().is_empty())
+            });
+            (!blocks.is_empty()).then_some(message)
+        }
+    }
 }
 
 fn canonical_message_value(message: &crate::types::AnthropicMessage) -> serde_json::Value {
@@ -3080,9 +3157,22 @@ fn now_unix_millis() -> u64 {
         })
 }
 
+#[cfg(test)]
 fn branch_fingerprints_from_messages(
     messages: &[crate::types::AnthropicMessage],
     compaction_command_seen: bool,
+) -> BranchFingerprintSet {
+    branch_fingerprints_from_messages_with_compaction_prefix(
+        messages,
+        compaction_command_seen,
+        None,
+    )
+}
+
+fn branch_fingerprints_from_messages_with_compaction_prefix(
+    messages: &[crate::types::AnthropicMessage],
+    compaction_command_seen: bool,
+    compaction_summary_message_count: Option<usize>,
 ) -> BranchFingerprintSet {
     let mut text_messages = Vec::new();
     let mut last_user_text = None;
@@ -3110,6 +3200,17 @@ fn branch_fingerprints_from_messages(
         .join("\n");
     let full_transcript = text_messages.join("\n");
     let branch_state_hash = (!full_transcript.is_empty()).then(|| sha256_hex(&full_transcript));
+    let compaction_summary_transcript = compaction_summary_message_count.map_or_else(
+        || full_transcript.clone(),
+        |count| {
+            text_messages
+                .iter()
+                .take(count)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n")
+        },
+    );
 
     BranchFingerprintSet {
         recent_message_tail_hash: (!recent_tail.is_empty()).then(|| sha256_hex(&recent_tail)),
@@ -3118,10 +3219,19 @@ fn branch_fingerprints_from_messages(
             .filter(|text| !text.trim().is_empty())
             .map(sha256_hex),
         compaction_summary_hash: compaction_command_seen
-            .then(|| branch_state_hash.clone())
+            .then(|| {
+                (!compaction_summary_transcript.is_empty())
+                    .then(|| sha256_hex(&compaction_summary_transcript))
+            })
             .flatten(),
         branch_state_hash,
     }
+}
+
+fn is_active_slash_command(client_metadata: &HashMap<String, String>, command: &str) -> bool {
+    client_metadata
+        .get("claude_code_slash_command")
+        .is_some_and(|candidate| candidate.trim() == command)
 }
 
 fn has_local_only_command(client_metadata: &HashMap<String, String>, command: &str) -> bool {
@@ -3374,6 +3484,7 @@ mod messages_tests {
     use super::build_tool_translation_context;
     use super::prepare_conversation_branch;
     use super::request_compatibility_fingerprint;
+    use super::select_transport;
     use super::stored_messages_are_prefix;
     use super::tool_call_content_block;
     use super::translate::{
@@ -3382,9 +3493,11 @@ mod messages_tests {
     use super::types::{
         AnthropicContent, AnthropicContentBlock, AnthropicMessage, AnthropicMessagesRequest,
     };
+    use super::{TransportMode, WebSocketChainDecision, WebSocketChainMatch};
     use axum::body::Body;
     use axum::body::to_bytes;
     use axum::http::{Request, StatusCode};
+    use gateway_backend_codex::client::WebSocketChainId;
     use gateway_backend_codex::types::{CodexToolCall, CodexToolCallKind};
     use gateway_core::DEFAULT_BACKEND_MODEL;
     use gateway_core::config::{GatewayConfig, resolve_model};
@@ -4041,6 +4154,26 @@ mod messages_tests {
         request_compatibility_fingerprint(gateway_config, &resolution, &translated)
     }
 
+    fn test_anthropic_request(messages: Vec<AnthropicMessage>) -> AnthropicMessagesRequest {
+        AnthropicMessagesRequest {
+            model: DEFAULT_BACKEND_MODEL.to_string(),
+            messages,
+            system: Vec::new(),
+            stream: true,
+            stop_sequences: Vec::new(),
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            metadata: None,
+            tools: Vec::new(),
+            tool_choice: None,
+            thinking: None,
+            context_management: None,
+            output_config: None,
+        }
+    }
+
     fn build_state(
         base_url: &url::Url,
         auth_path: &std::path::Path,
@@ -4687,7 +4820,7 @@ mod messages_tests {
     }
 
     #[tokio::test]
-    async fn compact_history_uses_delta_and_clears_reset_after_success() {
+    async fn compact_history_bootstraps_and_clears_reset_after_success() {
         if !wiremock_enabled() {
             return;
         }
@@ -4719,6 +4852,67 @@ mod messages_tests {
         assert_branch_checkpoint(&branch, "resp_after_compaction", None);
         let ledger = harness.ledger();
         assert!(ledger.contains("\"event_type\":\"compaction_applied\""));
+    }
+
+    #[tokio::test]
+    async fn post_compaction_followup_uses_delta_from_new_chain_head() {
+        if !wiremock_enabled() {
+            return;
+        }
+        let harness = BranchRouteTestHarness::new("gateway_compaction_followup_state").await;
+        mount_ws_response(
+            &harness.ws_mock,
+            PreviousResponseIdWsMatcher::none(),
+            success_websocket_events("hello after compaction", "resp_after_compaction"),
+        )
+        .await;
+
+        let compacted_messages = serde_json::json!([
+            {
+                "role": "user",
+                "content": "<command-message>compact</command-message>\n<command-name>/compact</command-name>\n<command-args></command-args>\n<local-command-stdout>Compacted </local-command-stdout>"
+            },
+            { "role": "user", "content": "hello" }
+        ]);
+        let first = send_unary_message(
+            harness.state(),
+            Some(harness.claude_session_id()),
+            compacted_messages.clone(),
+        )
+        .await;
+        verify_ws(&harness.ws_mock).await;
+        assert_unary_text(&first, "hello after compaction");
+        let branch = harness.branch();
+        assert!(!branch.compaction_reset_pending);
+        assert_branch_checkpoint(&branch, "resp_after_compaction", None);
+
+        mount_ws_response(
+            &harness.ws_mock,
+            PreviousResponseIdWsMatcher(Some("resp_after_compaction".to_string())),
+            success_websocket_events("delta after compaction", "resp_after_compaction_delta"),
+        )
+        .await;
+
+        let mut followup_messages = compacted_messages
+            .as_array()
+            .expect("compacted messages array")
+            .clone();
+        followup_messages.push(serde_json::json!({ "role": "user", "content": "next" }));
+        let second = send_unary_message(
+            harness.state(),
+            Some(harness.claude_session_id()),
+            serde_json::Value::Array(followup_messages),
+        )
+        .await;
+        verify_ws(&harness.ws_mock).await;
+        assert_unary_text(&second, "delta after compaction");
+        let branch = harness.branch();
+        assert!(!branch.compaction_reset_pending);
+        assert_branch_checkpoint(
+            &branch,
+            "resp_after_compaction_delta",
+            Some("resp_after_compaction"),
+        );
     }
 
     #[tokio::test]
@@ -4923,7 +5117,7 @@ mod messages_tests {
     }
 
     #[tokio::test]
-    async fn checkpointed_compaction_restart_uses_delta_and_replaces_active_state_safely() {
+    async fn checkpointed_compaction_restart_bootstraps_and_replaces_active_state_safely() {
         if !wiremock_enabled() {
             return;
         }
@@ -4957,10 +5151,7 @@ mod messages_tests {
         assert_branch_checkpoint(&branch, "resp_full_compaction", None);
         assert_eq!(
             branch.active_canonical_messages,
-            Some(serde_json::json!([
-                { "role": "user", "content": "" },
-                { "role": "user", "content": "hello" }
-            ]))
+            Some(serde_json::json!([{ "role": "user", "content": "hello" }]))
         );
         assert!(
             harness
@@ -5594,6 +5785,167 @@ mod messages_tests {
     }
 
     #[test]
+    fn compact_message_forces_new_openai_thread_without_previous_response_id() {
+        let conversation_root =
+            std::env::temp_dir().join(format!("gateway_compact_thread_{}", uuid::Uuid::new_v4()));
+        let claude_session_id = "session-1";
+        let (conversation_state, _branch_id) =
+            seed_incremental_branch(&conversation_root, claude_session_id);
+        let state = build_state(
+            &url::Url::parse("ws://127.0.0.1:9").expect("url"),
+            std::path::Path::new("/tmp/nonexistent-auth.json"),
+            conversation_state,
+        );
+        let req = test_anthropic_request(vec![
+                AnthropicMessage {
+                    role: "user".to_string(),
+                    content: AnthropicContent::Text(
+                        "<command-message>compact</command-message>\n<command-name>/compact</command-name>\n<command-args></command-args>\n<local-command-stdout>Compacted </local-command-stdout>"
+                            .to_string(),
+                    ),
+                },
+                AnthropicMessage {
+                    role: "user".to_string(),
+                    content: AnthropicContent::Text("hello after compaction".to_string()),
+                },
+            ]);
+        let translated =
+            translate_request_with_context(&req, &build_tool_translation_context(&state, &req))
+                .expect("translate compact request");
+        let prepared = prepare_conversation_branch(
+            &state,
+            Some(claude_session_id),
+            &req,
+            translated.client_metadata.as_ref(),
+        )
+        .expect("compact request should prepare a branch");
+
+        assert!(prepared.commit_turn);
+        assert!(prepared.branch.compaction_reset_pending);
+
+        let resolution = resolve_model(&state.gateway_config, &req.model);
+        let compatibility_fingerprint =
+            request_compatibility_fingerprint(&state.gateway_config, &resolution, &translated);
+        let selected = select_transport(
+            Some(&prepared),
+            &WebSocketChainDecision {
+                match_result: WebSocketChainMatch::Matching,
+                transport_identity: Some("test-identity".to_string()),
+                live_websocket_chain_id: None,
+                checkpoint_websocket_chain_id: None,
+                checkpoint_response_id: prepared
+                    .branch
+                    .openai_checkpoint
+                    .as_ref()
+                    .map(|checkpoint| checkpoint.response_id.clone()),
+                reason: "test_matching_chain",
+            },
+            &resolution.selected_backend_model,
+            &compatibility_fingerprint,
+        )
+        .expect("compact request should select transport");
+
+        assert_eq!(selected.mode, TransportMode::Full);
+        assert_eq!(selected.previous_response_id, None);
+        assert_eq!(selected.reason, "branch_bootstrap_compaction_reset");
+
+        let _ = std::fs::remove_dir_all(&conversation_root);
+    }
+
+    #[test]
+    fn historical_compact_wrapper_followup_uses_existing_checkpoint_delta() {
+        let conversation_root = std::env::temp_dir().join(format!(
+            "gateway_compact_followup_delta_{}",
+            uuid::Uuid::new_v4()
+        ));
+        let claude_session_id = "session-1";
+        let (conversation_state, branch_id) =
+            seed_incremental_branch(&conversation_root, claude_session_id);
+        let compacted_messages = vec![AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Text("hello".to_string()),
+        }];
+        let compacted_fingerprints = branch_fingerprints_from_messages(&compacted_messages, true);
+        let mut compacted_branch = conversation_state
+            .apply_compaction(
+                claude_session_id,
+                &branch_id,
+                compacted_fingerprints.compaction_summary_hash.as_deref(),
+                &compacted_fingerprints,
+            )
+            .expect("mark branch as already compacted");
+        compacted_branch.compaction_reset_pending = false;
+        conversation_state
+            .store_branch(claude_session_id, &compacted_branch)
+            .expect("store compacted branch fixture");
+        let state = build_state(
+            &url::Url::parse("ws://127.0.0.1:9").expect("url"),
+            std::path::Path::new("/tmp/nonexistent-auth.json"),
+            conversation_state,
+        );
+        let req = test_anthropic_request(vec![
+                AnthropicMessage {
+                    role: "user".to_string(),
+                    content: AnthropicContent::Text(
+                        "<command-message>compact</command-message>\n<command-name>/compact</command-name>\n<command-args></command-args>\n<local-command-stdout>Compacted </local-command-stdout>"
+                            .to_string(),
+                    ),
+                },
+                AnthropicMessage {
+                    role: "user".to_string(),
+                    content: AnthropicContent::Text("hello".to_string()),
+                },
+                AnthropicMessage {
+                    role: "user".to_string(),
+                    content: AnthropicContent::Text("next".to_string()),
+                },
+            ]);
+        let translated =
+            translate_request_with_context(&req, &build_tool_translation_context(&state, &req))
+                .expect("translate compact follow-up request");
+        let prepared = prepare_conversation_branch(
+            &state,
+            Some(claude_session_id),
+            &req,
+            translated.client_metadata.as_ref(),
+        )
+        .expect("compact follow-up should prepare a branch");
+
+        assert!(prepared.commit_turn);
+        assert!(!prepared.branch.compaction_reset_pending);
+        assert_eq!(prepared.delta_start_index, 1);
+        assert_eq!(prepared.active_messages.len(), 2);
+
+        let resolution = resolve_model(&state.gateway_config, &req.model);
+        let compatibility_fingerprint =
+            request_compatibility_fingerprint(&state.gateway_config, &resolution, &translated);
+        let selected = select_transport(
+            Some(&prepared),
+            &WebSocketChainDecision {
+                match_result: WebSocketChainMatch::Matching,
+                transport_identity: Some("test-identity".to_string()),
+                live_websocket_chain_id: Some(WebSocketChainId::new("chain-1")),
+                checkpoint_websocket_chain_id: Some(WebSocketChainId::new("chain-1")),
+                checkpoint_response_id: prepared
+                    .branch
+                    .openai_checkpoint
+                    .as_ref()
+                    .map(|checkpoint| checkpoint.response_id.clone()),
+                reason: "test_matching_chain",
+            },
+            &resolution.selected_backend_model,
+            &compatibility_fingerprint,
+        )
+        .expect("compact follow-up should select transport");
+
+        assert_eq!(selected.mode, TransportMode::Incremental);
+        assert_eq!(selected.previous_response_id, Some("resp_prev".to_string()));
+        assert_eq!(selected.reason, "branch_checkpoint_reuse");
+
+        let _ = std::fs::remove_dir_all(&conversation_root);
+    }
+
+    #[test]
     fn request_compatibility_fingerprint_ignores_client_metadata() {
         let config = GatewayConfig::default();
         let resolution = resolve_model(&config, DEFAULT_BACKEND_MODEL);
@@ -5953,7 +6305,7 @@ mod transport_selection_tests {
     }
 
     #[test]
-    fn checkpointed_branch_uses_delta_when_compaction_reset_is_pending() {
+    fn checkpointed_branch_bootstraps_when_compaction_reset_is_pending() {
         let selected = select_transport(
             Some(&prepared_branch(
                 ConversationTurnScope::Main,
@@ -5964,14 +6316,14 @@ mod transport_selection_tests {
             "gpt-5",
             "fp-1",
         )
-        .expect("checkpointed compaction turn should keep delta transport");
+        .expect("checkpointed compaction turn should bootstrap a fresh provider chain");
 
         assert_eq!(
             selected,
             SelectedTransport {
-                mode: TransportMode::Incremental,
-                previous_response_id: Some("resp_123".to_string()),
-                reason: "branch_checkpoint_reuse_compaction_pending",
+                mode: TransportMode::Full,
+                previous_response_id: None,
+                reason: "branch_bootstrap_compaction_reset",
             }
         );
     }

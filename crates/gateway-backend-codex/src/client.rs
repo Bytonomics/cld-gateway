@@ -5,8 +5,8 @@ use crate::types::{
 };
 use crate::websocket_transport::WebSocketSessionPool;
 pub use crate::websocket_transport::{
-    WebSocketChainId, WebSocketErrorMatcher, WebSocketErrorVariant, WebSocketRetryPolicy,
-    WebSocketSessionKey,
+    PooledWebSocketEventStream, WebSocketChainId, WebSocketErrorMatcher, WebSocketErrorVariant,
+    WebSocketRetryPolicy, WebSocketSessionKey,
 };
 use eventsource_stream::Eventsource as _;
 use futures_util::StreamExt as _;
@@ -296,7 +296,7 @@ impl CodexBackendClient {
         session_key: WebSocketSessionKey,
         req: CodexBackendRequest,
         policy: WebSocketRetryPolicy,
-    ) -> Result<CodexBackendEventStream, BackendError> {
+    ) -> Result<PooledWebSocketEventStream, BackendError> {
         self.websocket_sessions
             .send_event_stream(&self.base_url, auth, session_key, req, policy)
             .await

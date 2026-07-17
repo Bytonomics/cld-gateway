@@ -4,12 +4,12 @@
     {
       "id": "gpt-5.6-sol",
       "name": "GPT-5.6 Sol",
-      "description": "OpenAI flagship coding model; ChatGPT/Codex context is 272K"
+      "description": "OpenAI flagship coding model; ChatGPT/Codex context is 272K; Fable usable window is 272K * 0.9 = 244800"
     },
     {
       "id": "gpt-5.6-terra",
       "name": "GPT-5.6 Terra",
-      "description": "OpenAI balanced everyday model; ChatGPT/Codex context is 128K"
+      "description": "OpenAI balanced everyday model; ChatGPT/Codex context is 128K; Opus usable window is 128K * 0.9 = 115200"
     },
     {
       "id": "gpt-5.5",
@@ -19,12 +19,12 @@
     {
       "id": "gpt-5.4",
       "name": "GPT-5.4 1M",
-      "description": "OpenAI long-context Codex model; experimental 1M context"
+      "description": "OpenAI long-context Codex model; experimental 1M context; Sonnet usable window is 1M * 0.9 = 900000"
     },
     {
       "id": "gpt-5.6-luna",
       "name": "GPT-5.6 Luna",
-      "description": "OpenAI fast, affordable model; Gateway compaction window is 400K, with higher-cost pricing possible above 272K"
+      "description": "OpenAI fast, affordable model; ChatGPT/Codex context reference is 400K; Haiku usable window is 400K * 0.9 = 360000"
     },
     {
       "id": "gpt-5.3-codex-spark",
@@ -38,21 +38,19 @@
     "ANTHROPIC_DEFAULT_HAIKU_MODEL": "gpt-5.6-luna",
     "ANTHROPIC_DEFAULT_SONNET_MODEL": "gpt-5.4",
     "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME": "GPT-5.4 1M",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION": "OpenAI long-context Codex model; experimental 1M context",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION": "OpenAI long-context Codex model; experimental 1M context; Sonnet usable window is 1M * 0.9 = 900000",
     "ANTHROPIC_DEFAULT_OPUS_MODEL": "gpt-5.6-terra",
     "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME": "GPT-5.6 Terra",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION": "OpenAI balanced everyday model via Gateway; ChatGPT/Codex context is 128K",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION": "OpenAI balanced everyday model via Gateway; ChatGPT/Codex context is 128K; Opus usable window is 128K * 0.9 = 115200",
     "ANTHROPIC_DEFAULT_FABLE_MODEL": "gpt-5.6-sol",
     "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME": "GPT-5.6 Sol",
-    "ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION": "OpenAI flagship coding model via Gateway; ChatGPT/Codex context is 272K",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION": "OpenAI flagship coding model via Gateway; ChatGPT/Codex context is 272K; Fable usable window is 272K * 0.9 = 244800",
     "DISABLE_TELEMETRY": "1",
     "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "90",
     "ANTHROPIC_DEFAULT_HAIKU_MAX_TOKENS": 400000,
-    "ANTHROPIC_DEFAULT_SONNET_MAX_TOKENS": 945000,
+    "ANTHROPIC_DEFAULT_SONNET_MAX_TOKENS": 1000000,
     "ANTHROPIC_DEFAULT_OPUS_MAX_TOKENS": 128000,
     "ANTHROPIC_DEFAULT_FABLE_MAX_TOKENS": 272000,
-    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "400000",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION": "OpenAI fast, affordable model; Gateway compaction window is 400K, with higher-cost pricing possible above 272K"
-  },
-  "autoCompactWindow": 400000
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION": "OpenAI fast, affordable model; ChatGPT/Codex context reference is 400K; Haiku usable window is 400K * 0.9 = 360000"
+  }
 }

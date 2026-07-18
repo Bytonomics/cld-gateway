@@ -6,7 +6,7 @@ use crate::exchange::{
 };
 use crate::paths::default_exchange_log_path;
 use crate::redact::{redact_headers, redact_json_keys};
-use axum::body::Body;
+use axum::body::{Body, to_bytes};
 use axum::middleware::Next;
 use bytes::Bytes;
 use futures_util::StreamExt as _;
@@ -22,6 +22,7 @@ use tracing::info;
 use uuid::Uuid;
 
 const BODY_LIMIT_BYTES: usize = 5 * 1024 * 1024;
+const REQUEST_BODY_BUFFER_LIMIT_BYTES: usize = 50 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct CaptureConfig {
@@ -48,10 +49,17 @@ pub async fn capture_http_exchange(
     let request_method = request_parts.method.to_string();
     let request_uri = request_parts.uri.to_string();
     let request_headers_redacted = redact_headers(&request_parts.headers);
-    let (request_body_done, request_body_for_downstream) = capture_body_streaming(
-        request_parts.headers.get(http::header::CONTENT_TYPE),
-        request_body,
-    );
+    let request_content_type = request_parts
+        .headers
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(ToString::to_string);
+    let request_body_bytes = to_bytes(request_body, REQUEST_BODY_BUFFER_LIMIT_BYTES)
+        .await
+        .unwrap_or_else(|_| Bytes::new());
+    let request_body_capture =
+        build_captured_body(request_content_type, request_body_bytes.as_ref(), false);
+    let request_body_for_downstream = Body::from(request_body_bytes);
 
     req = Request::from_parts(request_parts, request_body_for_downstream);
     req.extensions_mut().insert(request_id.clone());
@@ -83,13 +91,6 @@ pub async fn capture_http_exchange(
     // capture bodies up to the limit *without* breaking downstream processing for oversized bodies.
     let log_path = config.log_path.clone();
     tokio::spawn(async move {
-        let request_body_capture = request_body_done.await.unwrap_or(CapturedBody {
-            content_type: None,
-            bytes_captured: 0,
-            truncated: false,
-            data: CapturedBodyData::Empty,
-        });
-
         let response_body_capture = response_body_done.await.unwrap_or(CapturedBody {
             content_type: None,
             bytes_captured: 0,
@@ -189,6 +190,11 @@ fn capture_body_streaming(
 }
 
 fn build_captured_body(ct: Option<String>, captured: &[u8], truncated: bool) -> CapturedBody {
+    let (captured, truncated) = if captured.len() > BODY_LIMIT_BYTES {
+        (&captured[..BODY_LIMIT_BYTES], true)
+    } else {
+        (captured, truncated)
+    };
     let bytes_captured = captured.len();
 
     let data = if truncated {
@@ -242,8 +248,13 @@ pub fn append_exchange_record(path: &Path, record: &ExchangeRecord) -> std::io::
 
 #[cfg(test)]
 mod tests {
-    use super::{BODY_LIMIT_BYTES, build_captured_body};
+    use super::{BODY_LIMIT_BYTES, CaptureConfig, build_captured_body, capture_http_exchange};
     use crate::exchange::CapturedBodyData;
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::{Method, Request, StatusCode};
+    use axum::middleware::from_fn;
+    use tower::ServiceExt as _;
 
     #[tokio::test]
     async fn build_captured_body_marks_oversize_capture_as_skipped() {
@@ -256,5 +267,64 @@ mod tests {
             }
             other => panic!("expected Binary note for oversize body, got: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn captures_json_payload_for_any_unmatched_route() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log_path = dir.path().join("http-exchange.jsonl");
+        let capture_config = CaptureConfig {
+            log_path: log_path.clone(),
+        };
+        let app = Router::new()
+            .fallback(|| async { StatusCode::NOT_FOUND })
+            .layer(from_fn(move |req, next| {
+                let capture_config = capture_config.clone();
+                async move { capture_http_exchange(req, next, capture_config).await }
+            }));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/future/random/claude-code/api?beta=true")
+                    .header(http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"model":"gpt-5.4","messages":[{"role":"user","content":"hello"}]}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let _ = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .expect("response body");
+
+        let mut log_text = String::new();
+        for _ in 0..20 {
+            if let Ok(text) = std::fs::read_to_string(&log_path)
+                && !text.trim().is_empty()
+            {
+                log_text = text;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(!log_text.trim().is_empty(), "expected exchange log entry");
+        let record: serde_json::Value =
+            serde_json::from_str(log_text.lines().next().expect("log line")).expect("json log");
+        assert_eq!(record["request"]["method"], "POST");
+        assert_eq!(
+            record["request"]["uri"],
+            "/future/random/claude-code/api?beta=true"
+        );
+        assert_eq!(record["request"]["body"]["body_type"], "json");
+        assert_eq!(record["request"]["body"]["value"]["model"], "gpt-5.4");
+        assert_eq!(
+            record["request"]["body"]["value"]["messages"][0]["content"],
+            "hello"
+        );
     }
 }

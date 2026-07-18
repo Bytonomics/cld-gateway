@@ -47,7 +47,6 @@ pub(crate) struct StreamState {
 
     // Backend usage snapshot (emitted on `response.completed`).
     completed_usage: Option<CodexTokenUsage>,
-    input_token_baseline: Option<i64>,
     context_management: Option<serde_json::Value>,
     completed_web_search_call_ids: BTreeSet<String>,
     emitted_web_search_call_ids: BTreeSet<String>,
@@ -69,7 +68,6 @@ impl StreamState {
             tool_args_buf_by_call_id: HashMap::new(),
             last_tool_call_id: None,
             completed_usage: None,
-            input_token_baseline: None,
             context_management: None,
             completed_web_search_call_ids: BTreeSet::new(),
             emitted_web_search_call_ids: BTreeSet::new(),
@@ -82,11 +80,6 @@ impl StreamState {
         context_management: Option<serde_json::Value>,
     ) -> Self {
         self.context_management = context_management;
-        self
-    }
-
-    pub(crate) fn with_input_token_baseline(mut self, input_token_baseline: Option<i64>) -> Self {
-        self.input_token_baseline = input_token_baseline;
         self
     }
 
@@ -665,7 +658,6 @@ fn handle_reasoning_delta(st: &mut StreamState, data: &str) -> Option<Vec<Event>
 fn handle_completed(st: &mut StreamState, data: &str, request_id: Option<&str>) -> Vec<Event> {
     st.completed_usage = extract_usage_from_completed_event(data);
     if let Some(usage) = st.completed_usage.as_mut() {
-        normalize_usage_from_input_token_baseline(usage, st.input_token_baseline);
         usage.web_search_requests =
             u32::try_from(st.completed_web_search_call_ids.len()).unwrap_or(u32::MAX);
     }
@@ -718,18 +710,6 @@ fn handle_completed(st: &mut StreamState, data: &str, request_id: Option<&str>) 
     out
 }
 
-fn normalize_usage_from_input_token_baseline(
-    usage: &mut CodexTokenUsage,
-    input_token_baseline: Option<i64>,
-) {
-    let Some(input_token_baseline) = input_token_baseline else {
-        return;
-    };
-    usage.input_tokens = usage.input_tokens.saturating_sub(input_token_baseline);
-    usage.cached_input_tokens = usage.cached_input_tokens.min(usage.input_tokens);
-    usage.total_tokens = usage.input_tokens.saturating_add(usage.output_tokens);
-}
-
 fn web_search_calls_from_completed(data: &str) -> Vec<WebSearchCall> {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else {
         return Vec::new();
@@ -778,22 +758,18 @@ mod tests {
     }
 
     #[test]
-    fn completed_usage_subtracts_input_token_baseline() {
-        let mut usage = CodexTokenUsage {
-            input_tokens: 135,
-            cached_input_tokens: 120,
-            output_tokens: 7,
-            reasoning_output_tokens: 0,
-            total_tokens: 142,
-            web_search_requests: 0,
-        };
-
-        normalize_usage_from_input_token_baseline(&mut usage, Some(100));
-
-        assert_eq!(usage.input_tokens, 35);
-        assert_eq!(usage.cached_input_tokens, 35);
+    fn completed_usage_preserves_upstream_cumulative_input_tokens() {
+        let mut state = StreamState::new();
+        let _events = handle_completed(
+            &mut state,
+            r#"{"type":"response.completed","response":{"usage":{"input_tokens":135,"input_tokens_details":{"cached_tokens":120},"output_tokens":7,"total_tokens":142}}}"#,
+            None,
+        );
+        let usage = state.completed_usage.expect("completed usage");
+        assert_eq!(usage.input_tokens, 135);
+        assert_eq!(usage.cached_input_tokens, 120);
         assert_eq!(usage.output_tokens, 7);
-        assert_eq!(usage.total_tokens, 42);
+        assert_eq!(usage.total_tokens, 142);
     }
 
     fn fixture(path: &str) -> String {

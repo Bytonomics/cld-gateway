@@ -202,6 +202,8 @@ struct ClaudeGatewayModel {
     name: Option<String>,
     #[serde(default)]
     description: Option<String>,
+    #[serde(default)]
+    max_input_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -213,6 +215,8 @@ struct ClaudeGatewayModelsResponseItem {
     name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_input_tokens: Option<u64>,
 }
 
 fn http_client_for_config(config: &GatewayConfig) -> GatewayHttpClient {
@@ -338,6 +342,7 @@ fn model_catalog_from_settings(
     settings: &ClaudeGatewaySettings,
 ) -> Vec<ClaudeGatewayModelsResponseItem> {
     if !settings.models.is_empty() {
+        let env_context_windows = model_context_windows_from_env(&settings.env);
         return dedupe_models(
             settings
                 .models
@@ -347,6 +352,9 @@ fn model_catalog_from_settings(
                     item_type: "model",
                     name: model.name.clone(),
                     description: model.description.clone(),
+                    max_input_tokens: model
+                        .max_input_tokens
+                        .or_else(|| env_context_windows.get(&model.id).copied()),
                 })
                 .collect(),
         );
@@ -355,45 +363,60 @@ fn model_catalog_from_settings(
     let mut models = Vec::new();
     add_model_from_env(
         &settings.env,
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION",
+        ModelEnvKeys {
+            id: "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            name: "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
+            description: "ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION",
+            max_input_tokens: "ANTHROPIC_DEFAULT_HAIKU_MAX_TOKENS",
+        },
         "GPT-5.4 Mini",
         "OpenAI small/fallback model",
         &mut models,
     );
     add_model_from_env(
         &settings.env,
-        "ANTHROPIC_DEFAULT_SONNET_MODEL",
-        "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
-        "ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION",
+        ModelEnvKeys {
+            id: "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            name: "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+            description: "ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION",
+            max_input_tokens: "ANTHROPIC_DEFAULT_SONNET_MAX_TOKENS",
+        },
         "GPT-5.4",
         "OpenAI general-purpose model",
         &mut models,
     );
     add_model_from_env(
         &settings.env,
-        "ANTHROPIC_DEFAULT_OPUS_MODEL",
-        "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
-        "ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION",
+        ModelEnvKeys {
+            id: "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            name: "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+            description: "ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION",
+            max_input_tokens: "ANTHROPIC_DEFAULT_OPUS_MAX_TOKENS",
+        },
         "GPT-5.5",
         "OpenAI reasoning model",
         &mut models,
     );
     add_model_from_env(
         &settings.env,
-        "ANTHROPIC_DEFAULT_FABLE_MODEL",
-        "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME",
-        "ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION",
+        ModelEnvKeys {
+            id: "ANTHROPIC_DEFAULT_FABLE_MODEL",
+            name: "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME",
+            description: "ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION",
+            max_input_tokens: "ANTHROPIC_DEFAULT_FABLE_MAX_TOKENS",
+        },
         "GPT-5.5 Pro",
         "OpenAI highest-capability model",
         &mut models,
     );
     add_model_from_env(
         &settings.env,
-        "ANTHROPIC_CUSTOM_MODEL_OPTION",
-        "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME",
-        "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION",
+        ModelEnvKeys {
+            id: "ANTHROPIC_CUSTOM_MODEL_OPTION",
+            name: "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME",
+            description: "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION",
+            max_input_tokens: "ANTHROPIC_CUSTOM_MODEL_OPTION_MAX_TOKENS",
+        },
         "Custom model",
         "Custom model option",
         &mut models,
@@ -402,16 +425,22 @@ fn model_catalog_from_settings(
     dedupe_models(models)
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ModelEnvKeys {
+    id: &'static str,
+    name: &'static str,
+    description: &'static str,
+    max_input_tokens: &'static str,
+}
+
 fn add_model_from_env(
     env: &HashMap<String, serde_json::Value>,
-    id_key: &str,
-    name_key: &str,
-    description_key: &str,
+    keys: ModelEnvKeys,
     default_name: &str,
     default_description: &str,
     models: &mut Vec<ClaudeGatewayModelsResponseItem>,
 ) {
-    let Some(id) = env.get(id_key).and_then(serde_json::Value::as_str) else {
+    let Some(id) = env.get(keys.id).and_then(serde_json::Value::as_str) else {
         return;
     };
 
@@ -419,16 +448,57 @@ fn add_model_from_env(
         id: id.to_string(),
         item_type: "model",
         name: env
-            .get(name_key)
+            .get(keys.name)
             .and_then(serde_json::Value::as_str)
             .map(ToString::to_string)
             .or_else(|| Some(default_name.to_string())),
         description: env
-            .get(description_key)
+            .get(keys.description)
             .and_then(serde_json::Value::as_str)
             .map(ToString::to_string)
             .or_else(|| Some(default_description.to_string())),
+        max_input_tokens: env_u64(env, keys.max_input_tokens),
     });
+}
+
+fn model_context_windows_from_env(
+    env: &HashMap<String, serde_json::Value>,
+) -> HashMap<String, u64> {
+    [
+        (
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MAX_TOKENS",
+        ),
+        (
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MAX_TOKENS",
+        ),
+        (
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_OPUS_MAX_TOKENS",
+        ),
+        (
+            "ANTHROPIC_DEFAULT_FABLE_MODEL",
+            "ANTHROPIC_DEFAULT_FABLE_MAX_TOKENS",
+        ),
+        (
+            "ANTHROPIC_CUSTOM_MODEL_OPTION",
+            "ANTHROPIC_CUSTOM_MODEL_OPTION_MAX_TOKENS",
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(model_key, max_tokens_key)| {
+        Some((
+            env.get(model_key)?.as_str()?.to_string(),
+            env_u64(env, max_tokens_key)?,
+        ))
+    })
+    .collect()
+}
+
+fn env_u64(env: &HashMap<String, serde_json::Value>, key: &str) -> Option<u64> {
+    env.get(key)
+        .and_then(|value| value.as_u64().or_else(|| value.as_str()?.parse().ok()))
 }
 
 fn dedupe_models(
@@ -816,11 +886,6 @@ async fn v1_messages(
         };
     let logged_previous_response_id = request_previous_response_id.clone();
 
-    let previous_chain_input_tokens = chain_input_tokens_for_previous_response(
-        prepared_branch.as_ref(),
-        logged_previous_response_id.as_deref(),
-    );
-
     let commit_turn_failed = if let Some(prepared_branch) = prepared_branch
         .as_ref()
         .filter(|prepared_branch| prepared_branch.commit_turn)
@@ -906,12 +971,7 @@ async fn v1_messages(
         }
     }
 
-    let mut decoded_for_response = decoded.clone();
-    if let Some(usage) = decoded_for_response.token_usage.as_mut() {
-        normalize_usage_from_input_token_baseline(usage, previous_chain_input_tokens);
-    }
-    let mut response =
-        build_unary_messages_response(&state, &req, request_id.as_ref(), &decoded_for_response);
+    let mut response = build_unary_messages_response(&state, &req, request_id.as_ref(), &decoded);
     if let Some(context_management) = context_management_report.response_value() {
         response["context_management"] = context_management;
     }
@@ -2012,10 +2072,6 @@ async fn stream_messages(
             provider_model_fingerprint: resolution.selected_backend_model.clone(),
             request_compatibility_fingerprint: request_compatibility_fingerprint.clone(),
             previous_response_id: effective_previous_response_id.clone(),
-            previous_chain_input_tokens: chain_input_tokens_for_previous_response(
-                Some(prepared_branch),
-                effective_previous_response_id.as_deref(),
-            ),
             canonical_message_count: prepared_branch.active_messages.len(),
             canonical_prefix_hash: canonical_messages_prefix_hash(
                 &prepared_branch.active_messages,
@@ -2076,7 +2132,6 @@ struct StreamCommitContext {
     provider_model_fingerprint: String,
     request_compatibility_fingerprint: String,
     previous_response_id: Option<String>,
-    previous_chain_input_tokens: Option<i64>,
     canonical_message_count: usize,
     canonical_prefix_hash: String,
     transport_identity: Option<ConversationTransportIdentity>,
@@ -2188,39 +2243,6 @@ fn extract_completed_output_items(data: &str) -> Vec<serde_json::Value> {
 fn extract_input_tokens_from_completed_event(data: &str) -> Option<i64> {
     gateway_backend_codex::sse_unary::extract_usage_from_completed_event(data)
         .map(|usage| usage.input_tokens)
-}
-
-fn chain_input_tokens_for_previous_response(
-    prepared_branch: Option<&PreparedConversationBranch>,
-    previous_response_id: Option<&str>,
-) -> Option<i64> {
-    let previous_response_id = previous_response_id?;
-    let branch = &prepared_branch?.branch;
-    branch
-        .openai_checkpoint
-        .as_ref()
-        .filter(|checkpoint| checkpoint.response_id == previous_response_id)
-        .and_then(|checkpoint| checkpoint.provider_input_tokens)
-        .or_else(|| {
-            branch
-                .turn_openai_checkpoints
-                .iter()
-                .rev()
-                .find(|checkpoint| checkpoint.response_id == previous_response_id)
-                .and_then(|checkpoint| checkpoint.provider_input_tokens)
-        })
-}
-
-fn normalize_usage_from_input_token_baseline(
-    usage: &mut gateway_backend_codex::types::CodexTokenUsage,
-    input_token_baseline: Option<i64>,
-) {
-    let Some(input_token_baseline) = input_token_baseline else {
-        return;
-    };
-    usage.input_tokens = usage.input_tokens.saturating_sub(input_token_baseline);
-    usage.cached_input_tokens = usage.cached_input_tokens.min(usage.input_tokens);
-    usage.total_tokens = usage.input_tokens.saturating_add(usage.output_tokens);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3396,13 +3418,7 @@ fn backend_events_to_anthropic_events(
     stream_commit: Option<StreamCommitContext>,
 ) -> futures_util::stream::BoxStream<'static, Result<Event, std::convert::Infallible>> {
     let state = Arc::new(Mutex::new(
-        crate::sse_bridge::StreamState::new()
-            .with_context_management(context_management)
-            .with_input_token_baseline(
-                stream_commit
-                    .as_ref()
-                    .and_then(|commit| commit.previous_chain_input_tokens),
-            ),
+        crate::sse_bridge::StreamState::new().with_context_management(context_management),
     ));
     let tool_calls = Arc::new(tool_calls);
     let request_id = Arc::new(request_id);
@@ -6079,7 +6095,13 @@ mod models_api_tests {
                         "name": "GPT-5.4",
                         "description": "OpenAI general-purpose model"
                     }
-                ]
+                ],
+                "env": {
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "gpt-5.4-mini",
+                    "ANTHROPIC_DEFAULT_HAIKU_MAX_TOKENS": 128_000,
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL": "gpt-5.4",
+                    "ANTHROPIC_DEFAULT_SONNET_MAX_TOKENS": "1000000"
+                }
             }))
             .expect("serialize temp settings"),
         )
@@ -6114,6 +6136,60 @@ mod models_api_tests {
             json["data"][1]["description"].as_str(),
             Some("OpenAI general-purpose model")
         );
+        assert_eq!(json["data"][0]["max_input_tokens"].as_u64(), Some(128_000));
+        assert_eq!(
+            json["data"][1]["max_input_tokens"].as_u64(),
+            Some(1_000_000)
+        );
+
+        let _ = std::fs::remove_file(&settings_path);
+    }
+
+    #[tokio::test]
+    async fn v1_models_prefers_explicit_model_context_window() {
+        let settings_path = std::env::temp_dir().join(format!(
+            "claude_gateway_settings_{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(
+            &settings_path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "includeCoAuthoredBy": false,
+                "models": [
+                    {
+                        "id": "gpt-5.4",
+                        "name": "GPT-5.4",
+                        "description": "OpenAI long-context model",
+                        "max_input_tokens": 900_000
+                    }
+                ],
+                "env": {
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL": "gpt-5.4",
+                    "ANTHROPIC_DEFAULT_SONNET_MAX_TOKENS": 1_000_000
+                }
+            }))
+            .expect("serialize temp settings"),
+        )
+        .expect("write temp settings");
+
+        let state = AppState::default().with_claude_gateway_settings_path(settings_path.clone());
+
+        let app = router(state);
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/models")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(res.status().is_success());
+        let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["data"][0]["max_input_tokens"].as_u64(), Some(900_000));
 
         let _ = std::fs::remove_file(&settings_path);
     }

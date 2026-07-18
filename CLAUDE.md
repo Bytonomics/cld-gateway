@@ -143,15 +143,17 @@ The workspace is organized as small crates with explicit â€œallowed/not allowedâ
   - This path is for the cargo-run gateway on `http://127.0.0.1:8080`.
   - Claude model aliases and the `/model` menu for this mode come from `~/.claude_codex/settings.json`.
   - Runtime gateway config for cargo-run mode defaults to `~/.gateway/config-dev.yml` unless `GATEWAY_CONFIG_PATH` or `GATEWAY_HOME` is set.
-  - When changing model defaults, update `~/.claude_codex/settings.json` in addition to the release package settings.
+  - Do not inspect `~/.gateway/config.yml` when debugging `cldc` / `clddc` model resolution unless the process environment explicitly sets `GATEWAY_CONFIG_PATH` to that file.
+  - When changing model defaults or unsupported-model lists for development, update both `~/.claude_codex/settings.json` and `~/.gateway/config-dev.yml`.
 
 - Homebrew/package mode (`cldg` / `clddg`):
   - `cldg` runs `claude --settings ~/.claude_gateway/settings.json`.
   - `clddg` runs `cldg --dangerously-skip-permissions`.
   - This path is for the packaged/Homebrew gateway on `http://127.0.0.1:6473`.
   - Claude model aliases and the `/model` menu for this mode come from `~/.claude_gateway/settings.json`.
-  - Runtime gateway config for this mode is `~/.gateway/config.yml`.
-  - Packaged defaults live in `scripts/release/cld_gateway_package/settings.json` and `scripts/release/cld_gateway_package/config.yml`.
+  - Runtime gateway config for this mode is `~/.gateway/config.yml`; the Homebrew service sets `GATEWAY_CONFIG_PATH` to this file.
+  - When changing model defaults or unsupported-model lists for packaged use, update both `~/.claude_gateway/settings.json` and `~/.gateway/config.yml`.
+  - Packaged release defaults live in `scripts/release/cld_gateway_package/settings.json` and `scripts/release/cld_gateway_package/config.yml`; update these too so reinstall/release does not reintroduce stale config.
 
 - Gateway auth:
   - Default: `~/.gateway/auth.json`
@@ -162,10 +164,13 @@ The workspace is organized as small crates with explicit â€œallowed/not allowedâ
   - `cld-gateway login gemini` is accepted by the CLI, but Gemini is not configured for serve-mode runtime auth/backend use yet.
 
 - Gateway config:
-  - Default: `~/.gateway/config-dev.yml`
+  - Code default without env overrides: `~/.gateway/config-dev.yml`.
+  - Developer runtime (`cldc` / `clddc`, cargo-run port `8080`): `~/.gateway/config-dev.yml`.
+  - Packaged runtime (`cldg` / `clddg`, Homebrew port `6473`): `~/.gateway/config.yml`.
   - Override via env:
     - `GATEWAY_CONFIG_PATH` (full path)
     - `GATEWAY_HOME` (directory; config-dev.yml is under it)
+  - Always check the active process environment before assuming which config file is loaded.
   - Current fields:
     - `version`
     - `providers.openai.default_model`

@@ -36,6 +36,7 @@ use uuid::Uuid;
 
 mod claude_code_context;
 mod claude_code_inclusion;
+mod claude_response_gate;
 mod context_management;
 mod sse_bridge;
 mod tool_arg_policy;
@@ -44,6 +45,9 @@ mod translate_executor;
 mod types;
 
 use crate::claude_code_context::normalize_claude_code_context;
+use crate::claude_response_gate::{
+    cleanup_structured_output_text_for_anthropic, structured_output_schema_from_config,
+};
 use crate::context_management::{ContextManagementReport, ContextManager};
 use crate::translate::{ToolTranslationContext, translate_request_with_context};
 use crate::translate_executor::{ExecutorRuntime, execute_translated_command};
@@ -1007,13 +1011,18 @@ fn build_unary_messages_response(
         },
     );
 
+    let assistant_text = cleanup_structured_output_text_for_anthropic(
+        req.output_config.as_ref(),
+        &decoded.final_text,
+    );
+
     if decoded.tool_calls.is_empty() {
         return serde_json::json!({
             "id": format!("msg_{}", Uuid::new_v4()),
             "type": "message",
             "role": "assistant",
             "model": req.model,
-            "content": [{ "type": "text", "text": decoded.final_text.clone() }],
+            "content": [{ "type": "text", "text": assistant_text }],
             "stop_reason": "end_turn",
             "stop_sequence": null,
             "usage": usage
@@ -1022,8 +1031,8 @@ fn build_unary_messages_response(
 
     let request_id_str = request_id.map(|axum::extract::Extension(r)| r.0.as_str());
     let mut content = Vec::new();
-    if !decoded.final_text.is_empty() {
-        content.push(serde_json::json!({ "type": "text", "text": decoded.final_text.clone() }));
+    if !assistant_text.is_empty() {
+        content.push(serde_json::json!({ "type": "text", "text": assistant_text }));
     }
     for tool_call in &decoded.tool_calls {
         let _ = state.tool_calls.record_tool_call(
@@ -2090,6 +2099,7 @@ async fn stream_messages(
             tool_calls,
             rid_str,
             context_management_report.response_value(),
+            structured_output_schema_from_config(req.output_config.as_ref()),
             stream_commit,
         );
 
@@ -3461,10 +3471,13 @@ fn backend_events_to_anthropic_events(
     tool_calls: ToolCallStore,
     request_id: Option<String>,
     context_management: Option<serde_json::Value>,
+    structured_output_schema: Option<serde_json::Value>,
     stream_commit: Option<StreamCommitContext>,
 ) -> futures_util::stream::BoxStream<'static, Result<Event, std::convert::Infallible>> {
     let state = Arc::new(Mutex::new(
-        crate::sse_bridge::StreamState::new().with_context_management(context_management),
+        crate::sse_bridge::StreamState::new()
+            .with_context_management(context_management)
+            .with_structured_output_schema(structured_output_schema),
     ));
     let tool_calls = Arc::new(tool_calls);
     let request_id = Arc::new(request_id);

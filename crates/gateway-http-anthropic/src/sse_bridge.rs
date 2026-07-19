@@ -9,6 +9,7 @@ use gateway_state::ToolCallStore;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 
+use crate::claude_response_gate::cleanup_structured_output_text_with_schema;
 use crate::tool_arg_policy::sanitized_tool_args_for_kind;
 
 #[derive(Debug, Clone)]
@@ -34,6 +35,8 @@ pub(crate) struct StreamState {
     // Text routing
     active_text_index: Option<u32>,
     saw_output_text_delta: bool,
+    structured_output_schema: Option<serde_json::Value>,
+    structured_output_text_buffer: String,
 
     // Thinking routing (optional)
     active_thinking_index: Option<u32>,
@@ -61,6 +64,8 @@ impl StreamState {
             blocks: Vec::new(),
             active_text_index: None,
             saw_output_text_delta: false,
+            structured_output_schema: None,
+            structured_output_text_buffer: String::new(),
             active_thinking_index: None,
             tool_blocks_by_call_id: HashMap::new(),
             tool_name_by_call_id: HashMap::new(),
@@ -80,6 +85,14 @@ impl StreamState {
         context_management: Option<serde_json::Value>,
     ) -> Self {
         self.context_management = context_management;
+        self
+    }
+
+    pub(crate) fn with_structured_output_schema(
+        mut self,
+        schema: Option<serde_json::Value>,
+    ) -> Self {
+        self.structured_output_schema = schema;
         self
     }
 
@@ -302,6 +315,22 @@ pub(crate) fn finalize_message(st: &mut StreamState) -> Vec<Event> {
     st.completed = true;
 
     let mut out = Vec::new();
+    if st.structured_output_schema.is_some() && !st.structured_output_text_buffer.trim().is_empty()
+    {
+        let text = cleanup_structured_output_text_with_schema(
+            st.structured_output_schema.as_ref(),
+            &st.structured_output_text_buffer,
+        );
+        if !text.trim().is_empty() {
+            let (text_index, started) = st.open_text_block_if_needed();
+            st.saw_output_text_delta = true;
+            if started {
+                out.push(content_block_start_text(text_index));
+            }
+            out.push(content_block_delta_text(text_index, &text));
+        }
+    }
+
     for block in &mut st.blocks {
         if block.closed {
             continue;
@@ -382,6 +411,11 @@ fn handle_output_text_delta(
     if text.trim().is_empty() {
         return None;
     }
+    if st.structured_output_schema.is_some() {
+        st.structured_output_text_buffer.push_str(&text);
+        st.saw_output_text_delta = true;
+        return None;
+    }
     let (text_index, started) = st.open_text_block_if_needed();
     st.saw_output_text_delta = true;
     let mut out = Vec::new();
@@ -459,6 +493,13 @@ fn handle_message_item(st: &mut StreamState, item: &serde_json::Value) -> Option
         .filter(|text| !text.trim().is_empty())
         .collect();
     if texts.is_empty() {
+        return None;
+    }
+    if st.structured_output_schema.is_some() {
+        for text in texts {
+            st.structured_output_text_buffer.push_str(text);
+        }
+        st.saw_output_text_delta = true;
         return None;
     }
     let (text_index, started) = st.open_text_block_if_needed();
@@ -874,13 +915,22 @@ mod tests {
         model: &str,
         request_id: Option<&str>,
     ) -> Vec<(String, serde_json::Value)> {
+        run_bridge_and_capture_with_schema(backend_sse_fixture, model, request_id, None).await
+    }
+
+    async fn run_bridge_and_capture_with_schema(
+        backend_sse_fixture: &str,
+        model: &str,
+        request_id: Option<&str>,
+        structured_output_schema: Option<serde_json::Value>,
+    ) -> Vec<(String, serde_json::Value)> {
         let backend_sse_fixture = format!("{backend_sse_fixture}\n\n");
         let byte_stream = stream::iter(vec![Ok::<Bytes, std::io::Error>(Bytes::from(
             backend_sse_fixture,
         ))]);
         let mut backend = Box::pin(byte_stream.eventsource());
 
-        let mut state = StreamState::new();
+        let mut state = StreamState::new().with_structured_output_schema(structured_output_schema);
         let tool_calls_path =
             std::env::temp_dir().join(format!("gateway_tool_calls_{}.sqlite", Uuid::new_v4()));
         let tool_calls = ToolCallStore::new(&tool_calls_path);
@@ -922,6 +972,42 @@ mod tests {
         let got = run_bridge_and_capture(&backend, DEFAULT_BACKEND_MODEL, None).await;
         let expected = parse_expected_jsonl("streaming/expected_anthropic_text_only.jsonl");
         assert_eq!(got, expected);
+    }
+
+    #[tokio::test]
+    async fn streaming_bridge_cleans_structured_output_optional_nulls() {
+        let backend = concat!(
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"{\\\"ok\\\":true,\\\"reason\\\":\\\"continuing\\\",\\\"impossible\\\":null}\"}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":7,\"output_tokens\":9,\"total_tokens\":16}}}\n",
+        );
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "ok": { "type": "boolean" },
+                "reason": { "type": "string" },
+                "impossible": { "type": "boolean" }
+            },
+            "required": ["ok", "reason"]
+        });
+
+        let got =
+            run_bridge_and_capture_with_schema(backend, DEFAULT_BACKEND_MODEL, None, Some(schema))
+                .await;
+
+        let text_delta = got
+            .iter()
+            .find_map(|(event, data)| {
+                (event == "content_block_delta")
+                    .then(|| {
+                        data.pointer("/delta/text")
+                            .and_then(serde_json::Value::as_str)
+                    })
+                    .flatten()
+            })
+            .expect("text delta");
+        assert_eq!(text_delta, r#"{"ok":true,"reason":"continuing"}"#);
     }
 
     #[tokio::test]

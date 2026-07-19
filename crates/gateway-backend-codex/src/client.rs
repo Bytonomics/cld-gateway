@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+use crate::schema_gate::apply_openai_strict_schema_gate;
 use crate::types::{
     CodexBackendEvent, CodexBackendEventStream, CodexBackendRequest, CodexBackendResponse,
 };
@@ -434,12 +435,16 @@ pub(crate) fn build_request_body(req: &CodexBackendRequest) -> serde_json::Value
         obj.insert("client_metadata".to_string(), serde_json::Value::Object(m));
     }
 
-    serde_json::Value::Object(obj)
+    let mut body = serde_json::Value::Object(obj);
+    apply_openai_strict_schema_gate(&mut body);
+    body
 }
 
 #[cfg(test)]
 mod tests {
-    use super::CodexBackendClient;
+    use super::{CodexBackendClient, build_request_body};
+    use crate::types::CodexBackendRequest;
+    use gateway_core::Secret;
     use std::time::Duration;
 
     #[test]
@@ -452,5 +457,80 @@ mod tests {
         let timeout = Duration::from_secs(123);
         let client = CodexBackendClient::default().with_request_timeout(timeout);
         assert_eq!(client.request_timeout(), Some(timeout));
+    }
+
+    #[test]
+    fn request_body_applies_strict_schema_gate_to_text_format() {
+        let req = CodexBackendRequest {
+            text: Some(serde_json::json!({
+                "format": {
+                    "type": "json_schema",
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "ok": { "type": "boolean" },
+                            "reason": { "type": "string" }
+                        },
+                        "required": ["ok"]
+                    }
+                }
+            })),
+            ..test_request()
+        };
+
+        let body = build_request_body(&req);
+        let schema = &body["text"]["format"]["schema"];
+        assert_eq!(schema["required"], serde_json::json!(["ok", "reason"]));
+        assert_eq!(
+            schema["properties"]["reason"]["type"],
+            serde_json::json!(["string", "null"])
+        );
+    }
+
+    #[test]
+    fn request_body_applies_strict_schema_gate_to_tools() {
+        let req = CodexBackendRequest {
+            tools: vec![serde_json::json!({
+                "type": "function",
+                "name": "Stop",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "ok": { "type": "boolean" },
+                        "reason": { "type": "string" }
+                    },
+                    "required": ["ok"]
+                }
+            })],
+            ..test_request()
+        };
+
+        let body = build_request_body(&req);
+        let parameters = &body["tools"][0]["parameters"];
+        assert_eq!(parameters["required"], serde_json::json!(["ok", "reason"]));
+        assert_eq!(
+            parameters["properties"]["reason"]["type"],
+            serde_json::json!(["string", "null"])
+        );
+    }
+
+    fn test_request() -> CodexBackendRequest {
+        CodexBackendRequest {
+            access_token: Secret::new("access_test".to_string()),
+            account_id: "acct_test".to_string(),
+            model: "gpt-5.5".to_string(),
+            instructions: "You are helpful.".to_string(),
+            input: Vec::new(),
+            tools: Vec::new(),
+            tool_choice: "auto".to_string(),
+            parallel_tool_calls: true,
+            text: None,
+            reasoning: None,
+            previous_response_id: None,
+            stream: true,
+            include: Vec::new(),
+            service_tier: None,
+            client_metadata: None,
+        }
     }
 }

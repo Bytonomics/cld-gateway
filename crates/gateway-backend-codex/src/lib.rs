@@ -8,6 +8,7 @@
 pub mod backend_error;
 pub mod client;
 pub mod output_text;
+pub mod schema_gate;
 pub mod sse_unary;
 pub mod tool_calls;
 pub mod types;

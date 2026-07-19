@@ -6,7 +6,9 @@ use crate::types::{
     AnthropicSystemBlock, AnthropicToolDefinition,
 };
 
-use gateway_backend_codex::types::CodexToolCallKind;
+use gateway_backend_codex::{
+    schema_gate::normalize_openai_strict_response_schema, types::CodexToolCallKind,
+};
 use gateway_core::config::ClaudeCodeWorkflowConfig;
 use std::collections::HashMap;
 
@@ -745,6 +747,7 @@ fn translate_output_config(
         .get("schema")
         .cloned()
         .unwrap_or_else(|| serde_json::json!({}));
+    let schema = normalize_openai_strict_response_schema(&schema);
     Some(serde_json::json!({
         "format": {
             "type": "json_schema",
@@ -820,6 +823,94 @@ mod tests {
         let req = base_req();
         let translated = translate_request(&req).expect("translate");
         assert_eq!(translated.instructions, "You are a helpful assistant.");
+    }
+
+    #[test]
+    fn output_config_optional_fields_become_nullable_required_for_openai_strict_schema() {
+        let mut req = base_req();
+        req.output_config = Some(crate::types::AnthropicOutputConfig {
+            effort: None,
+            format: Some(serde_json::json!({
+                "type": "json_schema",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "ok": { "type": "boolean" },
+                        "reason": { "type": "string" },
+                        "impossible": { "type": "boolean" }
+                    },
+                    "required": ["ok", "reason"],
+                    "additionalProperties": false
+                }
+            })),
+        });
+
+        let translated = translate_request(&req).expect("translate");
+        let schema = translated
+            .text
+            .as_ref()
+            .and_then(|text| text.get("format"))
+            .and_then(|format| format.get("schema"))
+            .expect("translated output schema");
+
+        assert_eq!(
+            schema.get("required"),
+            Some(&serde_json::json!(["impossible", "ok", "reason"]))
+        );
+        assert_eq!(
+            schema.pointer("/properties/impossible/type"),
+            Some(&serde_json::json!(["boolean", "null"]))
+        );
+        assert_eq!(
+            schema.pointer("/properties/ok/type"),
+            Some(&serde_json::json!("boolean"))
+        );
+    }
+
+    #[test]
+    fn output_config_nested_optional_fields_are_nullable_required_recursively() {
+        let mut req = base_req();
+        req.output_config = Some(crate::types::AnthropicOutputConfig {
+            effort: None,
+            format: Some(serde_json::json!({
+                "type": "json_schema",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "outer": {
+                            "type": "object",
+                            "properties": {
+                                "required_child": { "type": "string" },
+                                "optional_child": { "type": "integer" }
+                            },
+                            "required": ["required_child"]
+                        }
+                    },
+                    "required": ["outer"]
+                }
+            })),
+        });
+
+        let translated = translate_request(&req).expect("translate");
+        let schema = translated
+            .text
+            .as_ref()
+            .and_then(|text| text.get("format"))
+            .and_then(|format| format.get("schema"))
+            .expect("translated output schema");
+
+        assert_eq!(
+            schema.pointer("/properties/outer/additionalProperties"),
+            Some(&serde_json::json!(false))
+        );
+        assert_eq!(
+            schema.pointer("/properties/outer/required"),
+            Some(&serde_json::json!(["optional_child", "required_child"]))
+        );
+        assert_eq!(
+            schema.pointer("/properties/outer/properties/optional_child/type"),
+            Some(&serde_json::json!(["integer", "null"]))
+        );
     }
 
     #[test]

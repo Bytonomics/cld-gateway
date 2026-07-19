@@ -1323,6 +1323,69 @@ mod tests {
     }
 
     #[test]
+    fn historical_local_only_compact_with_live_prompt_is_not_active() {
+        let mut req = base_req();
+        req.messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Blocks(vec![
+                test_text_block(
+                    "<local-command-caveat>historical local command</local-command-caveat>",
+                ),
+                test_text_block(
+                    "<command-name>/compact</command-name>\n\
+                     <command-message>compact</command-message>\n\
+                     <command-args></command-args>",
+                ),
+                test_text_block("<local-command-stdout>Compacted </local-command-stdout>"),
+                test_text_block("Do you remember what was the working on?"),
+            ]),
+        });
+
+        let translated = translate_request(&req).expect("translate");
+        let input = serialized_input(&translated);
+        let metadata = translated.client_metadata.as_ref().expect("metadata");
+
+        assert!(input.contains("Do you remember what was the working on?"));
+        assert!(!input.contains("/compact"));
+        assert_eq!(
+            metadata
+                .get("gateway_local_only_commands")
+                .map(String::as_str),
+            Some("/compact")
+        );
+        assert!(
+            !metadata.contains_key("gateway_active_local_only_commands"),
+            "historical compact wrappers with live text must not trigger compaction reset"
+        );
+    }
+
+    #[test]
+    fn current_local_only_compact_without_live_prompt_is_active() {
+        let mut req = base_req();
+        req.messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Blocks(vec![
+                test_text_block(
+                    "<command-name>/compact</command-name>\n\
+                     <command-message>compact</command-message>\n\
+                     <command-args></command-args>",
+                ),
+                test_text_block("<local-command-stdout>Compacted </local-command-stdout>"),
+            ]),
+        });
+
+        let translated = translate_request(&req).expect("translate");
+        let metadata = translated.client_metadata.as_ref().expect("metadata");
+
+        assert_eq!(
+            metadata
+                .get("gateway_active_local_only_commands")
+                .map(String::as_str),
+            Some("/compact")
+        );
+    }
+
+    #[test]
     fn multiple_local_only_commands_are_recorded_in_metadata() {
         let mut req = base_req();
         req.messages.push(AnthropicMessage {

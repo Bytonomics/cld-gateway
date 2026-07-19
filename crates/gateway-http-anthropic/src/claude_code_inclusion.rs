@@ -154,6 +154,7 @@ impl ConversationInclusion {
 pub(crate) struct ConversationInclusionReport {
     turn_inclusion: ConversationInclusion,
     local_only_commands: Vec<String>,
+    active_local_only_commands: Vec<String>,
 }
 
 impl ConversationInclusionReport {
@@ -170,6 +171,12 @@ impl ConversationInclusionReport {
                 self.local_only_commands.join(","),
             );
         }
+        if !self.active_local_only_commands.is_empty() {
+            client_metadata.insert(
+                "gateway_active_local_only_commands".to_string(),
+                self.active_local_only_commands.join(","),
+            );
+        }
     }
 
     fn mark_read_only(&mut self) {
@@ -182,6 +189,13 @@ impl ConversationInclusionReport {
         let command_name = format!("/{}", normalize_command_name(command_name));
         if !self.local_only_commands.contains(&command_name) {
             self.local_only_commands.push(command_name);
+        }
+    }
+
+    fn mark_active_local_only_command(&mut self, command_name: &str) {
+        let command_name = format!("/{}", normalize_command_name(command_name));
+        if !self.active_local_only_commands.contains(&command_name) {
+            self.active_local_only_commands.push(command_name);
         }
     }
 
@@ -226,16 +240,35 @@ pub(crate) fn apply_conversation_inclusion_policy(
     messages: &mut [AnthropicMessage],
 ) -> ConversationInclusionReport {
     let mut report = ConversationInclusionReport::default();
+    let latest_user_index = messages
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, message)| {
+            (message.role == "user" && !message_text(message).trim().is_empty()).then_some(index)
+        });
 
-    for message in messages.iter_mut().filter(|message| message.role == "user") {
+    for (index, message) in messages.iter_mut().enumerate() {
+        if message.role != "user" {
+            continue;
+        }
+        let mut message_local_only_commands = Vec::new();
         match &mut message.content {
             AnthropicContent::Text(text) => {
-                *text = apply_text_inclusion_policy(text, &mut report);
+                *text = apply_text_inclusion_policy(
+                    text,
+                    &mut report,
+                    &mut message_local_only_commands,
+                );
             }
             AnthropicContent::Blocks(blocks) => {
                 for block in blocks.iter_mut().filter(|block| block.block_type == "text") {
                     if let Some(text) = &mut block.text {
-                        *text = apply_text_inclusion_policy(text, &mut report);
+                        *text = apply_text_inclusion_policy(
+                            text,
+                            &mut report,
+                            &mut message_local_only_commands,
+                        );
                     }
                 }
                 blocks.retain(|block| {
@@ -245,6 +278,11 @@ pub(crate) fn apply_conversation_inclusion_policy(
                             .as_deref()
                             .is_some_and(|text| !text.trim().is_empty())
                 });
+            }
+        }
+        if latest_user_index == Some(index) && message_text(message).trim().is_empty() {
+            for command_name in message_local_only_commands {
+                report.mark_active_local_only_command(&command_name);
             }
         }
     }
@@ -272,7 +310,11 @@ pub(crate) fn parse_command_envelope(text: &str) -> Option<CommandEnvelope> {
     Some(CommandEnvelope { command_name, body })
 }
 
-fn apply_text_inclusion_policy(text: &str, report: &mut ConversationInclusionReport) -> String {
+fn apply_text_inclusion_policy(
+    text: &str,
+    report: &mut ConversationInclusionReport,
+    message_local_only_commands: &mut Vec<String>,
+) -> String {
     if is_read_only_request(text) {
         report.mark_read_only();
     }
@@ -280,10 +322,12 @@ fn apply_text_inclusion_policy(text: &str, report: &mut ConversationInclusionRep
     let mut included = text.to_string();
     while let Some(local_only_match) = local_only_command_span(&included) {
         report.mark_local_only_command(local_only_match.command_name);
+        message_local_only_commands.push(local_only_match.command_name.to_string());
         included.replace_range(local_only_match.start..local_only_match.end, "");
     }
     while let Some(local_only_match) = local_only_stdout_span(&included) {
         report.mark_local_only_command(local_only_match.command_name);
+        message_local_only_commands.push(local_only_match.command_name.to_string());
         included.replace_range(local_only_match.start..local_only_match.end, "");
     }
 

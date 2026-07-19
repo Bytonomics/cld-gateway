@@ -2107,6 +2107,7 @@ struct PreparedConversationBranch {
     persistence_reason: &'static str,
     commit_turn: bool,
     allow_incremental_context: bool,
+    allow_zero_delta_start: bool,
     fingerprints: BranchFingerprintSet,
     active_messages: Vec<crate::types::AnthropicMessage>,
     delta_start_index: usize,
@@ -2115,6 +2116,7 @@ struct PreparedConversationBranch {
 struct DurableBranchSnapshot {
     active_canonical_messages: serde_json::Value,
     delta_start_index: usize,
+    allow_zero_delta_start: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2348,7 +2350,10 @@ fn select_transport(
         });
     }
 
-    if prepared_branch.commit_turn && prepared_branch.delta_start_index == 0 {
+    if prepared_branch.commit_turn
+        && prepared_branch.delta_start_index == 0
+        && !prepared_branch.allow_zero_delta_start
+    {
         return Ok(SelectedTransport {
             mode: TransportMode::Full,
             previous_response_id: None,
@@ -2443,26 +2448,21 @@ fn prepare_conversation_branch(
         });
     }
 
-    if let Some((branch, delta_start_index)) = prefix_match.or_else(|| {
-        compaction_context
-            .command_seen
-            .then(|| {
-                latest_context_branch.clone().map(|branch| {
-                    let delta_start_index = active_message_count(&branch);
-                    (branch, delta_start_index)
-                })
-            })
-            .flatten()
-    }) {
+    if let Some((branch, delta_start_index)) = durable_branch_match(
+        prefix_match,
+        latest_context_branch.clone(),
+        compaction_context,
+    ) {
         return prepare_matched_durable_branch(
             state,
             claude_session_id,
             branch,
             turn_scope,
             fingerprints,
-            DurableBranchSnapshot {
+            &DurableBranchSnapshot {
                 active_canonical_messages: active_canonical_messages?,
                 delta_start_index,
+                allow_zero_delta_start: compaction_context.history_marker_seen,
             },
             compaction_context.command_seen,
         );
@@ -2478,7 +2478,11 @@ fn prepare_conversation_branch(
                     branch,
                     turn_scope,
                     fingerprints,
-                    active_canonical_messages?,
+                    &DurableBranchSnapshot {
+                        active_canonical_messages: active_canonical_messages?,
+                        delta_start_index: 0,
+                        allow_zero_delta_start: compaction_context.history_marker_seen,
+                    },
                     compaction_context.command_seen,
                 )
             });
@@ -2497,7 +2501,27 @@ fn prepare_conversation_branch(
 #[derive(Debug, Clone, Copy)]
 struct CompactionRequestContext {
     command_seen: bool,
+    history_marker_seen: bool,
     summary_message_count: Option<usize>,
+}
+
+fn durable_branch_match(
+    prefix_match: Option<(BranchMetadata, usize)>,
+    latest_context_branch: Option<BranchMetadata>,
+    compaction_context: CompactionRequestContext,
+) -> Option<(BranchMetadata, usize)> {
+    prefix_match.or_else(|| {
+        if compaction_context.command_seen {
+            return latest_context_branch
+                .clone()
+                .map(|branch| (active_message_count(&branch), branch))
+                .map(|(delta_start_index, branch)| (branch, delta_start_index));
+        }
+        compaction_context
+            .history_marker_seen
+            .then(|| latest_context_branch.map(|branch| (branch, 0)))
+            .flatten()
+    })
 }
 
 fn compaction_context_for_request(
@@ -2505,9 +2529,11 @@ fn compaction_context_for_request(
     prefix_match: Option<&(BranchMetadata, usize)>,
 ) -> CompactionRequestContext {
     let command_seen = is_active_slash_command(client_metadata, "/compact")
-        || has_local_only_command(client_metadata, "/compact");
+        || has_active_local_only_command(client_metadata, "/compact");
+    let history_marker_seen = !command_seen && has_local_only_command(client_metadata, "/compact");
     CompactionRequestContext {
         command_seen,
+        history_marker_seen,
         summary_message_count: command_seen
             .then(|| prefix_match.map(|(_, count)| *count))
             .flatten(),
@@ -2520,7 +2546,7 @@ fn prepare_rebaseline_durable_branch(
     branch: BranchMetadata,
     turn_scope: ConversationTurnScope,
     fingerprints: BranchFingerprintSet,
-    active_canonical_messages: serde_json::Value,
+    snapshot: &DurableBranchSnapshot,
     compaction_command_seen: bool,
 ) -> Option<PreparedConversationBranch> {
     let branch = apply_compaction_if_needed(
@@ -2536,7 +2562,7 @@ fn prepare_rebaseline_durable_branch(
             claude_session_id,
             &branch.branch_id,
             &ReconcileSnapshotParams {
-                messages: active_canonical_messages,
+                messages: snapshot.active_canonical_messages.clone(),
                 fingerprints: fingerprints.clone(),
             },
         )
@@ -2548,7 +2574,7 @@ fn prepare_rebaseline_durable_branch(
         turn_scope,
         "ambiguous_rebaseline_latest_branch",
         fingerprints,
-        0,
+        snapshot,
     )
 }
 
@@ -2589,6 +2615,7 @@ fn transient_prepared_branch(
         persistence_reason,
         commit_turn: false,
         allow_incremental_context: true,
+        allow_zero_delta_start: false,
         fingerprints,
         active_messages,
         delta_start_index,
@@ -2612,6 +2639,7 @@ fn side_prepared_branch(
         persistence_reason: "read_only_conversation_inclusion",
         commit_turn: false,
         allow_incremental_context: true,
+        allow_zero_delta_start: false,
         fingerprints,
         active_messages,
         delta_start_index,
@@ -2625,7 +2653,7 @@ fn durable_prepared_branch(
     turn_scope: ConversationTurnScope,
     persistence_reason: &'static str,
     fingerprints: BranchFingerprintSet,
-    delta_start_index: usize,
+    snapshot: &DurableBranchSnapshot,
 ) -> Option<PreparedConversationBranch> {
     let active_messages = deserialize_active_messages(branch.active_canonical_messages.as_ref())?;
     Some(PreparedConversationBranch {
@@ -2637,9 +2665,10 @@ fn durable_prepared_branch(
         persistence_reason,
         commit_turn: true,
         allow_incremental_context: true,
+        allow_zero_delta_start: snapshot.allow_zero_delta_start,
         fingerprints,
         active_messages,
-        delta_start_index,
+        delta_start_index: snapshot.delta_start_index,
     })
 }
 
@@ -2649,7 +2678,7 @@ fn prepare_matched_durable_branch(
     branch: BranchMetadata,
     turn_scope: ConversationTurnScope,
     fingerprints: BranchFingerprintSet,
-    snapshot: DurableBranchSnapshot,
+    snapshot: &DurableBranchSnapshot,
     compaction_command_seen: bool,
 ) -> Option<PreparedConversationBranch> {
     let branch = apply_compaction_if_needed(
@@ -2665,7 +2694,7 @@ fn prepare_matched_durable_branch(
             claude_session_id,
             &branch.branch_id,
             &ReconcileSnapshotParams {
-                messages: snapshot.active_canonical_messages,
+                messages: snapshot.active_canonical_messages.clone(),
                 fingerprints: fingerprints.clone(),
             },
         )
@@ -2677,7 +2706,7 @@ fn prepare_matched_durable_branch(
         turn_scope,
         "matched_existing_prefix",
         fingerprints,
-        snapshot.delta_start_index,
+        snapshot,
     )
 }
 
@@ -2725,7 +2754,11 @@ fn prepare_initial_durable_branch(
         turn_scope,
         "initial_or_selected_durable_branch",
         fingerprints,
-        0,
+        &DurableBranchSnapshot {
+            active_canonical_messages: serde_json::Value::Null,
+            delta_start_index: 0,
+            allow_zero_delta_start: false,
+        },
     )
 }
 
@@ -2741,7 +2774,8 @@ fn apply_initial_selection_compaction_if_needed(
         .as_ref()
         .and_then(|existing| existing.fingerprints.compaction_summary_hash.clone());
     if compaction_command_seen
-        && previous_compaction_summary_hash != fingerprints.compaction_summary_hash
+        && (fingerprints.compaction_summary_hash.is_none()
+            || previous_compaction_summary_hash != fingerprints.compaction_summary_hash)
     {
         return state
             .conversation_state
@@ -2764,7 +2798,8 @@ fn apply_compaction_if_needed(
     compaction_command_seen: bool,
 ) -> Option<BranchMetadata> {
     if compaction_command_seen
-        && branch.fingerprints.compaction_summary_hash != fingerprints.compaction_summary_hash
+        && (fingerprints.compaction_summary_hash.is_none()
+            || branch.fingerprints.compaction_summary_hash != fingerprints.compaction_summary_hash)
     {
         return state
             .conversation_state
@@ -3322,6 +3357,17 @@ fn has_local_only_command(client_metadata: &HashMap<String, String>, command: &s
         })
 }
 
+fn has_active_local_only_command(client_metadata: &HashMap<String, String>, command: &str) -> bool {
+    client_metadata
+        .get("gateway_active_local_only_commands")
+        .is_some_and(|commands| {
+            commands
+                .split(',')
+                .map(str::trim)
+                .any(|candidate| candidate == command)
+        })
+}
+
 fn anthropic_message_text(message: &crate::types::AnthropicMessage) -> String {
     match &message.content {
         crate::types::AnthropicContent::Text(text) => text.clone(),
@@ -3580,7 +3626,7 @@ mod messages_tests {
     use gateway_core::config::{GatewayConfig, resolve_model};
     use gateway_state::{
         BranchCreateParams, BranchMetadata, CommitTurnParams, ConversationStateStore,
-        ConversationTurnScope, ToolCallStore,
+        ConversationTurnScope, OpenAiCheckpoint, ToolCallStore,
     };
     use std::collections::HashMap;
     use tokio_tungstenite::tungstenite::Message;
@@ -4917,8 +4963,7 @@ mod messages_tests {
                 {
                     "role": "user",
                     "content": "<command-message>compact</command-message>\n<command-name>/compact</command-name>\n<command-args></command-args>\n<local-command-stdout>Compacted </local-command-stdout>"
-                },
-                { "role": "user", "content": "hello" }
+                }
             ]),
         )
         .await;
@@ -5212,8 +5257,7 @@ mod messages_tests {
             {
                 "role": "user",
                 "content": "<command-message>compact</command-message>\n<command-name>/compact</command-name>\n<command-args></command-args>\n<local-command-stdout>Compacted </local-command-stdout>"
-            },
-            { "role": "user", "content": "hello" }
+            }
         ]);
         let json = send_unary_message(
             &restarted_state,
@@ -5229,7 +5273,7 @@ mod messages_tests {
         assert_branch_checkpoint(&branch, "resp_full_compaction", None);
         assert_eq!(
             branch.active_canonical_messages,
-            Some(serde_json::json!([{ "role": "user", "content": "hello" }]))
+            Some(serde_json::json!([]))
         );
         assert!(
             harness
@@ -5874,19 +5918,13 @@ mod messages_tests {
             std::path::Path::new("/tmp/nonexistent-auth.json"),
             conversation_state,
         );
-        let req = test_anthropic_request(vec![
-                AnthropicMessage {
-                    role: "user".to_string(),
-                    content: AnthropicContent::Text(
-                        "<command-message>compact</command-message>\n<command-name>/compact</command-name>\n<command-args></command-args>\n<local-command-stdout>Compacted </local-command-stdout>"
-                            .to_string(),
-                    ),
-                },
-                AnthropicMessage {
-                    role: "user".to_string(),
-                    content: AnthropicContent::Text("hello after compaction".to_string()),
-                },
-            ]);
+        let req = test_anthropic_request(vec![AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Text(
+                "<command-message>compact</command-message>\n<command-name>/compact</command-name>\n<command-args></command-args>\n<local-command-stdout>Compacted </local-command-stdout>"
+                    .to_string(),
+            ),
+        }]);
         let translated =
             translate_request_with_context(&req, &build_tool_translation_context(&state, &req))
                 .expect("translate compact request");
@@ -6019,6 +6057,103 @@ mod messages_tests {
         assert_eq!(selected.mode, TransportMode::Incremental);
         assert_eq!(selected.previous_response_id, Some("resp_prev".to_string()));
         assert_eq!(selected.reason, "branch_checkpoint_reuse");
+
+        let _ = std::fs::remove_dir_all(&conversation_root);
+    }
+
+    #[test]
+    fn post_compaction_same_message_history_marker_allows_zero_prefix_delta() {
+        let conversation_root = std::env::temp_dir().join(format!(
+            "gateway_compact_same_message_followup_delta_{}",
+            uuid::Uuid::new_v4()
+        ));
+        let claude_session_id = "session-1";
+        let (conversation_state, branch_id) =
+            seed_incremental_branch(&conversation_root, claude_session_id);
+        let compacted_messages = vec![AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Text("compaction summary".to_string()),
+        }];
+        let compacted_fingerprints = branch_fingerprints_from_messages(&compacted_messages, true);
+        let mut compacted_branch = conversation_state
+            .apply_compaction(
+                claude_session_id,
+                &branch_id,
+                compacted_fingerprints.compaction_summary_hash.as_deref(),
+                &compacted_fingerprints,
+            )
+            .expect("mark branch compacted");
+        compacted_branch.compaction_reset_pending = false;
+        compacted_branch.openai_checkpoint = Some(OpenAiCheckpoint {
+            response_id: "resp_after_compaction".to_string(),
+            previous_response_id: None,
+            provider_model_fingerprint: DEFAULT_BACKEND_MODEL.to_string(),
+            request_compatibility_fingerprint: None,
+            provider_input_tokens: Some(42),
+        });
+        conversation_state
+            .store_branch(claude_session_id, &compacted_branch)
+            .expect("store compacted branch fixture");
+        let state = build_state(
+            &url::Url::parse("ws://127.0.0.1:9").expect("url"),
+            std::path::Path::new("/tmp/nonexistent-auth.json"),
+            conversation_state,
+        );
+        let req = test_anthropic_request(vec![AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Text(
+                "<local-command-caveat>historical local command</local-command-caveat>\n\
+                 <command-name>/compact</command-name>\n\
+                 <command-message>compact</command-message>\n\
+                 <command-args></command-args>\n\
+                 <local-command-stdout>Compacted </local-command-stdout>\n\
+                 Do you remember what was the working on?"
+                    .to_string(),
+            ),
+        }]);
+        let translated =
+            translate_request_with_context(&req, &build_tool_translation_context(&state, &req))
+                .expect("translate compact follow-up request");
+        let prepared = prepare_conversation_branch(
+            &state,
+            Some(claude_session_id),
+            &req,
+            translated.client_metadata.as_ref(),
+        )
+        .expect("compact follow-up should prepare a branch");
+
+        assert!(prepared.commit_turn);
+        assert!(!prepared.branch.compaction_reset_pending);
+        assert_eq!(prepared.delta_start_index, 0);
+        assert!(prepared.allow_zero_delta_start);
+
+        let resolution = resolve_model(&state.gateway_config, &req.model);
+        let compatibility_fingerprint =
+            request_compatibility_fingerprint(&state.gateway_config, &resolution, &translated);
+        let selected = select_transport(
+            Some(&prepared),
+            &WebSocketChainDecision {
+                match_result: WebSocketChainMatch::Matching,
+                transport_identity: Some("test-identity".to_string()),
+                live_websocket_chain_id: Some(WebSocketChainId::new("chain-1")),
+                checkpoint_websocket_chain_id: Some(WebSocketChainId::new("chain-1")),
+                checkpoint_response_id: prepared
+                    .branch
+                    .openai_checkpoint
+                    .as_ref()
+                    .map(|checkpoint| checkpoint.response_id.clone()),
+                reason: "test_matching_chain",
+            },
+            &resolution.selected_backend_model,
+            &compatibility_fingerprint,
+        )
+        .expect("compact follow-up should select transport");
+
+        assert_eq!(selected.mode, TransportMode::Incremental);
+        assert_eq!(
+            selected.previous_response_id,
+            Some("resp_after_compaction".to_string())
+        );
 
         let _ = std::fs::remove_dir_all(&conversation_root);
     }
@@ -6234,6 +6369,7 @@ mod transport_selection_tests {
             persistence_reason: "test",
             commit_turn: turn_scope == ConversationTurnScope::Main,
             allow_incremental_context: turn_scope == ConversationTurnScope::Main,
+            allow_zero_delta_start: false,
             fingerprints: gateway_state::BranchFingerprintSet::default(),
             active_messages: Vec::new(),
             delta_start_index: 1,

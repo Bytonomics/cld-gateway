@@ -484,7 +484,7 @@ cld-gateway serve
 
 Expected behavior:
 
-- listens on `127.0.0.1:8080` by default
+- listens on `127.0.0.1:6483` by default
 - does not require Homebrew after installation
 - when neither `GATEWAY_CONFIG_PATH` nor `GATEWAY_HOME` is set, runtime falls back to `~/.gateway/config-dev.yml`
 - auth/login can be tested separately
@@ -492,7 +492,7 @@ Expected behavior:
 In another shell, verify health:
 
 ```sh
-curl -fsSL http://127.0.0.1:8080/health
+curl -fsSL http://127.0.0.1:6483/health
 ```
 
 ### 15. Validate login/auth flow

@@ -1,7 +1,7 @@
 version: 1
 
 workflow:
-  fast_mode: true
+  fast_mode: false
 
   context_management:
     # Master switch for gateway-side context pruning.

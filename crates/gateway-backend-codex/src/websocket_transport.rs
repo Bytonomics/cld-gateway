@@ -568,7 +568,12 @@ async fn forward_websocket_response_events(
         let terminal = event
             .as_ref()
             .is_ok_and(|event| is_terminal_backend_event(&event.event));
-        let _ = events.send(event);
+        if events.send(event).is_err() {
+            alive.store(false, Ordering::Release);
+            tracing::debug!("websocket response consumer dropped; closing upstream websocket");
+            let _ = socket.close(None).await;
+            return;
+        }
         if terminal {
             return;
         }
@@ -885,6 +890,25 @@ mod tests {
 
         assert!(err.to_string().contains("websocket session is closed"));
         assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn dropping_pooled_event_stream_closes_command_event_receiver() {
+        let (sender, mut receiver) = mpsc::unbounded_channel::<WebSocketCommand>();
+        let session = CodexWebSocketSession {
+            sender,
+            alive: Arc::new(AtomicBool::new(true)),
+            websocket_chain_id: WebSocketChainId::new("chain-live"),
+        };
+
+        let events = session
+            .send_event_stream(&test_request(None))
+            .expect("queue request");
+        let command = receiver.try_recv().expect("command queued");
+
+        assert!(!command.events.is_closed());
+        drop(events);
+        assert!(command.events.is_closed());
     }
 
     #[test]

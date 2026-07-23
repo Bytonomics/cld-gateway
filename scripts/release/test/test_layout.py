@@ -278,7 +278,7 @@ def test_post_install_deploys_codex_status_asset() -> None:
         )
         (formula_prefix / "share" / "cld-gateway").mkdir(parents=True)
         (formula_prefix / "share" / "cld-gateway" / "config.yml").write_text(
-            "listen_addr: 127.0.0.1:8080\n",
+            "listen_addr: 127.0.0.1:6483\n",
             encoding="utf-8",
         )
         (formula_prefix / "share" / "cld-gateway" / "settings.json").write_text(

@@ -9,7 +9,7 @@
     {
       "id": "gpt-5.6-terra",
       "name": "GPT-5.6 Terra",
-      "description": "OpenAI balanced everyday model; ChatGPT/Codex context is 128K; Opus usable window is 128K * 0.9 = 115200"
+      "description": "OpenAI balanced everyday model; ChatGPT/Codex context is 1.05M; with 80% auto-compact override, Opus usable window is 840000"
     },
     {
       "id": "gpt-5.5",
@@ -41,7 +41,7 @@
     "ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION": "OpenAI long-context Codex model; experimental 1M context; Sonnet usable window is 1M * 0.9 = 900000",
     "ANTHROPIC_DEFAULT_OPUS_MODEL": "gpt-5.6-terra",
     "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME": "GPT-5.6 Terra",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION": "OpenAI balanced everyday model via Gateway; ChatGPT/Codex context is 128K; Opus usable window is 128K * 0.9 = 115200",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION": "OpenAI balanced everyday model via Gateway; ChatGPT/Codex context is 1.05M; with 80% auto-compact override, Opus usable window is 840000",
     "ANTHROPIC_DEFAULT_FABLE_MODEL": "gpt-5.6-sol",
     "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME": "GPT-5.6 Sol",
     "ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION": "OpenAI flagship coding model via Gateway; ChatGPT/Codex context is 272K; Fable usable window is 272K * 0.9 = 244800",
@@ -49,7 +49,7 @@
     "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "80",
     "ANTHROPIC_DEFAULT_HAIKU_MAX_TOKENS": 400000,
     "ANTHROPIC_DEFAULT_SONNET_MAX_TOKENS": 1000000,
-    "ANTHROPIC_DEFAULT_OPUS_MAX_TOKENS": 128000,
+    "ANTHROPIC_DEFAULT_OPUS_MAX_TOKENS": 1050000,
     "ANTHROPIC_DEFAULT_FABLE_MAX_TOKENS": 272000,
     "ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION": "OpenAI fast, affordable model; ChatGPT/Codex context reference is 400K; Haiku usable window is 400K * 0.9 = 360000"
   }

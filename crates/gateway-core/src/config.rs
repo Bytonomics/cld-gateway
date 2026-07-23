@@ -201,7 +201,7 @@ fn default_config_version() -> u32 {
 
 #[must_use]
 fn default_listen_addr() -> SocketAddr {
-    SocketAddr::from(([127, 0, 0, 1], 8080))
+    SocketAddr::from(([127, 0, 0, 1], 6483))
 }
 
 #[must_use]
@@ -333,7 +333,7 @@ providers:
     default_model: gpt-5.6-sol
     unsupported_models: []
 network:
-  listen_addr: 127.0.0.1:8080
+  listen_addr: 127.0.0.1:6483
   allowed_hosts: []
 ";
 

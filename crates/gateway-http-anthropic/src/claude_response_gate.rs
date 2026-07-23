@@ -36,6 +36,46 @@ pub(crate) fn cleanup_structured_output_text_with_schema(
     serde_json::to_string(&value).unwrap_or_else(|_| text.to_string())
 }
 
+pub(crate) fn sanitize_anthropic_response_value(mut value: serde_json::Value) -> serde_json::Value {
+    remove_null_fields_and_empty_text_blocks(&mut value);
+    value
+}
+
+pub(crate) fn sanitize_anthropic_response_text(text: String) -> String {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return text;
+    };
+    serde_json::to_string(&sanitize_anthropic_response_value(value)).unwrap_or(text)
+}
+
+fn remove_null_fields_and_empty_text_blocks(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            for nested in object.values_mut() {
+                remove_null_fields_and_empty_text_blocks(nested);
+            }
+            object.retain(|_, value| !value.is_null());
+            if let Some(content) = object.get_mut("content")
+                && let Some(blocks) = content.as_array_mut()
+            {
+                blocks.retain(|block| {
+                    block.get("type").and_then(serde_json::Value::as_str) != Some("text")
+                        || block
+                            .get("text")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|text| !text.trim().is_empty())
+                });
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for nested in values {
+                remove_null_fields_and_empty_text_blocks(nested);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn remove_null_optional_fields(value: &mut serde_json::Value, schema: &serde_json::Value) {
     if let (Some(value_obj), Some(schema_obj)) = (value.as_object_mut(), schema.as_object()) {
         let required = schema_obj
@@ -110,6 +150,32 @@ mod tests {
             serde_json::json!({
                 "ok": true,
                 "reason": "continuing"
+            })
+        );
+    }
+
+    #[test]
+    fn sanitize_anthropic_response_removes_nulls_and_empty_text_blocks() {
+        let value = sanitize_anthropic_response_value(serde_json::json!({
+            "type": "message",
+            "stop_sequence": null,
+            "content": [
+                { "type": "text", "text": "" },
+                { "type": "text", "text": "hello" },
+                { "type": "tool_use", "id": "tool_1", "input": null }
+            ],
+            "nested": { "impossible": null, "ok": true }
+        }));
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "type": "message",
+                "content": [
+                    { "type": "text", "text": "hello" },
+                    { "type": "tool_use", "id": "tool_1" }
+                ],
+                "nested": { "ok": true }
             })
         );
     }

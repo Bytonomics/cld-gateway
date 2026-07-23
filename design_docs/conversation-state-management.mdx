@@ -38,6 +38,7 @@ keys with ad hoc string formatting at individual call sites.
 ConversationTransportIdentityV1
   claude_session_id
   branch_id
+  request_kind
   provider_model_fingerprint
   reasoning_effort
 ```
@@ -48,6 +49,10 @@ Defaulting rules:
   raw Claude display/model alias.
 - `reasoning_effort` must be the normalized backend effort value. If the client
   does not provide one, use a stable sentinel such as `default`.
+- `request_kind` must be one of Gateway's normalized request kinds. Visible
+  main, subagent, permission classifier, hook evaluator, local control,
+  status/auxiliary, and unknown offshoot requests never share the same provider
+  continuation key.
 - Missing identity fields may be used only for bootstrap diagnostics. They must
   not authorize delta continuation.
 
@@ -212,6 +217,118 @@ Client metadata is excluded because it is Gateway/Claude bookkeeping, not part
 of the provider-rendering contract. If a local helper result is appended into
 the model input, it is still excluded from the fingerprint as input content; the
 next successful response ID becomes the new linked-list checkpoint.
+
+## Request Kind And Checkpoint Ownership
+
+Gateway classifies every Claude Code request before branch selection:
+
+```text
+VisibleMain            => durable visible branch head may advance
+SubagentOffshoot       => may borrow context; offshoot checkpoint only
+PermissionClassifier   => may borrow context; offshoot checkpoint only
+HookEvaluator          => may borrow context; offshoot checkpoint only
+LocalControl           => no visible branch commit
+StatusOrAuxiliary      => no visible branch commit
+UnknownOffshoot        => may borrow context; offshoot checkpoint only
+```
+
+Only `VisibleMain` can update `branch.openai_checkpoint`,
+`branch.current_checkpoint_id`, and the durable per-turn checkpoint list.
+
+Offshoots are persisted separately under `offshoot_openai_checkpoints`, keyed by
+the full transport identity. Their response IDs are useful for diagnostics and
+future offshoot continuation, but they are never valid parents for the next
+visible user-facing message.
+
+```text
+Visible main lane:
+
+  M1(prev=null) ──R1──▶ M2(prev=R1) ──R2──▶ M3(prev=R2)
+                    │
+                    └── visible branch head = R2
+
+Subagent / hook / classifier offshoot:
+
+  O1(borrows visible context from R2) ──RO1
+                    │
+                    └── stored in offshoot_openai_checkpoints
+                    └── visible branch head remains R2
+
+Next visible turn:
+
+  M4(prev=R2) ──R3
+```
+
+## Operational And Durable Message Split
+
+Gateway builds two normalized message views after Claude Code context
+normalization and before branch matching:
+
+```text
+durable_visible_messages
+  user / assistant / tool turns that define the conversation linked list
+
+operational_context_messages
+  Claude Code reminders, interruption wrappers, skill/tool reminders,
+  billing/subagent headers, hook metadata, and other non-durable wrappers
+```
+
+Only `durable_visible_messages` are used for fingerprints, prefix matching, and
+per-turn checkpoint lookup. Operational wrappers may still affect model input if
+they contain a real current-turn instruction, but wrapper text does not create a
+new tab and does not break prefix matching.
+
+## Visible Main-Turn Lease
+
+Every visible main turn acquires a lease for its transport identity before the
+OpenAI WebSocket call starts.
+
+```text
+Idle
+  └── acquire request Q1
+        └── InFlight(Q1, optional prev, optional websocket_chain_id)
+              ├── completed + valid same lease      => CompletedCommitted
+              ├── backend error before commit       => BackendFailedBeforeCommit
+              ├── client drops before first event   => ClientAbortedBeforeFirstEvent
+              ├── client drops after visible output => ClientAbortedAfterVisibleOutput
+              └── late completed after abort        => CommitSuppressedAfterAbort
+```
+
+Checkpoint commits must validate the active request ID and WebSocket chain ID.
+If the lease is missing, mismatched, failed, or aborted, Gateway logs
+`checkpoint_commit_skipped` and does not advance the branch head.
+
+## Fallback Discipline
+
+Gateway does not silently retry a selected visible-main delta as a full
+`previous_response_id = null` request.
+
+Allowed full bootstraps are selected before the OpenAI request is sent:
+
+- first request on a new WebSocket chain
+- no local canonical history
+- no prefix match / tab split
+- compaction reset root
+- model or effort identity change
+
+If a request was selected as delta and OpenAI rejects the parent response ID,
+Gateway logs `delta_contract_violation` and fails the request. It does not hide
+the bug by sending full history in the same turn.
+
+## Claude Code Response Cleanup Gate
+
+All Claude Code-facing JSON responses must pass through the outbound sanitizer.
+
+The sanitizer:
+
+- removes object fields whose value is `null`
+- removes empty text content blocks
+- preserves required boolean fields only as real booleans
+- does not run on OpenAI-bound schemas, where optional fields are represented as
+  nullable-required fields for strict schema compatibility
+
+This gate prevents Claude Code hook/classifier response validation failures such
+as `impossible: null` and Anthropic-side failures from empty text blocks.
 
 ## Regime 1: New Session
 

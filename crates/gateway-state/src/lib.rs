@@ -14,8 +14,9 @@ use std::path::PathBuf;
 pub use conversation::{
     BranchCheckpointRef, BranchCreateParams, BranchFingerprintSet, BranchMetadata,
     BranchSelectionAction, BranchSelectionInput, BranchSelectionResult, CanonicalLedgerEvent,
-    ClaudeSessionMetadata, CommitTurnParams, ConversationStateStore, ConversationTurnScope,
-    OpenAiCheckpoint, ReconcileSnapshotParams, SparseCheckpoint, SparseCheckpointKind,
+    ClaudeSessionMetadata, CommitOffshootCheckpointParams, CommitTurnParams,
+    ConversationStateStore, ConversationTurnScope, OffshootOpenAiCheckpoint, OpenAiCheckpoint,
+    ReconcileSnapshotParams, SparseCheckpoint, SparseCheckpointKind, TurnOpenAiCheckpoint,
 };
 pub use tool_calls::{StoredToolCall, ToolCallStore};
 

@@ -109,7 +109,7 @@ cld-gateway serve
 ```
 
 The daemon listens on the address configured in `~/.gateway/config.yml`. If no listen address is configured, it defaults
-to `127.0.0.1:8080` and automatically handles token refresh.
+to `127.0.0.1:6483` and automatically handles token refresh.
 
 If you see an auth error, run `cld-gateway login` again.
 
@@ -255,7 +255,7 @@ subscription usage and GPT-5.6 Sol is limited to 272K there.
 | No | Config                  | Value / example                        | Behavior                                                                                  | How to choose                                                                                              |
 |----|-------------------------|----------------------------------------|-------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------|
 | 1  | `network.listen_addr`   | Purpose                                | Socket address that `cld-gateway serve` binds to.                                         | Controls where Claude Code should point its Anthropic-compatible base URL.                                 |
-|    |                         | `127.0.0.1:8080`                       | Code default when no config file supplies a value.                                        | Good for local-only development.                                                                           |
+|    |                         | `127.0.0.1:6483`                       | Code default when no config file supplies a value.                                        | Good for local-only development.                                                                           |
 |    |                         | `127.0.0.1:6473`                       | Packaged Homebrew config value.                                                           | Good for avoiding common app ports while staying local-only.                                               |
 |    |                         | `0.0.0.0:6473`                         | Binds on all interfaces.                                                                  | Use only when intentionally exposing the gateway on a LAN/container network with external access controls. |
 | 2  | `network.allowed_hosts` | Purpose                                | Additional outbound hosts allowed by Gateway’s network policy.                            | Anthropic/Claude hosts are still blocked even if listed here.                                              |

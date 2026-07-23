@@ -60,7 +60,7 @@ If a commit fails because a hook modified files, re-stage the hook-changed files
 
 `gatewayd` is the runnable daemon that wires everything together:
 
-- Binds an Axum HTTP server to `network.listen_addr` from gateway config, defaulting to `127.0.0.1:8080`.
+- Binds an Axum HTTP server to `network.listen_addr` from gateway config, defaulting to `127.0.0.1:6483`.
 - Performs a non-interactive OpenAI auth preflight in `serve` mode; missing or invalid auth is logged and startup continues.
 - Runs interactive auth only through `cld-gateway login [openai|gemini]`.
 - Wraps the router with observability middleware that logs exchanges.
@@ -140,7 +140,7 @@ The workspace is organized as small crates with explicit â€œallowed/not allowedâ
 - Developer mode (`cldc` / `clddc`):
   - `cldc` is a shell alias for `claude --settings ~/.claude_codex/settings.json`.
   - `clddc` is a shell alias for `cldc --dangerously-skip-permissions`.
-  - This path is for the cargo-run gateway on `http://127.0.0.1:8080`.
+  - This path is for the cargo-run gateway on `http://127.0.0.1:6483`.
   - Claude model aliases and the `/model` menu for this mode come from `~/.claude_codex/settings.json`.
   - Runtime gateway config for cargo-run mode defaults to `~/.gateway/config-dev.yml` unless `GATEWAY_CONFIG_PATH` or `GATEWAY_HOME` is set.
   - Do not inspect `~/.gateway/config.yml` when debugging `cldc` / `clddc` model resolution unless the process environment explicitly sets `GATEWAY_CONFIG_PATH` to that file.
@@ -165,7 +165,7 @@ The workspace is organized as small crates with explicit â€œallowed/not allowedâ
 
 - Gateway config:
   - Code default without env overrides: `~/.gateway/config-dev.yml`.
-  - Developer runtime (`cldc` / `clddc`, cargo-run port `8080`): `~/.gateway/config-dev.yml`.
+  - Developer runtime (`cldc` / `clddc`, cargo-run port `6483`): `~/.gateway/config-dev.yml`.
   - Packaged runtime (`cldg` / `clddg`, Homebrew port `6473`): `~/.gateway/config.yml`.
   - Override via env:
     - `GATEWAY_CONFIG_PATH` (full path)

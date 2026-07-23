@@ -56,6 +56,19 @@ pub struct TurnOpenAiCheckpoint {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OffshootOpenAiCheckpoint {
+    pub schema_version: u32,
+    pub offshoot_identity: String,
+    pub response_id: String,
+    pub previous_response_id: Option<String>,
+    pub provider_model_fingerprint: String,
+    pub request_compatibility_fingerprint: Option<String>,
+    #[serde(default)]
+    pub provider_input_tokens: Option<i64>,
+    pub created_at_unix_seconds: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BranchCheckpointRef {
     pub branch_id: String,
     pub checkpoint_id: String,
@@ -73,6 +86,8 @@ pub struct BranchMetadata {
     pub openai_checkpoint: Option<OpenAiCheckpoint>,
     #[serde(default)]
     pub turn_openai_checkpoints: Vec<TurnOpenAiCheckpoint>,
+    #[serde(default)]
+    pub offshoot_openai_checkpoints: Vec<OffshootOpenAiCheckpoint>,
     pub compaction_reset_pending: bool,
     pub last_main_turn_id: Option<String>,
     pub created_at_unix_seconds: i64,
@@ -131,6 +146,16 @@ pub struct CommitTurnParams {
     pub canonical_message_count: Option<usize>,
     pub canonical_prefix_hash: Option<String>,
     pub provider_output_items: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CommitOffshootCheckpointParams {
+    pub offshoot_identity: String,
+    pub provider_response_id: String,
+    pub previous_response_id: Option<String>,
+    pub provider_model_fingerprint: String,
+    pub request_compatibility_fingerprint: Option<String>,
+    pub provider_input_tokens: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -419,6 +444,7 @@ impl ConversationStateStore {
             fingerprints: params.fingerprints.clone(),
             openai_checkpoint: None,
             turn_openai_checkpoints: Vec::new(),
+            offshoot_openai_checkpoints: Vec::new(),
             compaction_reset_pending: false,
             last_main_turn_id: None,
             created_at_unix_seconds: now,
@@ -741,6 +767,50 @@ impl ConversationStateStore {
             },
         };
         self.append_ledger_event_unlocked(claude_session_id, branch_id, &event)?;
+        self.store_branch_unlocked(claude_session_id, &branch)?;
+        Ok(branch)
+    }
+
+    /// # Errors
+    /// Returns an error if the branch metadata cannot be updated.
+    pub fn commit_offshoot_openai_checkpoint(
+        &self,
+        claude_session_id: &str,
+        branch_id: &str,
+        params: &CommitOffshootCheckpointParams,
+    ) -> Result<BranchMetadata, StateError> {
+        self.with_session_lock(claude_session_id, |store| {
+            store.commit_offshoot_openai_checkpoint_unlocked(claude_session_id, branch_id, params)
+        })
+    }
+
+    fn commit_offshoot_openai_checkpoint_unlocked(
+        &self,
+        claude_session_id: &str,
+        branch_id: &str,
+        params: &CommitOffshootCheckpointParams,
+    ) -> Result<BranchMetadata, StateError> {
+        let mut branch = self.load_branch_unlocked(claude_session_id, branch_id)?;
+        let now = now_unix_seconds();
+        branch.updated_at_unix_seconds = now;
+        branch
+            .offshoot_openai_checkpoints
+            .retain(|checkpoint| checkpoint.offshoot_identity != params.offshoot_identity);
+        branch
+            .offshoot_openai_checkpoints
+            .push(OffshootOpenAiCheckpoint {
+                schema_version: TURN_OPENAI_CHECKPOINT_SCHEMA_VERSION,
+                offshoot_identity: params.offshoot_identity.clone(),
+                response_id: params.provider_response_id.clone(),
+                previous_response_id: params.previous_response_id.clone(),
+                provider_model_fingerprint: params.provider_model_fingerprint.clone(),
+                request_compatibility_fingerprint: params.request_compatibility_fingerprint.clone(),
+                provider_input_tokens: params.provider_input_tokens,
+                created_at_unix_seconds: now,
+            });
+        branch
+            .offshoot_openai_checkpoints
+            .sort_by_key(|checkpoint| checkpoint.created_at_unix_seconds);
         self.store_branch_unlocked(claude_session_id, &branch)?;
         Ok(branch)
     }
@@ -1512,6 +1582,46 @@ mod tests {
         assert_eq!(
             committed.turn_openai_checkpoints[0].provider_input_tokens,
             Some(123)
+        );
+    }
+
+    #[test]
+    fn commit_offshoot_checkpoint_does_not_replace_visible_branch_head() {
+        let root = temp_root("offshoot_checkpoint");
+        let store = ConversationStateStore::new(&root);
+        let branch = store
+            .create_branch(
+                "claude-session-1",
+                &BranchCreateParams {
+                    parent_branch_id: None,
+                    fork_ancestor_checkpoint: None,
+                    active_canonical_messages: None,
+                    fingerprints: BranchFingerprintSet::default(),
+                },
+            )
+            .expect("create branch");
+
+        let committed = store
+            .commit_offshoot_openai_checkpoint(
+                "claude-session-1",
+                &branch.branch_id,
+                &CommitOffshootCheckpointParams {
+                    offshoot_identity: "offshoot:classifier:gpt-5:default".to_string(),
+                    provider_response_id: "resp_offshoot".to_string(),
+                    previous_response_id: Some("resp_visible".to_string()),
+                    provider_model_fingerprint: "gpt-5".to_string(),
+                    request_compatibility_fingerprint: Some("fp-1".to_string()),
+                    provider_input_tokens: Some(42),
+                },
+            )
+            .expect("commit offshoot checkpoint");
+
+        assert_eq!(committed.current_checkpoint_id, None);
+        assert_eq!(committed.openai_checkpoint, None);
+        assert_eq!(committed.offshoot_openai_checkpoints.len(), 1);
+        assert_eq!(
+            committed.offshoot_openai_checkpoints[0].response_id,
+            "resp_offshoot"
         );
     }
 

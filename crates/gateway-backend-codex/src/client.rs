@@ -101,6 +101,10 @@ impl CodexBackendClient {
         &self.http
     }
 
+    pub fn evict_live_websocket_session(&self, session_key: &WebSocketSessionKey) {
+        self.websocket_sessions.evict(session_key);
+    }
+
     /// Sends a request to the Codex backend.
     ///
     /// # Errors

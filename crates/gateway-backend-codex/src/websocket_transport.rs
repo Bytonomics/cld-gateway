@@ -255,7 +255,7 @@ impl WebSocketSessionPool {
         }
     }
 
-    fn evict(&self, session_key: &WebSocketSessionKey) {
+    pub(crate) fn evict(&self, session_key: &WebSocketSessionKey) {
         self.sessions
             .lock()
             .expect("websocket session mutex poisoned")

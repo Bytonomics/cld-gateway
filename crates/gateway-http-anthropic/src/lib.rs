@@ -59,8 +59,7 @@ use crate::types::AnthropicMessagesRequest;
 use gateway_state::{
     BranchFingerprintSet, BranchMetadata, BranchSelectionAction, BranchSelectionInput,
     CommitOffshootCheckpointParams, CommitTurnParams, ConversationStateStore,
-    ConversationTurnScope, OpenAiCheckpoint, ReconcileSnapshotParams, ToolCallStore,
-    TurnOpenAiCheckpoint,
+    ConversationTurnScope, OpenAiCheckpoint, ToolCallStore, TurnOpenAiCheckpoint,
 };
 use sha2::{Digest, Sha256};
 
@@ -1365,6 +1364,8 @@ fn commit_unary_visible_turn(
                 turn_scope: prepared_branch.turn_scope,
                 turn_id: format!("turn_{}", Uuid::new_v4()),
                 fingerprints: prepared_branch.fingerprints.clone(),
+                active_canonical_messages: serde_json::to_value(&prepared_branch.active_messages)
+                    .ok(),
                 provider_response_id: result.decoded.response_id.clone(),
                 previous_response_id: result.request_previous_response_id.clone(),
                 provider_model_fingerprint: Some(flow.resolution.selected_backend_model.clone()),
@@ -1900,6 +1901,7 @@ async fn run_backend_unary(
         Err(err)
             if is_known_delta_decode_rejection(&err, commit_previous_response_id.as_deref()) =>
         {
+            invalidate_websocket_transport_session(state, websocket_transport_identity);
             log_delta_contract_violation(
                 request_id_str(request_id),
                 prepared_branch,
@@ -2094,6 +2096,18 @@ fn log_delta_contract_violation(
     }
 }
 
+fn invalidate_websocket_transport_session(
+    state: &AppState,
+    websocket_transport_identity: Option<&ConversationTransportIdentity>,
+) {
+    let Some(identity) = websocket_transport_identity else {
+        return;
+    };
+    state
+        .backend
+        .evict_live_websocket_session(&identity.websocket_session_key());
+}
+
 async fn send_backend_stream_strict_delta(
     state: &AppState,
     request_id: Option<String>,
@@ -2117,6 +2131,7 @@ async fn send_backend_stream_strict_delta(
             stream.websocket_chain_id,
         )),
         Err(err) if is_known_delta_rejection(&err, attempted_previous_response_id.as_deref()) => {
+            invalidate_websocket_transport_session(state, websocket_transport_identity);
             log_delta_contract_violation(
                 request_id.as_deref(),
                 prepared_branch,
@@ -2162,6 +2177,7 @@ async fn send_backend_stream_for_streaming(
             if is_known_delta_failure_event(&event, effective_previous_response_id.as_deref()) =>
         {
             if delta_failure_event_to_backend_error(&event).is_some() {
+                invalidate_websocket_transport_session(state, websocket_transport_identity);
                 log_delta_contract_violation(
                     request_id.as_deref(),
                     prepared_branch,
@@ -2930,6 +2946,8 @@ fn build_stream_commit_context(
             claude_session_id: prepared_branch.claude_session_id.clone(),
             branch_id: prepared_branch.branch.branch_id.clone(),
             fingerprints: prepared_branch.fingerprints.clone(),
+            active_canonical_messages: serde_json::to_value(&prepared_branch.active_messages)
+                .unwrap_or(serde_json::Value::Null),
             provider_model_fingerprint: flow.resolution.selected_backend_model.clone(),
             request_compatibility_fingerprint: transport.request_compatibility_fingerprint.clone(),
             previous_response_id: effective_previous_response_id,
@@ -2971,7 +2989,7 @@ struct PreparedConversationBranch {
     allow_zero_delta_start: bool,
     fingerprints: BranchFingerprintSet,
     active_messages: Vec<crate::types::AnthropicMessage>,
-    operational_context_messages: Vec<crate::types::AnthropicMessage>,
+    operational_context_messages: Vec<OperationalContextMessage>,
     delta_start_index: usize,
 }
 
@@ -2980,6 +2998,7 @@ impl PreparedConversationBranch {
         render_messages_with_operational_context(
             self.active_messages.clone(),
             self.operational_context_messages.clone(),
+            self.delta_start_index,
         )
     }
 
@@ -2992,15 +3011,22 @@ impl PreparedConversationBranch {
         render_messages_with_operational_context(
             durable_delta,
             self.operational_context_messages.clone(),
+            self.delta_start_index,
         )
     }
 }
 
 fn render_messages_with_operational_context(
     mut durable_messages: Vec<crate::types::AnthropicMessage>,
-    operational_context_messages: Vec<crate::types::AnthropicMessage>,
+    operational_context_messages: Vec<OperationalContextMessage>,
+    delta_start_index: usize,
 ) -> Vec<crate::types::AnthropicMessage> {
-    durable_messages.extend(operational_context_messages);
+    durable_messages.extend(
+        operational_context_messages
+            .into_iter()
+            .filter(|message| message.durable_messages_before >= delta_start_index)
+            .map(|message| message.message),
+    );
     durable_messages
 }
 
@@ -3018,7 +3044,7 @@ struct TransientBranchPrep {
     persistence_reason: &'static str,
     fingerprints: BranchFingerprintSet,
     active_messages: Vec<crate::types::AnthropicMessage>,
-    operational_context_messages: Vec<crate::types::AnthropicMessage>,
+    operational_context_messages: Vec<OperationalContextMessage>,
     delta_start_index: usize,
 }
 
@@ -3031,7 +3057,7 @@ struct DurableBranchPrep<'a> {
     persistence_reason: &'static str,
     fingerprints: BranchFingerprintSet,
     snapshot: &'a DurableBranchSnapshot,
-    operational_context_messages: Vec<crate::types::AnthropicMessage>,
+    operational_context_messages: Vec<OperationalContextMessage>,
 }
 
 struct ReconciledDurableBranchPrep<'a> {
@@ -3045,7 +3071,7 @@ struct ReconciledDurableBranchPrep<'a> {
     fingerprints: BranchFingerprintSet,
     snapshot: &'a DurableBranchSnapshot,
     compaction_command_seen: bool,
-    operational_context_messages: Vec<crate::types::AnthropicMessage>,
+    operational_context_messages: Vec<OperationalContextMessage>,
 }
 
 struct InitialDurableBranchPrep<'a> {
@@ -3056,7 +3082,7 @@ struct InitialDurableBranchPrep<'a> {
     fingerprints: BranchFingerprintSet,
     active_canonical_messages: serde_json::Value,
     compaction_command_seen: bool,
-    operational_context_messages: Vec<crate::types::AnthropicMessage>,
+    operational_context_messages: Vec<OperationalContextMessage>,
 }
 
 struct SideBranchPrep {
@@ -3066,7 +3092,7 @@ struct SideBranchPrep {
     turn_scope: ConversationTurnScope,
     fingerprints: BranchFingerprintSet,
     active_messages: Vec<crate::types::AnthropicMessage>,
-    operational_context_messages: Vec<crate::types::AnthropicMessage>,
+    operational_context_messages: Vec<OperationalContextMessage>,
     delta_start_index: usize,
 }
 
@@ -3081,12 +3107,18 @@ struct ConversationBranchAnalysis {
     active_canonical_messages: serde_json::Value,
     latest_context_branch: Option<BranchMetadata>,
     internal_reason: Option<&'static str>,
-    operational_context_messages: Vec<crate::types::AnthropicMessage>,
+    operational_context_messages: Vec<OperationalContextMessage>,
 }
 
 struct ClassifiedCanonicalMessages {
     durable_visible_messages: Vec<crate::types::AnthropicMessage>,
-    operational_context_messages: Vec<crate::types::AnthropicMessage>,
+    operational_context_messages: Vec<OperationalContextMessage>,
+}
+
+#[derive(Debug, Clone)]
+struct OperationalContextMessage {
+    message: crate::types::AnthropicMessage,
+    durable_messages_before: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3101,6 +3133,7 @@ struct StreamCommitContext {
     claude_session_id: String,
     branch_id: String,
     fingerprints: BranchFingerprintSet,
+    active_canonical_messages: serde_json::Value,
     provider_model_fingerprint: String,
     request_compatibility_fingerprint: String,
     previous_response_id: Option<String>,
@@ -3152,6 +3185,7 @@ fn maybe_commit_stream_completion(
             turn_scope: ConversationTurnScope::Main,
             turn_id: format!("turn_{}", Uuid::new_v4()),
             fingerprints: commit.fingerprints.clone(),
+            active_canonical_messages: Some(commit.active_canonical_messages.clone()),
             provider_response_id: response_id.clone(),
             previous_response_id: commit.previous_response_id.clone(),
             provider_model_fingerprint: Some(commit.provider_model_fingerprint.clone()),
@@ -3579,6 +3613,20 @@ fn select_transport(
         });
     }
 
+    if prepared_branch.commit_turn
+        && checkpoint.source == "visible_branch_head"
+        && !prepared_branch.active_messages.is_empty()
+        && prepared_branch
+            .incremental_backend_render_messages()
+            .is_empty()
+    {
+        return Ok(SelectedTransport {
+            mode: TransportMode::Full,
+            previous_response_id: None,
+            reason: "branch_bootstrap_uncheckpointed_snapshot_head",
+        });
+    }
+
     if prepared_branch.commit_turn && prepared_branch.delta_start_index == 0 {
         return Ok(SelectedTransport {
             mode: TransportMode::Full,
@@ -3769,7 +3817,7 @@ struct VisibleMainBranchPrep<'a> {
     compaction_context: CompactionRequestContext,
     fingerprints: BranchFingerprintSet,
     active_canonical_messages: serde_json::Value,
-    operational_context_messages: Vec<crate::types::AnthropicMessage>,
+    operational_context_messages: Vec<OperationalContextMessage>,
     latest_context_branch: Option<BranchMetadata>,
 }
 
@@ -3898,7 +3946,7 @@ fn prepare_transient_from_latest_context(
     persistence_reason: &'static str,
     fingerprints: BranchFingerprintSet,
     active_messages: Vec<crate::types::AnthropicMessage>,
-    operational_context_messages: Vec<crate::types::AnthropicMessage>,
+    operational_context_messages: Vec<OperationalContextMessage>,
 ) -> Option<PreparedConversationBranch> {
     latest_context_branch.map(|branch| {
         let delta_start_index = borrowed_context_delta_start_index(&branch, &active_messages);
@@ -3923,7 +3971,7 @@ fn prepare_side_from_latest_context(
     turn_scope: ConversationTurnScope,
     fingerprints: BranchFingerprintSet,
     active_messages: Vec<crate::types::AnthropicMessage>,
-    operational_context_messages: Vec<crate::types::AnthropicMessage>,
+    operational_context_messages: Vec<OperationalContextMessage>,
 ) -> Option<PreparedConversationBranch> {
     latest_context_branch.map(|branch| {
         let delta_start_index = borrowed_context_delta_start_index(&branch, &active_messages);
@@ -4005,18 +4053,6 @@ fn prepare_reconciled_durable_branch(
         &params.fingerprints,
         params.compaction_command_seen,
     )?;
-    let branch = params
-        .state
-        .conversation_state
-        .reconcile_branch_snapshot(
-            params.claude_session_id,
-            &branch.branch_id,
-            &ReconcileSnapshotParams {
-                messages: params.snapshot.active_canonical_messages.clone(),
-                fingerprints: params.fingerprints.clone(),
-            },
-        )
-        .ok()?;
     durable_prepared_branch(DurableBranchPrep {
         claude_session_id: params.claude_session_id,
         branch,
@@ -4088,8 +4124,10 @@ fn side_prepared_branch(params: SideBranchPrep) -> PreparedConversationBranch {
 }
 
 fn durable_prepared_branch(params: DurableBranchPrep<'_>) -> Option<PreparedConversationBranch> {
-    let active_messages =
-        deserialize_active_messages(params.branch.active_canonical_messages.as_ref())?;
+    let active_messages = deserialize_active_messages(Some(
+        &params.snapshot.active_canonical_messages,
+    ))
+    .or_else(|| deserialize_active_messages(params.branch.active_canonical_messages.as_ref()))?;
     Some(PreparedConversationBranch {
         claude_session_id: params.claude_session_id.to_string(),
         branch: params.branch,
@@ -4130,18 +4168,6 @@ fn prepare_initial_durable_branch(
         &params.fingerprints,
         params.compaction_command_seen,
     )?;
-    let branch = params
-        .state
-        .conversation_state
-        .reconcile_branch_snapshot(
-            params.claude_session_id,
-            &branch.branch_id,
-            &ReconcileSnapshotParams {
-                messages: params.active_canonical_messages,
-                fingerprints: params.fingerprints.clone(),
-            },
-        )
-        .ok()?;
     durable_prepared_branch(DurableBranchPrep {
         claude_session_id: params.claude_session_id,
         branch,
@@ -4151,7 +4177,7 @@ fn prepare_initial_durable_branch(
         persistence_reason: "initial_or_selected_durable_branch",
         fingerprints: params.fingerprints,
         snapshot: &DurableBranchSnapshot {
-            active_canonical_messages: serde_json::Value::Null,
+            active_canonical_messages: params.active_canonical_messages,
             delta_start_index: 0,
             allow_zero_delta_start: false,
         },
@@ -4270,14 +4296,19 @@ fn classify_canonical_messages(
 ) -> ClassifiedCanonicalMessages {
     let mut durable_visible_messages = Vec::new();
     let mut operational_context_messages = Vec::new();
+    let mut durable_messages_before = 0usize;
 
     for message in messages {
         if is_turn_level_system_message(&message) {
-            operational_context_messages.push(message);
+            operational_context_messages.push(OperationalContextMessage {
+                message,
+                durable_messages_before,
+            });
             continue;
         }
         if let Some(message) = durable_canonical_message(message) {
             durable_visible_messages.push(message);
+            durable_messages_before += 1;
         }
     }
 
@@ -6015,6 +6046,10 @@ mod messages_tests {
                     turn_scope: ConversationTurnScope::Main,
                     turn_id: "seed-turn".to_string(),
                     fingerprints,
+                    active_canonical_messages: Some(
+                        serde_json::to_value(&request_messages)
+                            .expect("serialize request messages"),
+                    ),
                     provider_response_id: Some("resp_prev".to_string()),
                     previous_response_id: Some("resp_seed".to_string()),
                     provider_model_fingerprint: Some(DEFAULT_BACKEND_MODEL.to_string()),
@@ -6186,7 +6221,7 @@ mod messages_tests {
     }
 
     #[test]
-    fn operational_system_messages_are_preserved_for_backend_instructions() {
+    fn turn_level_system_messages_are_preserved_for_backend_instructions() {
         let req = test_anthropic_request(vec![
             AnthropicMessage {
                 role: "user".to_string(),
@@ -6203,6 +6238,7 @@ mod messages_tests {
         let render_messages = super::render_messages_with_operational_context(
             classified.durable_visible_messages,
             classified.operational_context_messages,
+            0,
         );
         let render_req = super::request_with_messages(&req, render_messages);
         let translated =
@@ -6217,6 +6253,46 @@ mod messages_tests {
         );
         assert!(!input.contains("\"role\":\"system\""));
         assert!(!input.contains("Runtime instruction from Claude Code."));
+    }
+
+    #[test]
+    fn only_suffix_transient_operational_messages_are_replayed_on_delta() {
+        let render_messages = super::render_messages_with_operational_context(
+            vec![AnthropicMessage {
+                role: "user".to_string(),
+                content: AnthropicContent::Text("new user request".to_string()),
+            }],
+            vec![
+                super::OperationalContextMessage {
+                    message: AnthropicMessage {
+                        role: "system".to_string(),
+                        content: AnthropicContent::Text(
+                            "The task tools haven't been used recently. historical".to_string(),
+                        ),
+                    },
+                    durable_messages_before: 1,
+                },
+                super::OperationalContextMessage {
+                    message: AnthropicMessage {
+                        role: "system".to_string(),
+                        content: AnthropicContent::Text(
+                            "The user sent a new message while you were working:\nnew user request"
+                                .to_string(),
+                        ),
+                    },
+                    durable_messages_before: 3,
+                },
+            ],
+            3,
+        );
+
+        assert_eq!(render_messages.len(), 2);
+        assert_eq!(render_messages[0].role, "user");
+        assert_eq!(render_messages[1].role, "system");
+        assert!(
+            super::anthropic_message_text(&render_messages[1])
+                .contains("The user sent a new message while you were working:")
+        );
     }
 
     #[test]
@@ -9465,6 +9541,9 @@ mod transport_selection_tests {
             claude_session_id: "session-1".to_string(),
             branch_id: "branch-1".to_string(),
             fingerprints: gateway_state::BranchFingerprintSet::default(),
+            active_canonical_messages: serde_json::json!([
+                {"role":"user","content":"hello"}
+            ]),
             provider_model_fingerprint: "gpt-5".to_string(),
             request_compatibility_fingerprint: "fp-1".to_string(),
             previous_response_id: Some("resp_stable".to_string()),

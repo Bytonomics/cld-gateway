@@ -138,6 +138,7 @@ pub struct CommitTurnParams {
     pub turn_scope: ConversationTurnScope,
     pub turn_id: String,
     pub fingerprints: BranchFingerprintSet,
+    pub active_canonical_messages: Option<serde_json::Value>,
     pub provider_response_id: Option<String>,
     pub previous_response_id: Option<String>,
     pub provider_model_fingerprint: Option<String>,
@@ -700,6 +701,9 @@ impl ConversationStateStore {
     ) -> Result<BranchMetadata, StateError> {
         let mut branch = self.load_branch_unlocked(claude_session_id, branch_id)?;
         branch.fingerprints = params.fingerprints.clone();
+        if let Some(active_canonical_messages) = params.active_canonical_messages.clone() {
+            branch.active_canonical_messages = Some(active_canonical_messages);
+        }
         let now = now_unix_seconds();
         branch.updated_at_unix_seconds = now;
         if matches!(params.turn_scope, ConversationTurnScope::Main) {
@@ -1502,6 +1506,7 @@ mod tests {
                         last_user_message_hash: Some("user-1".to_string()),
                         ..BranchFingerprintSet::default()
                     },
+                    active_canonical_messages: None,
                     provider_response_id: None,
                     previous_response_id: None,
                     provider_model_fingerprint: None,
@@ -1550,6 +1555,7 @@ mod tests {
                         last_user_message_hash: Some("user-2".to_string()),
                         ..BranchFingerprintSet::default()
                     },
+                    active_canonical_messages: None,
                     provider_response_id: Some("resp_2".to_string()),
                     previous_response_id: Some("resp_1".to_string()),
                     provider_model_fingerprint: Some("gpt-5.4".to_string()),
@@ -1650,6 +1656,7 @@ mod tests {
                     turn_scope: ConversationTurnScope::Main,
                     turn_id: "turn-1".to_string(),
                     fingerprints: BranchFingerprintSet::default(),
+                    active_canonical_messages: None,
                     provider_response_id: Some("resp_2".to_string()),
                     previous_response_id: Some("resp_1".to_string()),
                     provider_model_fingerprint: Some("gpt-5".to_string()),
@@ -1776,6 +1783,7 @@ mod tests {
                         branch_state_hash: Some("state-2".to_string()),
                         ..BranchFingerprintSet::default()
                     },
+                    active_canonical_messages: None,
                     provider_response_id: Some("resp_after".to_string()),
                     previous_response_id: None,
                     provider_model_fingerprint: Some("gpt-5".to_string()),
@@ -1905,6 +1913,7 @@ mod tests {
                         branch_state_hash: Some("state-2".to_string()),
                         ..BranchFingerprintSet::default()
                     },
+                    active_canonical_messages: None,
                     provider_response_id: Some("resp_1".to_string()),
                     previous_response_id: None,
                     provider_model_fingerprint: Some("gpt-5".to_string()),
@@ -1947,6 +1956,7 @@ mod tests {
                     turn_scope: ConversationTurnScope::Main,
                     turn_id: "turn-1".to_string(),
                     fingerprints: BranchFingerprintSet::default(),
+                    active_canonical_messages: None,
                     provider_response_id: Some("resp_1".to_string()),
                     previous_response_id: None,
                     provider_model_fingerprint: Some("gpt-5".to_string()),
@@ -2051,6 +2061,7 @@ mod tests {
                     turn_scope: ConversationTurnScope::Main,
                     turn_id: "turn-1".to_string(),
                     fingerprints: fingerprints.clone(),
+                    active_canonical_messages: None,
                     provider_response_id: Some("resp_1".to_string()),
                     previous_response_id: None,
                     provider_model_fingerprint: Some("gpt-5".to_string()),
@@ -2126,6 +2137,7 @@ mod tests {
                     turn_scope: ConversationTurnScope::Main,
                     turn_id: "turn-1".to_string(),
                     fingerprints: fingerprints.clone(),
+                    active_canonical_messages: None,
                     provider_response_id: Some("resp_1".to_string()),
                     previous_response_id: None,
                     provider_model_fingerprint: Some("gpt-5".to_string()),

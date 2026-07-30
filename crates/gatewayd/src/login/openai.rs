@@ -18,6 +18,11 @@ pub async fn login() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
+/// Sign in with `ChatGPT` OAuth without showing the login selection menu.
+pub async fn login_with_chatgpt_only() -> Result<(), Box<dyn std::error::Error>> {
+    login_with_chatgpt().await
+}
+
 /// Sign in with `ChatGPT` OAuth (browser-based)
 async fn login_with_chatgpt() -> Result<(), Box<dyn std::error::Error>> {
     match gateway_auth_codex::login::login_with_chatgpt_and_write_default_auth_json().await {

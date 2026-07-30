@@ -87,9 +87,9 @@ fn parse_command_from_args(args: &[String]) -> Result<Command, Box<dyn std::erro
 }
 
 async fn run_serve() -> Result<(), Box<dyn std::error::Error>> {
-    // Non-interactive auth preflight: attempt refresh if auth exists, but do not block startup.
-    // For now, OpenAI is the default vendor in serve mode.
-    auth_preflight_for_serve(Vendor::OpenAI).await;
+    // OpenAI-backed serve mode is not usable without valid gateway auth.
+    // Reuse the existing ChatGPT login flow during startup instead of letting the first request fail.
+    auth_preflight_for_serve(Vendor::OpenAI).await?;
 
     let gateway_config_path = default_gateway_config_path();
     info!(
@@ -112,16 +112,17 @@ async fn run_serve() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn auth_preflight_for_serve(vendor: Vendor) {
+async fn auth_preflight_for_serve(vendor: Vendor) -> Result<(), Box<dyn std::error::Error>> {
     match vendor {
         Vendor::OpenAI => auth_preflight_openai().await,
         Vendor::Gemini => {
             info!("Gemini auth is not yet configured for serve mode; skipping preflight");
+            Ok(())
         }
     }
 }
 
-async fn auth_preflight_openai() {
+async fn auth_preflight_openai() -> Result<(), Box<dyn std::error::Error>> {
     let auth_status = gateway_auth_codex::load_gateway_auth_status_default_path();
 
     match auth_status {
@@ -134,20 +135,33 @@ async fn auth_preflight_openai() {
                         "gateway auth health check succeeded for account_id={}",
                         snapshot.account_id
                     );
+                    Ok(())
                 }
                 Err(err) => {
-                    warn!("gateway auth health check failed; continuing without auth: {err}");
+                    warn!("gateway auth health check failed; re-running login flow: {err}");
+                    login::openai::login_with_chatgpt_only().await?;
+                    info!("gateway login completed during serve preflight");
+                    Ok(())
                 }
             }
         }
         Ok(Some(status)) => {
-            warn!("gateway auth present but incomplete: {status:?}; continuing without auth");
+            warn!("gateway auth present but incomplete: {status:?}; launching login flow");
+            login::openai::login_with_chatgpt_only().await?;
+            info!("gateway login completed during serve preflight");
+            Ok(())
         }
         Ok(None) => {
-            warn!("gateway auth not found; continuing without auth");
+            warn!("gateway auth not found; launching login flow");
+            login::openai::login_with_chatgpt_only().await?;
+            info!("gateway login completed during serve preflight");
+            Ok(())
         }
         Err(err) => {
-            warn!("gateway auth check failed: {err}; continuing without auth");
+            warn!("gateway auth check failed: {err}; launching login flow");
+            login::openai::login_with_chatgpt_only().await?;
+            info!("gateway login completed during serve preflight");
+            Ok(())
         }
     }
 }

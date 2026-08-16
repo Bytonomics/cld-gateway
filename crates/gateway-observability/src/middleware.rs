@@ -2,9 +2,9 @@
 
 use crate::exchange::{
     CapturedBody, CapturedBodyData, ExchangeMeta, ExchangeRecord, HttpRequestRecord,
-    HttpResponseRecord,
+    HttpResponseRecord, format_exchange_record,
 };
-use crate::paths::default_exchange_log_path;
+use crate::paths::{default_exchange_log_path, default_exchange_text_log_path};
 use crate::redact::{redact_headers, redact_json_keys};
 use axum::body::{Body, to_bytes};
 use axum::middleware::Next;
@@ -27,12 +27,14 @@ const REQUEST_BODY_BUFFER_LIMIT_BYTES: usize = 50 * 1024 * 1024;
 #[derive(Clone, Debug)]
 pub struct CaptureConfig {
     pub log_path: PathBuf,
+    pub text_log_path: PathBuf,
 }
 
 impl Default for CaptureConfig {
     fn default() -> Self {
         Self {
             log_path: default_exchange_log_path(),
+            text_log_path: default_exchange_text_log_path(),
         }
     }
 }
@@ -90,6 +92,7 @@ pub async fn capture_http_exchange(
     // Log after both request and response bodies are fully consumed (or dropped), so we can
     // capture bodies up to the limit *without* breaking downstream processing for oversized bodies.
     let log_path = config.log_path.clone();
+    let text_log_path = config.text_log_path.clone();
     tokio::spawn(async move {
         let response_body_capture = response_body_done.await.unwrap_or(CapturedBody {
             content_type: None,
@@ -130,6 +133,7 @@ pub async fn capture_http_exchange(
         };
 
         let _ = append_exchange_record(&log_path, &exchange);
+        let _ = append_human_readable_exchange_record(&text_log_path, &exchange);
     });
 
     res
@@ -246,6 +250,27 @@ pub fn append_exchange_record(path: &Path, record: &ExchangeRecord) -> std::io::
     Ok(())
 }
 
+/// Appends one exchange record in a multiline format intended for human reading.
+///
+/// # Errors
+///
+/// Returns an error when the parent directory cannot be created, the file cannot be opened,
+/// or the formatted record cannot be written.
+pub fn append_human_readable_exchange_record(
+    path: &Path,
+    record: &ExchangeRecord,
+) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    file.write_all(format_exchange_record(record).as_bytes())?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{BODY_LIMIT_BYTES, CaptureConfig, build_captured_body, capture_http_exchange};
@@ -275,6 +300,7 @@ mod tests {
         let log_path = dir.path().join("http-exchange.jsonl");
         let capture_config = CaptureConfig {
             log_path: log_path.clone(),
+            text_log_path: dir.path().join("http-exchange.log"),
         };
         let app = Router::new()
             .fallback(|| async { StatusCode::NOT_FOUND })

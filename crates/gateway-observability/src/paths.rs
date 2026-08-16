@@ -10,6 +10,20 @@ pub fn default_exchange_log_path() -> PathBuf {
     )
 }
 
+#[must_use]
+pub fn default_exchange_text_log_path() -> PathBuf {
+    if let Ok(path) = std::env::var("CLD_GATEWAY_TEXT_LOG_PATH") {
+        return PathBuf::from(path);
+    }
+
+    if let Ok(home) = std::env::var("GATEWAY_HOME") {
+        return PathBuf::from(home).join("logs").join("http-exchange.log");
+    }
+
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    home.join(".gateway").join("logs").join("http-exchange.log")
+}
+
 fn resolve_exchange_log_path(
     explicit_log_path: Option<&str>,
     gateway_home: Option<&str>,
@@ -57,6 +71,15 @@ mod tests {
         assert!(
             result.to_string_lossy().ends_with("http-exchange.jsonl"),
             "expected http-exchange.jsonl suffix: {result:?}"
+        );
+    }
+
+    #[test]
+    fn text_log_path_uses_readable_log_suffix() {
+        let result = default_exchange_text_log_path();
+        assert!(
+            result.to_string_lossy().ends_with("http-exchange.log"),
+            "expected readable exchange log suffix: {result:?}"
         );
     }
 }

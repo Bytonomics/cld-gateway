@@ -4,6 +4,7 @@ use gateway_observability::exchange::{
     CapturedBody, CapturedBodyData, ExchangeRecord, HttpRequestRecord, HttpResponseRecord,
 };
 use gateway_observability::middleware::append_exchange_record;
+use gateway_observability::middleware::append_human_readable_exchange_record;
 use gateway_observability::redact::{redact_headers, redact_json_keys};
 use http::HeaderMap;
 use std::path::PathBuf;
@@ -105,4 +106,50 @@ fn append_exchange_record_writes_one_json_object_per_line() {
     for line in lines {
         let _: serde_json::Value = serde_json::from_str(line).expect("each line is json");
     }
+}
+
+#[test]
+fn append_human_readable_exchange_record_writes_structured_multiline_text() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("http-exchange.log");
+    let record = ExchangeRecord {
+        request_id: "req-readable".to_string(),
+        started_at_unix_ms: 10,
+        duration_ms: 3,
+        meta: None,
+        request: HttpRequestRecord {
+            method: "POST".to_string(),
+            uri: "/v1/messages".to_string(),
+            headers: std::collections::BTreeMap::new(),
+            body: CapturedBody {
+                content_type: Some("application/json".to_string()),
+                bytes_captured: 15,
+                truncated: false,
+                data: CapturedBodyData::Json {
+                    value: serde_json::json!({"messages": [{"role": "user", "content": "hello"}]}),
+                },
+            },
+        },
+        response: HttpResponseRecord {
+            status: 200,
+            headers: std::collections::BTreeMap::new(),
+            body: CapturedBody {
+                content_type: Some("application/json".to_string()),
+                bytes_captured: 2,
+                truncated: false,
+                data: CapturedBodyData::Text {
+                    value: "ok".to_string(),
+                },
+            },
+        },
+    };
+
+    append_human_readable_exchange_record(&path, &record).expect("write readable log");
+    let contents = std::fs::read_to_string(path).expect("read readable log");
+    assert!(contents.contains("=== HTTP exchange req-readable ==="));
+    assert!(contents.contains("request.method: POST"));
+    assert!(contents.contains("request.uri: /v1/messages"));
+    assert!(contents.contains("request.body.json:"));
+    assert!(contents.contains("\"role\": \"user\""));
+    assert!(contents.contains("response.status: 200"));
 }

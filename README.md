@@ -4,6 +4,19 @@ An Anthropic-compatible HTTP proxy that routes requests through the ChatGPT/Code
 
 ---
 
+## Why another Proxy?
+
+Because it's not just a proxy. The basic difference in how Claude Code works v/s how Codex works is this:
+
+1. Claude Code sends all the messages it has in the session in every turn. So if you are at 800k tokens in a session, your next message sends 800k tokens
+2. Codex utilises previous_message_id to just send the current message and ties it to the previous message server side.
+
+
+Now maybe Anthropic does their own caching at their end, but if we send all their messages to OpenAI on each turn like many other "just a proxy" do, we are going to blow up our ChatGPT sub token usage.
+
+We don't do that here. (In most cases, that is. There are gaps. It's not yet perfect, but it still saves you a lot of tokens)
+
+
 ## Requirements
 
 - Install `claude` first.
@@ -31,7 +44,7 @@ brew tap bytonomics/tap
 brew install cld-gateway
 ```
 
-### 3. Create the user configuration
+### 3. Complete the setup
 
 Run setup once:
 
@@ -55,7 +68,7 @@ cld-gateway login openai
 brew services start cld-gateway
 ```
 
-The service uses `~/.gateway/config.yml` and listens on the address in that file.
+The service uses `~/.gateway/config.yml` and listens on the address in that file. (You can leave the defaults)
 
 ### 6. Start Claude Code through the Gateway
 
@@ -65,7 +78,7 @@ Use the normal wrapper:
 cldg
 ```
 
-Use `clddg` when Claude Code must skip permission prompts:
+Use `clddg` when Claude Code must skip permission prompts (YOLO):
 
 ```sh
 clddg
@@ -78,17 +91,6 @@ brew services stop cld-gateway
 brew services restart cld-gateway
 brew services list
 ```
-
-## Alternative: run Gateway directly
-
-Use this flow for development or manual debugging. Do not start the Homebrew service at the same time.
-
-```sh
-cld-gateway serve
-```
-
-This command uses the Gateway config selected by the environment and listens on its configured address.
-Run `cld-gateway login openai` first if the auth file does not exist or the token is invalid.
 
 ## Other installation methods
 
@@ -110,14 +112,27 @@ Download a binary from the [GitHub Releases page](https://github.com/Bytonomics/
 
 Verify the checksum with `cld-gateway-package_SHA256SUMS`.
 
+
+## Alternative: run Gateway directly
+
+Use this flow for development or manual debugging. Do not start the Homebrew service at the same time.
+
+```sh
+cld-gateway serve
+```
+
+This command uses the Gateway config selected by the environment and listens on its configured address.
+Run `cld-gateway login openai` first if the auth file does not exist or the token is invalid.
+
+
 ## Installed files
 
 The package contains:
 
-- `cld-gateway`
-- `cld-gateway-sh`
-- `cldg`
-- `clddg`
+- `cld-gateway` - the binary
+- `cld-gateway-sh` - a wrapper
+- `cldg` - a shell function to run Claude Code with gateway
+- `clddg` - a shell function to run Claude Code with gateway in YOLO mode
 - Gateway config and Claude Code settings files
 
 ---
@@ -175,7 +190,7 @@ subscription usage and GPT-5.6 Sol is limited to 272K there.
 | No | Config                                | Value / example             | Behavior                                                                                      | How to choose                                                                                    |
 |----|---------------------------------------|-----------------------------|-----------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------|
 | 1  | `providers.openai.default_model`      | Purpose                     | Backend model used when a requested model is listed in `providers.openai.unsupported_models`. | This is the compatibility fallback, not a general model alias system.                            |
-|    |                                       | `gpt-5.6-sol`               | Uses the current flagship backend model as the fallback.                                      | Use when quality/default behavior matters more than cost.                                        |
+|    |                                       | `gpt-5.6-sol`               | Uses the current flagship backend model as the fallback.                                      | Use when quality/default behaviour matters more than cost.                                        |
 |    |                                       | `gpt-5.6-terra`             | Uses the balanced everyday backend model as the fallback.                                     | Use when you want strong quality without paying for the flagship every time.                     |
 |    |                                       | `gpt-5.4`                   | Uses the experimental long-context Codex model as the fallback.                               | Use when long context matters more than using the newest GPT-5.6 family.                         |
 |    |                                       | `gpt-5.5`                   | Uses the previous-generation frontier model as the fallback.                                   | Use when you want a familiar, conservative default that is still strong.                         |

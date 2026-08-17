@@ -6,15 +6,19 @@ An Anthropic-compatible HTTP proxy that routes requests through the ChatGPT/Code
 
 ## Why another Proxy?
 
-Because it's not just a proxy. The basic difference in how Claude Code works v/s how Codex works is this:
+Because it's not just a proxy. And no one likes to burn tokens if you don't have to.
+
+The basic difference in how Claude Code works v/s how Codex works is this:
 
 1. Claude Code sends all the messages it has in the session in every turn. So if you are at 800k tokens in a session, your next message sends 800k tokens
-2. Codex utilises previous_message_id to just send the current message and ties it to the previous message server side.
+2. Codex utilises previous_message_id to just send the current message and ties it to the previous message server-side.
 
 
-Now maybe Anthropic does their own caching at their end, but if we send all their messages to OpenAI on each turn like many other "just a proxy" do, we are going to blow up our ChatGPT sub token usage.
+Maybe Anthropic does their own caching server-side, but if we send all their messages to OpenAI on each turn like many other "just a proxy" do, we are going to blow up our ChatGPT sub token usage.
 
 We don't do that here. (In most cases, that is. There are gaps. It's not yet perfect, but it still saves you a lot of tokens)
+
+cld-gateway is built to maximise caching at OpenAI's end.
 
 
 ## Requirements

@@ -6,19 +6,91 @@ An Anthropic-compatible HTTP proxy that routes requests through the ChatGPT/Code
 
 ## Requirements
 
-- `claude` must already be installed and available on your `PATH`
+- Install `claude` first.
+- Make sure `claude` is available on your `PATH`.
 
-## Installation
+## Quick start on a new MacBook
 
-### Homebrew tap
+Use this sequence for a packaged installation.
+
+### 1. Install the prerequisites
+
+- Install Homebrew.
+- Install Claude Code.
+- Make sure both `brew` and `claude` work in a new terminal.
+
+```sh
+brew --version
+claude --version
+```
+
+### 2. Install the Gateway package
 
 ```sh
 brew tap bytonomics/tap
 brew install cld-gateway
+```
 
+### 3. Create the user configuration
+
+Run setup once:
+
+```sh
 cld-gateway-sh setup
 cld-gateway-sh doctor
 ```
+
+The setup command creates the Gateway files in `~/.gateway` and the Claude Code settings in
+`~/.claude_gateway/settings.json`.
+
+### 4. Log in to OpenAI
+
+```sh
+cld-gateway login openai
+```
+
+### 5. Start the Gateway service
+
+```sh
+brew services start cld-gateway
+```
+
+The service uses `~/.gateway/config.yml` and listens on the address in that file.
+
+### 6. Start Claude Code through the Gateway
+
+Use the normal wrapper:
+
+```sh
+cldg
+```
+
+Use `clddg` when Claude Code must skip permission prompts:
+
+```sh
+clddg
+```
+
+Manage the Homebrew service with these commands:
+
+```sh
+brew services stop cld-gateway
+brew services restart cld-gateway
+brew services list
+```
+
+## Alternative: run Gateway directly
+
+Use this flow for development or manual debugging. Do not start the Homebrew service at the same time.
+
+```sh
+cld-gateway serve
+```
+
+This command uses the Gateway config selected by the environment and listens on its configured address.
+Run `cld-gateway login openai` first if the auth file does not exist or the token is invalid.
+
+## Other installation methods
 
 ### Shell installer
 
@@ -26,7 +98,7 @@ cld-gateway-sh doctor
 curl -fsSL https://github.com/Bytonomics/cld-gateway/releases/latest/download/install.sh | sh
 ```
 
-Or with version pinning:
+Pin a release when needed:
 
 ```sh
 curl -fsSL https://github.com/Bytonomics/cld-gateway/releases/latest/download/install.sh | sh -s -- --release 1.0.1
@@ -34,84 +106,19 @@ curl -fsSL https://github.com/Bytonomics/cld-gateway/releases/latest/download/in
 
 ### Direct download
 
-Download pre-built binaries from the [GitHub Releases page](https://github.com/Bytonomics/cld-gateway/releases).
+Download a binary from the [GitHub Releases page](https://github.com/Bytonomics/cld-gateway/releases).
 
-Verify checksums using `cld-gateway-package_SHA256SUMS`, which is published alongside every release.
+Verify the checksum with `cld-gateway-package_SHA256SUMS`.
 
----
+## Installed files
 
-## Installation includes
+The package contains:
 
-- the `cld-gateway` daemon binary
-- the `cld-gateway-sh` wrapper (for setup and diagnostics)
-- `cldg` and `clddg` wrapper commands (for running Claude Code with gateway settings)
-- packaged config and settings files
-
-## Post-installation setup
-
-After installation, complete the user-home configuration:
-
-This is a mandatory step to be able to use the `cld-gateway` daemon. I had to make it a separate step, because I needed to make changes outside the homebrew sandbox, and brew post install makes it really difficult.
-
-```sh
-cld-gateway-sh setup
-```
-
-This step:
-
-- Installs runtime config to `~/.gateway/config.yml`
-- Installs Claude settings to `~/.claude_gateway/settings.json`
-- Creates directory-style entries under `~/.claude` if missing (e.g. `agents`, `commands`, `skills`, `hooks`)
-- Creates symlinks in `~/.claude_gateway` pointing to those entries from `~/.claude`
-- File-style entries (`.claude.json`, `CLAUDE.md`) are only symlinked if they already exist
-- Installs translated Codex command assets to `~/.codex_gateway/commands/` (e.g. `commands/codex/status.md`)
-
-To verify the installation completed successfully:
-
-```sh
-cld-gateway-sh doctor
-```
-
----
-
-## Homebrew service setup
-
-```sh
-brew services start cld-gateway
-brew services stop cld-gateway
-brew services restart cld-gateway
-brew services list
-```
-
-The Homebrew service runs `cld-gateway serve` and uses `~/.gateway/config.yml` as its runtime config file.
-
----
-
-## Quick start
-
-### 1. Log in (one-time setup)
-
-```sh
-cld-gateway login
-```
-
-For explicit vendor selection:
-
-```sh
-cld-gateway login openai
-cld-gateway login gemini
-```
-
-### 2. Start the daemon
-
-```sh
-cld-gateway serve
-```
-
-The daemon listens on the address configured in `~/.gateway/config.yml`. If no listen address is configured, it defaults
-to `127.0.0.1:6483` and automatically handles token refresh.
-
-If you see an auth error, run `cld-gateway login` again.
+- `cld-gateway`
+- `cld-gateway-sh`
+- `cldg`
+- `clddg`
+- Gateway config and Claude Code settings files
 
 ---
 

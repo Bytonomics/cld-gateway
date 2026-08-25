@@ -21,12 +21,17 @@ We don't do that here. (In most cases, that is. There are gaps. It's not yet per
 cld-gateway is built to maximise caching at OpenAI's end.
 
 
+## Last tested Claude Code version:
+
+2.1.220
+
+
 ## Requirements
 
 - Install `claude` first.
 - Make sure `claude` is available on your `PATH`.
 
-## Quick start on a new MacBook
+## Quick start on a MacBook
 
 Use this sequence for a packaged installation.
 
@@ -45,6 +50,7 @@ claude --version
 
 ```sh
 brew tap bytonomics/tap
+brew trust --tap bytonomics/tap
 brew install cld-gateway
 ```
 

@@ -23,7 +23,10 @@ cld-gateway is built to maximise caching at OpenAI's end.
 
 ## Last tested Claude Code version:
 
-2.1.220
+|   Version   |                Tested?                           |
+|-------------|--------------------------------------------------|
+|   2.1.251   | Sanity testing done for the latest version.      |
+|   2.1.220   | Yupp..!! Works nicely. I am using it regularly.  |
 
 
 ## Requirements

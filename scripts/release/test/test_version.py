@@ -18,31 +18,15 @@ def test_read_workspace_version_returns_semver() -> None:
     )
 
 
-def test_read_workspace_version_matches_cargo_toml() -> None:
-    cargo_toml = REPO_ROOT / "Cargo.toml"
-    content = cargo_toml.read_text(encoding="utf-8")
+def test_read_workspace_version_matches_version_file() -> None:
+    version_file = REPO_ROOT / "VERSION"
+    expected = version_file.read_text(encoding="utf-8").strip()
 
-    # Extract version from [workspace.package] section manually.
-    in_section = False
-    expected: str | None = None
-    for line in content.splitlines():
-        stripped = line.strip()
-        if stripped == "[workspace.package]":
-            in_section = True
-            continue
-        if in_section and stripped.startswith("["):
-            break
-        if in_section:
-            m = re.match(r'^version\s*=\s*"([^"]+)"', stripped)
-            if m:
-                expected = m.group(1)
-                break
-
-    assert expected is not None, "Could not find version in [workspace.package]"
+    assert expected, "VERSION file is empty"
     assert read_workspace_version() == expected
 
 
 if __name__ == "__main__":
     test_read_workspace_version_returns_semver()
-    test_read_workspace_version_matches_cargo_toml()
+    test_read_workspace_version_matches_version_file()
     print("All tests passed.")

@@ -4,9 +4,22 @@
 
 .idea/
 
-docs/
+vendor/
+
+bin/
 
 __pycache__/
 *.pyc
 
 .DS_Store
+
+**/.claude/scheduled_tasks.lock
+**/.claude/scheduled_tasks.json
+**/.claude/routines/.state/
+**/.claude/worktrees/
+**/.claude/checkpoints/
+**/.claude/mailbox/
+**/.claude/agent-registry.json
+**/.claude/agent-memory-local
+**/.claude/first-run
+**/.claude/assistant-daemon-state.json

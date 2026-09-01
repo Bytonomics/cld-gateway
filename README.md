@@ -151,7 +151,7 @@ network:
   allowed_hosts: [ ]
 ```
 
-The values below are loaded from YAML into typed Rust config structs unless marked as an environment variable. Omitted
+The values below are loaded from YAML into typed Go config structs unless marked as an environment variable. Omitted
 YAML fields use code defaults. The packaged Homebrew config can still choose different values, such as
 `network.listen_addr: 127.0.0.1:6473`.
 

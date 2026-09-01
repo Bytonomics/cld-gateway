@@ -40,13 +40,13 @@ jobs:
 
           # 2. Extract versions.
           tag_ver="${GITHUB_REF_NAME#cld-gateway-v}"
-          cargo_ver="$(grep -m1 '^version' Cargo.toml | sed -E 's/version = "([^"]+)".*/\1/')"
+          repo_ver="$(tr -d '[:space:]' < VERSION)"
 
           # 3. Compare.
-          [[ "${tag_ver}" == "${cargo_ver}" ]] \
-            || { echo "Tag version ${tag_ver} does not match Cargo.toml version ${cargo_ver}"; exit 1; }
+          [[ "${tag_ver}" == "${repo_ver}" ]] \
+            || { echo "Tag version ${tag_ver} does not match VERSION file ${repo_ver}"; exit 1; }
 
-          echo "Tag and Cargo.toml agree on version ${tag_ver}"
+          echo "Tag and VERSION file agree on version ${tag_ver}"
           echo "::endgroup::"
 
   build:
@@ -61,12 +61,20 @@ jobs:
         include:
           - target: aarch64-apple-darwin
             runner: macos-latest
+            goos: darwin
+            goarch: arm64
           - target: x86_64-apple-darwin
             runner: macos-latest
+            goos: darwin
+            goarch: amd64
           - target: aarch64-unknown-linux-musl
             runner: ubuntu-latest
+            goos: linux
+            goarch: arm64
           - target: x86_64-unknown-linux-musl
             runner: ubuntu-latest
+            goos: linux
+            goarch: amd64
 
     steps:
       - uses: actions/checkout@v4
@@ -79,33 +87,20 @@ jobs:
           enable-cache: true
           cache-dependency-glob: "scripts/release/pyproject.toml"
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Go toolchain
+        uses: actions/setup-go@v5
         with:
-          targets: ${{ matrix.target }}
+          go-version-file: go.mod
 
-      - name: Install Zig (musl targets)
-        if: ${{ contains(matrix.target, 'linux-musl') }}
-        uses: mlugg/setup-zig@v2.2.1
-        with:
-          version: 0.14.0
-
-      - name: Install cargo-zigbuild (musl targets)
-        if: ${{ contains(matrix.target, 'linux-musl') }}
+      - name: Build binary
         shell: bash
-        run: cargo install cargo-zigbuild --locked
-
-      - name: Build binary (macOS)
-        if: ${{ runner.os == 'macOS' }}
-        shell: bash
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
         run: |
-          cargo build --locked --release --target ${{ matrix.target }} -p gatewayd --bin cld-gateway
-
-      - name: Build binary (Linux musl)
-        if: ${{ contains(matrix.target, 'linux-musl') }}
-        shell: bash
-        run: |
-          cargo zigbuild --locked --release --target ${{ matrix.target }} -p gatewayd --bin cld-gateway
+          mkdir -p "dist-bin/${{ matrix.target }}"
+          go build -o "dist-bin/${{ matrix.target }}/cld-gateway" ./cmd/cld-gateway
 
       - name: Package archive
         shell: bash
@@ -113,7 +108,7 @@ jobs:
           mkdir -p dist
           bash .github/scripts/build-cld-gateway-package-archive.sh \
             --target ${{ matrix.target }} \
-            --entrypoint-bin target/${{ matrix.target }}/release/cld-gateway \
+            --entrypoint-bin dist-bin/${{ matrix.target }}/cld-gateway \
             --archive-output dist/cld-gateway-package-${{ matrix.target }}.tar.gz
 
       - name: Upload artifact

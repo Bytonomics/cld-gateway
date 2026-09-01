@@ -1,6 +1,9 @@
 package codex
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"sort"
+)
 
 // ExtractTextFromData returns the last "text" or "delta" string found
 // anywhere in data's JSON structure. If data is not valid JSON, data itself
@@ -29,16 +32,26 @@ func ParseOutputItemMessageTexts(eventName, data string) []string {
 		return nil
 	}
 
-	item, ok := value["item"].(map[string]any)
-	if !ok {
-		if response, ok := value["response"].(map[string]any); ok {
-			item, ok = response["item"].(map[string]any)
-			if !ok {
-				return nil
-			}
-		} else {
+	itemRaw, keyPresent := value["item"]
+
+	if !keyPresent {
+		// Top-level "item" key is absent, try response.item
+		response, ok := value["response"].(map[string]any)
+		if !ok {
 			return nil
 		}
+		itemRaw, ok = response["item"]
+		if !ok {
+			return nil
+		}
+	}
+
+	// At this point, itemRaw is from either top-level or response.item
+	// Now attempt the type assertion
+	item, ok := itemRaw.(map[string]any)
+	if !ok {
+		// Type assertion failed - terminal failure, no fallback
+		return nil
 	}
 
 	return MessageItemOutputTexts(item)
@@ -100,11 +113,18 @@ func extractLastTextFromValue(value any, last **string) {
 		if content, ok := v["content"]; ok {
 			extractLastTextFromValue(content, last)
 		}
-		for key, child := range v {
+		// Collect remaining keys (excluding text, delta, content) and sort them
+		// for deterministic iteration order, matching the pattern from schema_gate.go.
+		remainingKeys := make([]string, 0, len(v))
+		for key := range v {
 			if key == "text" || key == "delta" || key == "content" {
 				continue
 			}
-			extractLastTextFromValue(child, last)
+			remainingKeys = append(remainingKeys, key)
+		}
+		sort.Strings(remainingKeys)
+		for _, key := range remainingKeys {
+			extractLastTextFromValue(v[key], last)
 		}
 	case []any:
 		for _, child := range v {

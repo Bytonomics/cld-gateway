@@ -103,7 +103,9 @@ func runServe(ctx context.Context) error {
 	// ✱G3 (open gap, not yet owner-approved): graceful shutdown
 	// (signal.NotifyContext + Shutdown drain) is intentionally NOT wired
 	// here. Ported as-is from Rust's non-graceful axum::serve(...).await.
-	authPreflightForServe(ctx, VendorOpenAI)
+	if err := authPreflightForServe(ctx, VendorOpenAI); err != nil {
+		return fmt.Errorf("auth preflight failed: %w", err)
+	}
 
 	configPath := config.DefaultPath()
 	slog.Info("using gateway config file", "config_path", configPath)
@@ -126,16 +128,18 @@ func runServe(ctx context.Context) error {
 
 // authPreflightForServe runs the non-interactive OpenAI auth preflight
 // before serve startup, mirroring auth_preflight_for_serve (main.rs:115-123).
-func authPreflightForServe(ctx context.Context, vendor Vendor) {
+func authPreflightForServe(ctx context.Context, vendor Vendor) error {
 	switch vendor {
 	case VendorOpenAI:
-		authPreflightOpenAI(ctx)
+		return authPreflightOpenAI(ctx)
 	case VendorGemini:
 		// Gemini login is accepted by the CLI but has no configured
 		// serve-mode runtime yet; skip the preflight entirely
 		// (main.rs:118-121).
 		slog.Info("Gemini auth is not yet configured for serve mode; skipping preflight")
+		return nil
 	}
+	return nil
 }
 
 // authPreflightOpenAI implements the full 4-case preflight matrix from
@@ -151,43 +155,41 @@ func authPreflightForServe(ctx context.Context, vendor Vendor) {
 // error), so both are handled by the single "!status.IsLoggedIn" branch
 // below.
 //
-// Deviation from Rust (task override, binding per project CLAUDE.md:
-// "missing or invalid auth is logged and startup continues"): the Rust
-// source propagates a login failure via `?` up through run_serve, aborting
-// startup on error. Here every failure path only logs a warning and
-// returns; serve startup always continues.
-func authPreflightOpenAI(ctx context.Context) {
+// Auth failures abort startup: if login fails at any point, the error
+// propagates up through authPreflightForServe to runServe, terminating the
+// process. This matches the Rust behavior (main.rs:125-167), where all four
+// preflight cases use `?` to propagate login errors up through run_serve.
+func authPreflightOpenAI(ctx context.Context) error {
 	store := codexauth.NewDefault()
 
 	status, err := store.Status(ctx)
 	if err != nil {
 		slog.Warn("gateway auth check failed; launching login flow", "error", err)
-		preflightLoginChatGPT(ctx)
-		return
+		return preflightLoginChatGPT(ctx)
 	}
 
 	if !status.IsLoggedIn {
 		slog.Warn("gateway auth not found or incomplete; launching login flow")
-		preflightLoginChatGPT(ctx)
-		return
+		return preflightLoginChatGPT(ctx)
 	}
 
 	slog.Info("gateway auth present; validating ChatGPT auth", "account_id", status.AccountID)
 	snapshot, err := store.RefreshAndPersist(ctx)
 	if err != nil {
 		slog.Warn("gateway auth health check failed; re-running login flow", "error", err)
-		preflightLoginChatGPT(ctx)
-		return
+		return preflightLoginChatGPT(ctx)
 	}
 	slog.Info("gateway auth health check succeeded", "account_id", snapshot.AccountID)
+	return nil
 }
 
-func preflightLoginChatGPT(ctx context.Context) {
+func preflightLoginChatGPT(ctx context.Context) error {
 	if err := codexauth.RunLogin(ctx, codexauth.LoginOpts{}); err != nil {
-		slog.Warn("gateway login failed during serve preflight; continuing startup", "error", err)
-		return
+		slog.Warn("gateway login failed during serve preflight", "error", err)
+		return err
 	}
 	slog.Info("gateway login completed during serve preflight")
+	return nil
 }
 
 // runLogin dispatches to the vendor-specific interactive login flow,

@@ -17,9 +17,9 @@ type ConversationRepo interface {
 	CommitTurn(ctx context.Context, sessionID, branchID string, p CommitTurnParams) (BranchMetadata, error)
 	CommitOffshootCheckpoint(ctx context.Context, sessionID, branchID string, p CommitOffshootCheckpointParams) error
 	ReconcileSnapshot(ctx context.Context, sessionID, branchID string, p ReconcileSnapshotParams) (BranchMetadata, error)
-	ApplyCompaction(ctx context.Context, sessionID, branchID string, summaryHash string) (BranchMetadata, error)
+	ApplyCompaction(ctx context.Context, sessionID, branchID string, summaryHash string, fingerprints BranchFingerprintSet) (BranchMetadata, error)
 	InvalidateCheckpoint(ctx context.Context, sessionID, branchID string) error
 	RebuildBranchFromDisk(ctx context.Context, sessionID, branchID string) (BranchMetadata, error)
-	FindTurnCheckpoint(ctx context.Context, sessionID, branchID, turnID string) (*TurnOpenAiCheckpoint, bool)
+	FindTurnCheckpoint(ctx context.Context, sessionID, branchID string, canonicalMessageCount uint64, canonicalPrefixHash string) (*TurnOpenAiCheckpoint, bool)
 	CleanupSessionsOlderThan(ctx context.Context, days int) (int, error)
 }

@@ -55,6 +55,7 @@ type Entry struct {
 	StartedAtUnixMs int64
 	DurationMs      int64
 	ModelResolution *config.ModelResolution
+	Metadata        map[string]any
 	Request         HTTPRequestRecord
 	Response        HTTPResponseRecord
 }

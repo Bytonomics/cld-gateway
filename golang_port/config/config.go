@@ -69,14 +69,21 @@ type NetworkConfig struct {
 	AllowedHosts []string `mapstructure:"allowed_hosts"`
 }
 
-// Providers is our OVERRIDE: map keyed by backend name
+// Providers maps backend name to configuration and tracks the active backend.
+// The YAML shape is:
+//
+//	providers:
+//	  active: codex
+//	  backends:
+//	    codex:
+//	      default_model: gpt-5.6-sol
+//	      unsupported_models: [...]
 type Providers struct {
-	Backends map[string]BackendProviderConfig `mapstructure:",inline"`
 	Active   string                           `mapstructure:"active"`
+	Backends map[string]BackendProviderConfig `mapstructure:"backends"`
 }
 
 type BackendProviderConfig struct {
-	Active            bool     `mapstructure:"active"`
 	DefaultModel      string   `mapstructure:"default_model"`
 	UnsupportedModels []string `mapstructure:"unsupported_models"`
 }
@@ -109,14 +116,13 @@ func Default() *Config {
 			},
 		},
 		Providers: Providers{
+			Active: "codex",
 			Backends: map[string]BackendProviderConfig{
 				"codex": {
-					Active:            true,
 					DefaultModel:      DefaultBackendModel,
 					UnsupportedModels: DefaultUnsupportedModels,
 				},
 			},
-			Active: "codex",
 		},
 		Network: NetworkConfig{
 			ListenAddr: "127.0.0.1:6483",

@@ -1,6 +1,6 @@
 module github.com/Bytonomics/cld-gateway
 
-go 1.24.0
+go 1.25.0
 
 require (
 	github.com/SmrutAI/pedantigo/plugins/web/pedantigoecho/v2 v2.1.1
@@ -9,18 +9,12 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/coder/websocket v1.8.15
 	github.com/glebarez/sqlite v1.11.0
+	github.com/gofrs/flock v0.13.1
 	github.com/google/uuid v1.3.0
 	github.com/labstack/echo/v4 v4.13.4
 	github.com/spf13/viper v1.21.0
 	gorm.io/gorm v1.31.2
 )
-
-// pedantigo v2 is not published to the public module proxy; pin to the
-// local checkout used across the SmrutAI/smritea-cloud monorepo until it
-// is published or vendored.
-replace github.com/SmrutAI/pedantigo/v2 => /Users/tushar/Documents/SmrutAI/smriti/smritea-cloud/smritea-oss/pedantigo
-
-replace github.com/SmrutAI/pedantigo/plugins/web/pedantigoecho/v2 => /Users/tushar/Documents/SmrutAI/smriti/smritea-cloud/smritea-oss/pedantigo/plugins/web/pedantigoecho/v2
 
 require (
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
@@ -61,10 +55,10 @@ require (
 	github.com/valyala/fasttemplate v1.2.2 // indirect
 	github.com/wk8/go-ordered-map/v2 v2.1.8 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
-	go.yaml.in/yaml/v3 v3.0.4 // indirect
+	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/crypto v0.38.0 // indirect
 	golang.org/x/net v0.40.0 // indirect
-	golang.org/x/sys v0.36.0 // indirect
+	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.28.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	modernc.org/libc v1.22.5 // indirect

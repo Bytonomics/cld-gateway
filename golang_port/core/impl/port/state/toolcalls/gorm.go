@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
@@ -35,8 +36,11 @@ func DefaultToolCallsDBPath() string {
 }
 
 type toolCallRow struct {
-	CallID    string  `gorm:"column:call_id;primaryKey"`
-	ToolName  string  `gorm:"column:tool_name;not null"`
+	CallID   string `gorm:"column:call_id;primaryKey"`
+	ToolName string `gorm:"column:tool_name;not null"`
+	// ToolKind stores the canonical wire-format tool call kind string
+	// (e.g. "function_call", "custom_tool_call", "tool_search_call", "local_shell_call"),
+	// matching crates/gateway-backend-codex/src/types.rs::CodexToolCallKind::as_str().
 	ToolKind  string  `gorm:"column:tool_kind;not null;default:function_call"`
 	CreatedAt int64   `gorm:"column:created_at;not null"`
 	RequestID *string `gorm:"column:request_id"`
@@ -46,14 +50,20 @@ func (toolCallRow) TableName() string { return "tool_calls" }
 
 // Store implements state.ToolCallRepo via GORM + glebarez/sqlite.
 type Store struct {
-	db *gorm.DB
+	db    *gorm.DB
+	clock state.Clock
 }
 
 var _ state.ToolCallRepo = (*Store)(nil)
 
+type systemClock struct{}
+
+func (systemClock) Now() time.Time { return time.Now() }
+
 // Open opens (creating parent directories as needed) the SQLite database at
-// dsn, ensures the schema, and returns a Store.
-func Open(dsn string) (*Store, error) {
+// dsn, ensures the schema, and returns a Store. A nil clock defaults to the
+// system clock.
+func Open(dsn string, clock state.Clock) (*Store, error) {
 	if dir := filepath.Dir(dsn); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return nil, err
@@ -63,7 +73,10 @@ func Open(dsn string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	store := &Store{db: db}
+	if clock == nil {
+		clock = systemClock{}
+	}
+	store := &Store{db: db, clock: clock}
 	if err := store.EnsureSchema(context.Background()); err != nil {
 		return nil, err
 	}
@@ -77,12 +90,14 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 }
 
 // RecordToolCall upserts by call_id (mirrors INSERT OR REPLACE).
+// The created_at timestamp is computed internally at the time of the call,
+// ignoring any caller-supplied CreatedAtUnixSeconds value.
 func (s *Store) RecordToolCall(ctx context.Context, call state.StoredToolCall) error {
 	row := toolCallRow{
 		CallID:    call.CallID,
 		ToolName:  call.ToolName,
 		ToolKind:  call.ToolKind,
-		CreatedAt: call.CreatedAtUnixSeconds,
+		CreatedAt: s.clock.Now().Unix(),
 		RequestID: call.RequestID,
 	}
 	return s.db.WithContext(ctx).Clauses(clause.OnConflict{

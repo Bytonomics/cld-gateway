@@ -115,18 +115,20 @@ type turnPlan struct {
 	claudeSessionID string
 	persisted       bool // conversation-state branch selection/commit applies to this turn
 
-	kind             conversation.Kind
-	resolution       config.ModelResolution
-	reasoningEffort  string
-	identity         conversation.Identity
-	branchID         string
-	commitTurn       bool // visible-main durable commit vs. offshoot checkpoint
-	fingerprints     stateport.BranchFingerprintSet
-	canonicalMsgs    any
-	canonicalMsgHash string
+	kind              conversation.Kind
+	resolution        config.ModelResolution
+	reasoningEffort   string
+	identity          conversation.Identity
+	branchID          string
+	commitTurn        bool // visible-main durable commit vs. offshoot checkpoint
+	fingerprints      stateport.BranchFingerprintSet
+	canonicalMsgs     any
+	canonicalMsgHash  string
+	contextMgmtReport contextmgmt.Report
 
-	backendReq *backendport.Request
-	leaseHeld  bool
+	backendReq         *backendport.Request
+	previousResponseID *string // populated by selectTransport, passed to Acquire
+	leaseHeld          bool
 }
 
 // Handle ports the 9-step flow. Steps 1-7 are shared (prepare); step 8/9
@@ -168,7 +170,7 @@ func (s *MessageService) prepare(ctx context.Context, req *dto.MessagesRequest) 
 	workingReq.System = normalized.System
 	workingReq.Messages = normalized.Messages
 	if s.deps.ContextMgmt != nil {
-		s.deps.ContextMgmt.Apply(&workingReq)
+		_, plan.contextMgmtReport = s.deps.ContextMgmt.Apply(&workingReq)
 	}
 
 	plan.resolution = config.ResolveModel(s.deps.Config, req.Model)
@@ -226,7 +228,7 @@ func (s *MessageService) prepare(ctx context.Context, req *dto.MessagesRequest) 
 	}
 
 	if plan.persisted && plan.commitTurn {
-		acquire := s.deps.Leases.Acquire(plan.identity, string(plan.requestID))
+		acquire := s.deps.Leases.Acquire(plan.identity, string(plan.requestID), plan.previousResponseID)
 		if !acquire.Acquired {
 			return nil, nil, apperr.New(apperr.CodeOverloaded, "a visible conversation turn for this branch is already in flight", 503)
 		}
@@ -238,13 +240,15 @@ func (s *MessageService) prepare(ctx context.Context, req *dto.MessagesRequest) 
 
 // selectTransport ports select_message_transport (lib.rs:1144-1195): decide
 // WS-delta vs. full-SSE reuse per invariant #2 and set previous_response_id
-// on the outgoing backend request only when reuse is sanctioned.
+// on the outgoing backend request only when reuse is sanctioned. Also stores
+// the previousResponseID on plan for later use by Acquire.
 func (s *MessageService) selectTransport(ctx context.Context, plan *turnPlan, selection stateport.BranchSelectionResult) {
 	hasCheckpoint := selection.Branch.OpenAiCheckpoint != nil
 	previousResponseID := ""
 	if hasCheckpoint {
 		previousResponseID = selection.Branch.OpenAiCheckpoint.ResponseID
 	}
+	plan.previousResponseID = &previousResponseID
 
 	sessionKey := plan.identity.SessionKey()
 	liveChain, hasLiveChain := s.deps.Backend.LiveChainID(sessionKey)
@@ -281,6 +285,14 @@ func (s *MessageService) handleUnary(ctx context.Context, plan *turnPlan, workin
 		return services.MessageResult{Err: apperr.Wrap(err, apperr.CodeAPI, "backend request failed", 502)}
 	}
 
+	// Promote WebSocket chain on the lease if one was acquired (only when persisted && commitTurn).
+	// This must happen after the backend call succeeds and we can obtain the live chain.
+	if plan.leaseHeld {
+		if chain, ok := s.deps.Backend.LiveChainID(plan.identity.SessionKey()); ok {
+			s.deps.Leases.PromoteWebSocketChain(plan.identity, string(plan.requestID), &chain)
+		}
+	}
+
 	events := decodeSSEBody(resp.Body)
 	unary, err := s.deps.Translator.BuildUnaryResponse(events)
 	if err != nil {
@@ -288,15 +300,43 @@ func (s *MessageService) handleUnary(ctx context.Context, plan *turnPlan, workin
 		return services.MessageResult{Err: apperr.Wrap(err, apperr.CodeAPI, "build response", 502)}
 	}
 
+	if v := plan.contextMgmtReport.ResponseValue(); v != nil {
+		unary.ContextManagement = v
+	}
+
 	if ctx.Err() != nil {
 		s.releaseLease(plan, transport.ClientAbortedAfterVisibleOutput)
 		return services.MessageResult{Err: ctx.Err()}
 	}
 
+	// Validate lease before committing: gate check mirrors Rust's
+	// validate_unary_lease_for_commit (lib.rs:1335-1349), which only gates
+	// the visible-main commit path (a lease is only ever held for that
+	// path); the offshoot-checkpoint path has no lease and commits
+	// unconditionally (commit_unary_offshoot_result, lib.rs:1498-1537,
+	// called regardless of the main lease's validation outcome).
+	if plan.leaseHeld {
+		var chainID *backendport.ChainID
+		if chain, ok := s.deps.Backend.LiveChainID(plan.identity.SessionKey()); ok {
+			chainID = &chain
+		}
+		validation := s.deps.Leases.ValidateForCommit(plan.identity, string(plan.requestID), chainID)
+		if !validation.Accepted {
+			s.releaseLease(plan, transport.CommitSuppressedAfterAbort)
+			return services.MessageResult{
+				Unary:                     unary,
+				ContextManagementMetadata: plan.contextMgmtReport.MetadataValue(),
+			}
+		}
+	}
+
 	s.commitTurn(ctx, plan, workingReq, unary)
 	s.releaseLease(plan, transport.CompletedCommitted)
 
-	return services.MessageResult{Unary: unary}
+	return services.MessageResult{
+		Unary:                     unary,
+		ContextManagementMetadata: plan.contextMgmtReport.MetadataValue(),
+	}
 }
 
 // handleStream ports prepare_stream_message_flow.. build_stream_sse
@@ -314,7 +354,10 @@ func (s *MessageService) handleStream(ctx context.Context, plan *turnPlan, worki
 
 	out := make(chan dto.SSEEvent)
 	go s.runStream(ctx, plan, workingReq, backendEvents, out)
-	return services.MessageResult{Stream: out}
+	return services.MessageResult{
+		Stream:                    out,
+		ContextManagementMetadata: plan.contextMgmtReport.MetadataValue(),
+	}
 }
 
 func (s *MessageService) runStream(ctx context.Context, plan *turnPlan, workingReq *dto.MessagesRequest, in <-chan backendport.Event, out chan<- dto.SSEEvent) {
@@ -356,10 +399,40 @@ func (s *MessageService) runStream(ctx context.Context, plan *turnPlan, workingR
 		return
 	}
 
+	// Promote WebSocket chain on the lease if one was acquired (only when persisted && commitTurn).
+	// This must happen after the backend stream completes and we can obtain the live chain.
+	if plan.leaseHeld {
+		if chain, ok := s.deps.Backend.LiveChainID(plan.identity.SessionKey()); ok {
+			s.deps.Leases.PromoteWebSocketChain(plan.identity, string(plan.requestID), &chain)
+		}
+	}
+
 	unary, err := s.deps.Translator.BuildUnaryResponse(accumulated)
 	if err != nil {
 		s.releaseLease(plan, transport.BackendFailedBeforeCommit)
 		return
+	}
+
+	if v := plan.contextMgmtReport.ResponseValue(); v != nil {
+		unary.ContextManagement = v
+	}
+
+	// Validate lease before committing: gate check mirrors Rust's
+	// validate_unary_lease_for_commit (lib.rs:1335-1349), which only gates
+	// the visible-main commit path (a lease is only ever held for that
+	// path); the offshoot-checkpoint path has no lease and commits
+	// unconditionally (commit_unary_offshoot_result, lib.rs:1498-1537,
+	// called regardless of the main lease's validation outcome).
+	if plan.leaseHeld {
+		var chainID *backendport.ChainID
+		if chain, ok := s.deps.Backend.LiveChainID(plan.identity.SessionKey()); ok {
+			chainID = &chain
+		}
+		validation := s.deps.Leases.ValidateForCommit(plan.identity, string(plan.requestID), chainID)
+		if !validation.Accepted {
+			s.releaseLease(plan, transport.CommitSuppressedAfterAbort)
+			return
+		}
 	}
 
 	s.commitTurn(ctx, plan, workingReq, unary)
@@ -394,7 +467,7 @@ func (s *MessageService) commitTurn(ctx context.Context, plan *turnPlan, working
 	now := s.now()
 	responseID := unary.ID
 	fingerprint := plan.resolution.SelectedBackendModel
-	compatFingerprint := requestCompatibilityFingerprint(fingerprint)
+	compatFingerprint := requestCompatibilityFingerprint(s.deps.Config, plan.resolution, plan.backendReq)
 	messageCount := uint64(len(workingReq.Messages))
 
 	if plan.commitTurn {
@@ -442,6 +515,10 @@ func (s *MessageService) recordToolCalls(ctx context.Context, plan *turnPlan, un
 		return
 	}
 	reqIDStr := string(plan.requestID)
+	// Retrieve tool call kinds from the translator that were extracted during
+	// response processing. Keyed by call_id, values are canonical wire-format
+	// strings like "function_call", "custom_tool_call", etc.
+	toolCallKinds := s.deps.Translator.GetToolCallKinds()
 	for _, block := range unary.Content {
 		if block.BlockType != "tool_use" || block.ID == nil {
 			continue
@@ -450,9 +527,16 @@ func (s *MessageService) recordToolCalls(ctx context.Context, plan *turnPlan, un
 		if block.Name != nil {
 			name = *block.Name
 		}
+		// Retrieve the tool call kind for this call ID. Defaults to "function_call"
+		// if not found (matching the database default).
+		kind := "function_call"
+		if k, ok := toolCallKinds[*block.ID]; ok {
+			kind = k
+		}
 		_ = s.deps.ToolCalls.RecordToolCall(ctx, stateport.StoredToolCall{
 			CallID:               *block.ID,
 			ToolName:             name,
+			ToolKind:             kind,
 			RequestID:            &reqIDStr,
 			CreatedAtUnixSeconds: s.now().Unix(),
 		})
@@ -469,22 +553,98 @@ func (s *MessageService) now() time.Time {
 func strPtr(s string) *string { return &s }
 
 // canonicalValue mirrors canonical_message_value/canonical_content_value
-// (lib.rs:4347-4398) at the granularity this file needs: a structural
-// (not prompt-text) JSON projection of the message list, suitable for
-// storing as ActiveCanonicalMessages and for fingerprinting/hashing below.
-// It is a JSON round-trip rather than lib.rs's field-by-field
-// reconstruction; both produce a stable structural snapshot of the same
-// dto.Message values.
+// (lib.rs:4347-4398): field-by-field reconstruction of message content into
+// a stable structural JSON projection suitable for storing as
+// ActiveCanonicalMessages and for fingerprinting/hashing.
 func canonicalValue(messages []dto.Message) any {
-	encoded, err := json.Marshal(messages)
-	if err != nil {
-		return nil
+	var canonical []any
+	for _, msg := range messages {
+		canonical = append(canonical, canonicalMessageValue(msg))
 	}
-	var v any
-	if err := json.Unmarshal(encoded, &v); err != nil {
-		return nil
+	return canonical
+}
+
+// canonicalMessageValue mirrors canonical_message_value (lib.rs:4347-4352).
+func canonicalMessageValue(message dto.Message) map[string]any {
+	return map[string]any{
+		"role":    message.Role,
+		"content": canonicalContentValue(message.Content),
 	}
-	return stripTransientMessageMetadata(v)
+}
+
+// canonicalContentValue mirrors canonical_content_value (lib.rs:4354-4366).
+func canonicalContentValue(content dto.Content) any {
+	if content.Text != nil {
+		// Text content becomes a single-element text block array
+		return []any{
+			map[string]any{
+				"type": "text",
+				"text": *content.Text,
+			},
+		}
+	}
+	// Blocks content: transform each block
+	var blocks []any
+	for _, block := range content.Blocks {
+		blocks = append(blocks, canonicalContentBlockValue(block))
+	}
+	return blocks
+}
+
+// canonicalContentBlockValue mirrors canonical_content_block_value (lib.rs:4368-4397).
+func canonicalContentBlockValue(block dto.ContentBlock) map[string]any {
+	object := make(map[string]any)
+	object["type"] = block.BlockType
+
+	// Insert optional string fields
+	if block.Text != nil {
+		object["text"] = *block.Text
+	}
+	if block.ID != nil {
+		object["id"] = *block.ID
+	}
+	if block.Name != nil {
+		object["name"] = *block.Name
+	}
+
+	// Insert optional value fields
+	if block.Input != nil {
+		object["input"] = block.Input
+	}
+	if block.ToolUseID != nil {
+		object["tool_use_id"] = *block.ToolUseID
+	}
+	if block.Content != nil {
+		object["content"] = block.Content
+	}
+
+	// Insert is_error if present
+	if block.IsError != nil {
+		object["is_error"] = *block.IsError
+	}
+
+	// Insert source if present, stripping transient metadata
+	if block.Source != nil {
+		sourceValue, err := json.Marshal(block.Source)
+		if err == nil {
+			var sourceJSON any
+			if err := json.Unmarshal(sourceValue, &sourceJSON); err == nil {
+				object["source"] = stripTransientMessageMetadata(sourceJSON)
+			}
+		}
+	}
+
+	// Insert extra fields (except cache_control)
+	for key, value := range block.Extra {
+		if key != "cache_control" {
+			var extraValue any
+			if err := json.Unmarshal(value, &extraValue); err == nil {
+				object[key] = stripTransientMessageMetadata(extraValue)
+			}
+		}
+	}
+
+	return object
 }
 
 // stripTransientMessageMetadata ports strip_transient_message_metadata
@@ -522,45 +682,109 @@ func canonicalHash(messages []dto.Message) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// branchFingerprints is a structural (not prompt-text) fingerprint of the
-// message list for BranchSelectionInput/CommitTurnParams, ported at the
-// hashing-scheme level (not byte-identical to Rust's
-// branch_fingerprints_from_messages, lib.rs:4932-5001, which this task did
-// not have budget to trace field-for-field) from message content the
-// client already sent as structured data.
+// branchFingerprints ports branch_fingerprints_from_messages (lib.rs:4932-5001):
+// extract text content from messages, hash various subsets for branch selection.
 func branchFingerprints(messages []dto.Message) stateport.BranchFingerprintSet {
-	full := canonicalHash(messages)
-	tailStart := 0
-	if len(messages) > 4 {
-		tailStart = len(messages) - 4
-	}
-	tail := canonicalHash(messages[tailStart:])
+	var textMessages []string
+	var lastUserText *string
 
-	var lastUser *string
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == "user" {
-			h := canonicalHash(messages[i : i+1])
-			lastUser = &h
-			break
+	// Extract text content from each message, building "role:text" strings
+	for _, message := range messages {
+		text := extractMessageText(message)
+		if strings.TrimSpace(text) == "" {
+			continue
 		}
+		if message.Role == "user" {
+			lastUserText = &text
+		}
+		textMessages = append(textMessages, message.Role+":"+strings.TrimSpace(text))
+	}
+
+	// Calculate recent tail: last 4 messages
+	recentTail := ""
+	if len(textMessages) > 0 {
+		start := len(textMessages) - 4
+		if start < 0 {
+			start = 0
+		}
+		recentTail = strings.Join(textMessages[start:], "\n")
+	}
+
+	// Full transcript
+	fullTranscript := strings.Join(textMessages, "\n")
+
+	// Hash components
+	var recentTailHash *string
+	if recentTail != "" {
+		h := sha256TextHex(recentTail)
+		recentTailHash = &h
+	}
+
+	var lastUserMessageHash *string
+	if lastUserText != nil && strings.TrimSpace(*lastUserText) != "" {
+		h := sha256TextHex(*lastUserText)
+		lastUserMessageHash = &h
+	}
+
+	var branchStateHash *string
+	if fullTranscript != "" {
+		h := sha256TextHex(fullTranscript)
+		branchStateHash = &h
 	}
 
 	return stateport.BranchFingerprintSet{
-		RecentMessageTailHash: &tail,
-		LastUserMessageHash:   lastUser,
-		BranchStateHash:       &full,
+		RecentMessageTailHash: recentTailHash,
+		LastUserMessageHash:   lastUserMessageHash,
+		BranchStateHash:       branchStateHash,
 	}
 }
 
-// requestCompatibilityFingerprint is a structural placeholder for
-// request_compatibility_fingerprint (lib.rs:1813-1832): this task ported
-// only the model-fingerprint component (the field CommitTurnParams/
-// CommitOffshootCheckpointParams actually gate reuse decisions on via
-// Selector); the full Rust fingerprint additionally folds in
-// tool/schema-shape and reasoning-effort compatibility, which was out of
-// this task's budget to trace through translate.rs.
-func requestCompatibilityFingerprint(modelFingerprint string) string {
-	sum := sha256.Sum256([]byte("v1:" + modelFingerprint))
+// extractMessageText ports anthropic_message_text (lib.rs:5030-5040):
+// extract text content from a message, joining text blocks with double newlines.
+func extractMessageText(message dto.Message) string {
+	if message.Content.Text != nil {
+		return *message.Content.Text
+	}
+	var textParts []string
+	for _, block := range message.Content.Blocks {
+		if block.BlockType == "text" && block.Text != nil && *block.Text != "" {
+			textParts = append(textParts, *block.Text)
+		}
+	}
+	return strings.Join(textParts, "\n\n")
+}
+
+// sha256TextHex hashes text content to hex string (mirrors sha256_hex, lib.rs:5102-5106).
+func sha256TextHex(text string) string {
+	sum := sha256.Sum256([]byte(text))
+	return hex.EncodeToString(sum[:])
+}
+
+// requestCompatibilityFingerprint ports request_compatibility_fingerprint
+// (lib.rs:1813-1832): fold model, tools, reasoning, and service-tier into
+// a compatibility hash for transport reuse decisions.
+func requestCompatibilityFingerprint(
+	cfg *config.Config,
+	resolution config.ModelResolution,
+	backendReq *backendport.Request,
+) string {
+	payload := map[string]any{
+		"renderer_version":       "gateway_http_anthropic_transport_v1",
+		"selected_backend_model": resolution.SelectedBackendModel,
+		"instructions":           backendReq.Instructions,
+		"tools":                  backendReq.Tools,
+		"tool_choice":            backendReq.ToolChoice,
+		"parallel_tool_calls":    backendReq.ParallelToolCalls,
+		"text":                   backendReq.Text,
+		"reasoning":              backendReq.Reasoning,
+		"include":                backendReq.Include,
+		"service_tier":           config.ServiceTier(cfg),
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(encoded)
 	return hex.EncodeToString(sum[:])
 }
 
@@ -583,9 +807,6 @@ func decodeSSEBody(body string) []backendport.Event {
 		}
 		data := strings.Join(dataLines, "\n")
 		dataLines = nil
-		if data == "[DONE]" {
-			return
-		}
 		var probe struct {
 			Type string `json:"type"`
 		}

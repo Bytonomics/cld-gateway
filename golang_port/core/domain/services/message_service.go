@@ -59,7 +59,8 @@ type MessageService interface {
 //     writer goroutine's range loop terminates - it never leaves the
 //     writer goroutine blocked.
 type MessageResult struct {
-	Unary  *dto.MessagesResponse
-	Stream <-chan dto.SSEEvent
-	Err    error
+	Unary                     *dto.MessagesResponse
+	Stream                    <-chan dto.SSEEvent
+	Err                       error
+	ContextManagementMetadata map[string]any
 }

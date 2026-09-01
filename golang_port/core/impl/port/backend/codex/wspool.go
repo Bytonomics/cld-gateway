@@ -3,6 +3,7 @@ package codex
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -17,6 +18,7 @@ import (
 
 	portauth "github.com/Bytonomics/cld-gateway/core/domain/port/auth"
 	"github.com/Bytonomics/cld-gateway/core/domain/port/backend"
+	"github.com/Bytonomics/cld-gateway/core/impl/port/auth/codexauth"
 	"github.com/Bytonomics/cld-gateway/netpolicy"
 )
 
@@ -54,6 +56,7 @@ type WSTransportError struct {
 	Message string
 	Status  int
 	Body    string
+	Cause   error
 }
 
 func (e *WSTransportError) Error() string {
@@ -74,6 +77,8 @@ func (e *WSTransportError) Error() string {
 		return "websocket transport error"
 	}
 }
+
+func (e *WSTransportError) Unwrap() error { return e.Cause }
 
 // websocketFailed mirrors websocket_failed (client.rs:340-349). Unlike the
 // Rust version, which extracts a status code by scanning the error's Display
@@ -576,10 +581,9 @@ func singleErrorEventStream(err *WSTransportError) <-chan backend.Event {
 
 // openSessionWithRefreshRetry mirrors open_session_with_refresh_retry
 // (:387-424), simplified to match client.go's requestWithRefreshRetry
-// pattern: this codebase's auth.Provider has no
-// "is_permanent_refresh_failure" distinction, so (as client.go already
-// does for the HTTP path) logout is triggered only when a post-refresh
-// retry still comes back 401, not when the refresh call itself fails.
+// pattern: logout is triggered when (1) the refresh call itself returns
+// ErrRefreshUnauthorized (a permanent auth failure), or (2) a post-refresh
+// retry still comes back 401.
 func (p *Pool) openSessionWithRefreshRetry(ctx context.Context, req *backend.Request) (*wsSession, error) {
 	sess, err := p.openSession(ctx, req)
 	if err == nil {
@@ -590,6 +594,9 @@ func (p *Pool) openSessionWithRefreshRetry(ctx context.Context, req *backend.Req
 	}
 
 	if rerr := p.refreshOnUnauthorized(ctx, req); rerr != nil {
+		if errors.Is(rerr, codexauth.ErrRefreshUnauthorized) {
+			_ = p.auth.Logout(ctx, true)
+		}
 		return nil, rerr
 	}
 
@@ -611,7 +618,7 @@ func isUnauthorized(err error) bool {
 func (p *Pool) refreshOnUnauthorized(ctx context.Context, req *backend.Request) error {
 	snapshot, err := p.auth.RefreshAndPersist(ctx)
 	if err != nil {
-		return &WSTransportError{Kind: WSErrAuthFailed, Stage: "refresh auth", Message: err.Error()}
+		return &WSTransportError{Kind: WSErrAuthFailed, Stage: "refresh auth", Message: err.Error(), Cause: err}
 	}
 
 	token, err := p.auth.AccessToken(ctx)
@@ -748,10 +755,14 @@ func decodeWebSocketEvent(data []byte) (backend.Event, *WSTransportError) {
 // runSession is the pooled session's actor goroutine, mirroring
 // run_websocket_session (:482-530): it owns the socket exclusively for
 // writes, serializes one queued response.create at a time, and sends a
-// 20s keepalive ping (KeepaliveInterval) while idle. Unlike Rust, control
-// frames (ping/pong/close) are handled inline by coder/websocket's Read
-// call itself (see conn.go's handleControl), so no separate idle-item
-// branch is needed here.
+// 20s keepalive ping (KeepaliveInterval) while idle. Unlike the old
+// implementation, this version runs a concurrent idleReadPump goroutine
+// to continuously pump frames while idle. This ensures control frames
+// (especially pong responses) are always being handled via coder/websocket's
+// Read call, even during idle periods when no command is queued. The idle
+// pump is paused when a command arrives (since coder/websocket's Read
+// cannot be called concurrently), and resumed after command processing.
+// This prevents keepalive pings from timing out on healthy, idle connections.
 func runSession(ctx context.Context, conn *websocket.Conn, cmds chan *wsCommand, alive *atomic.Bool, done chan struct{}) {
 	defer func() {
 		alive.Store(false)
@@ -762,10 +773,33 @@ func runSession(ctx context.Context, conn *websocket.Conn, cmds chan *wsCommand,
 	keepalive := time.NewTicker(KeepaliveInterval)
 	defer keepalive.Stop()
 
+	// Channel to receive errors from the idle read pump.
+	idleReadError := make(chan error, 1)
+
+	// Context and cancel for pausing/resuming the idle read pump.
+	var idleCtx context.Context
+	var pauseIdle context.CancelFunc
+
+	startIdleRead := func() {
+		idleCtx, pauseIdle = context.WithCancel(ctx)
+		go idleReadPump(idleCtx, conn, idleReadError)
+	}
+
+	// Start the idle read pump to handle control frames while idle.
+	startIdleRead()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case err := <-idleReadError:
+			if err != nil {
+				// Idle reader detected an error; restart it.
+				startIdleRead()
+			} else {
+				// Graceful close detected by idle reader.
+				return
+			}
 		case <-keepalive.C:
 			pingCtx, cancel := context.WithTimeout(ctx, pingTimeout)
 			err := conn.Ping(pingCtx)
@@ -774,22 +808,30 @@ func runSession(ctx context.Context, conn *websocket.Conn, cmds chan *wsCommand,
 				return
 			}
 		case cmd := <-cmds:
+			// Pause the idle reader while processing the command.
+			// coder/websocket does not allow concurrent Reader/Read calls.
+			pauseIdle()
+
 			payload, merr := json.Marshal(cmd.body)
 			if merr != nil {
 				cmd.result <- wsResult{Err: &WSTransportError{Kind: WSErrWebSocket, Stage: "send response.create", Message: merr.Error()}}
 				close(cmd.result)
-				return
+				startIdleRead()
+				continue
 			}
 			if werr := conn.Write(ctx, websocket.MessageText, payload); werr != nil {
 				cmd.result <- wsResult{Err: websocketMessage("send response.create", werr)}
 				close(cmd.result)
-				return
+				startIdleRead()
+				continue
 			}
 			ok := forwardResponseEvents(ctx, conn, cmd.result)
 			close(cmd.result)
 			if !ok {
 				return
 			}
+			// Resume the idle reader after command processing.
+			startIdleRead()
 		}
 	}
 }
@@ -819,6 +861,66 @@ func forwardResponseEvents(ctx context.Context, conn *websocket.Conn, result cha
 		result <- wsResult{Event: event}
 		if terminal {
 			return true
+		}
+	}
+}
+
+// idleReadPump continuously reads from the connection while idle to ensure
+// control frames (especially pong responses to keepalive pings) are always
+// being handled. This runs in a separate goroutine concurrently with the
+// main command loop. The coder/websocket Conn documentation specifies that
+// Ping must be called concurrently with a Reader/Read call; without this
+// pump, keepalive pings would time out on idle connections even when the
+// server is healthy, because the pong response is only delivered to an
+// active Read call via handleControl.
+//
+// Data frames arriving during idle are discarded but logged (they should
+// not occur in normal operation and indicate a protocol violation).
+// Control frames (ping/pong/close) are handled automatically by conn.Read
+// via its handleControl call stack. The function returns via errChan when
+// the context is cancelled (pause) or when a read error occurs.
+func idleReadPump(ctx context.Context, conn *websocket.Conn, errChan chan<- error) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		// Use a short timeout so the idle pump doesn't block too long
+		// if the connection is quiet. This allows responsive pause/resume.
+		readCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+		typ, _, err := conn.Read(readCtx)
+		cancel()
+
+		if err != nil {
+			// Check for normal timeout (expected during idle with no incoming frames).
+			if errors.Is(err, context.DeadlineExceeded) {
+				continue
+			}
+			// Check for graceful close frame (CloseStatus != -1 means a close frame was received).
+			if websocket.CloseStatus(err) != -1 {
+				// Signal graceful close via nil error.
+				select {
+				case errChan <- nil:
+				default:
+				}
+				return
+			}
+			// Signal real error; the main loop may restart the pump or exit.
+			select {
+			case errChan <- err:
+			default:
+			}
+			return
+		}
+
+		// Control frames (ping/pong/close) are handled automatically by
+		// conn.Read via handleControl and do not return a frame type.
+		// Data frames should not arrive during idle; discard them.
+		if typ == websocket.MessageText || typ == websocket.MessageBinary {
+			// Log for debugging, but don't fail the session.
+			continue
 		}
 	}
 }

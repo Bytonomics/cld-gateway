@@ -6,13 +6,15 @@ import (
 )
 
 // ToolCallKind mirrors Rust CodexToolCallKind.
+// Values match the canonical wire-format strings from
+// crates/gateway-backend-codex/src/types.rs::CodexToolCallKind::as_str().
 type ToolCallKind string
 
 const (
-	ToolCallKindFunction   ToolCallKind = "function"
-	ToolCallKindCustom     ToolCallKind = "custom"
-	ToolCallKindToolSearch ToolCallKind = "tool_search"
-	ToolCallKindLocalShell ToolCallKind = "local_shell"
+	ToolCallKindFunction   ToolCallKind = "function_call"
+	ToolCallKindCustom     ToolCallKind = "custom_tool_call"
+	ToolCallKindToolSearch ToolCallKind = "tool_search_call"
+	ToolCallKindLocalShell ToolCallKind = "local_shell_call"
 )
 
 // ToolCall is the decoded shape of a backend tool-call invocation, mirroring
@@ -41,16 +43,26 @@ func ParseOutputItemToolCall(eventName, data string) *ToolCall {
 		return nil
 	}
 
-	item, ok := value["item"].(map[string]any)
-	if !ok {
-		if response, ok := value["response"].(map[string]any); ok {
-			item, ok = response["item"].(map[string]any)
-			if !ok {
-				return nil
-			}
-		} else {
+	itemRaw, keyPresent := value["item"]
+
+	if !keyPresent {
+		// Top-level "item" key is absent, try response.item
+		response, ok := value["response"].(map[string]any)
+		if !ok {
 			return nil
 		}
+		itemRaw, ok = response["item"]
+		if !ok {
+			return nil
+		}
+	}
+
+	// At this point, itemRaw is from either top-level or response.item
+	// Now attempt the type assertion
+	item, ok := itemRaw.(map[string]any)
+	if !ok {
+		// Type assertion failed - terminal failure, no fallback
+		return nil
 	}
 
 	return ParseToolCallItem(item)

@@ -347,14 +347,15 @@ func (s ImageSource) MarshalJSON() ([]byte, error) {
 // types.rs itself has no response struct (Rust builds raw serde_json::Value);
 // this is the first typed port of that shape.
 type MessagesResponse struct {
-	ID           string         `json:"id"`
-	Type         string         `json:"type"`
-	Role         string         `json:"role"`
-	Model        string         `json:"model"`
-	Content      []ContentBlock `json:"content"`
-	StopReason   *string        `json:"stop_reason"`
-	StopSequence *string        `json:"stop_sequence"`
-	Usage        Usage          `json:"usage"`
+	ID                string         `json:"id"`
+	Type              string         `json:"type"`
+	Role              string         `json:"role"`
+	Model             string         `json:"model"`
+	Content           []ContentBlock `json:"content"`
+	StopReason        *string        `json:"stop_reason"`
+	StopSequence      *string        `json:"stop_sequence"`
+	Usage             Usage          `json:"usage"`
+	ContextManagement map[string]any `json:"context_management,omitempty"`
 }
 
 // Usage ports the usage object built at lib.rs:1555-1573.

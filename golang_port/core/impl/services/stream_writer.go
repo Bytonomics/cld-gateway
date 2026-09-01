@@ -30,10 +30,11 @@ const DefaultIdleEventTimeout = 60 * time.Second
 // entry (request side, timing origin) that StreamWriter merges with the
 // events it wrote before calling log.Append at stream close.
 type StreamLogEntry struct {
-	RequestID       core.RequestID
-	StartedAtUnixMs int64
-	ModelResolution *config.ModelResolution
-	Request         observability.HTTPRequestRecord
+	RequestID           core.RequestID
+	StartedAtUnixMs     int64
+	ModelResolution     *config.ModelResolution
+	ContextManagementMd map[string]any
+	Request             observability.HTTPRequestRecord
 }
 
 // StreamWriter is the sole owner of resp for the lifetime of one streaming
@@ -177,6 +178,7 @@ func (w *StreamWriter) logAccumulated(base StreamLogEntry, events []dto.SSEEvent
 		StartedAtUnixMs: base.StartedAtUnixMs,
 		DurationMs:      time.Now().UnixMilli() - base.StartedAtUnixMs,
 		ModelResolution: base.ModelResolution,
+		Metadata:        base.ContextManagementMd,
 		Request:         base.Request,
 		Response: observability.HTTPResponseRecord{
 			Status: w.resp.Status,

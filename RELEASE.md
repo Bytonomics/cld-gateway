@@ -145,7 +145,7 @@ Run the local validation suite before tagging:
 
 ```sh
 make check
-RUN_WIREMOCK=1 make verify-test
+RUN_MOCK_BACKEND=1 make verify-test
 ```
 
 All checks must pass before proceeding.
@@ -154,20 +154,19 @@ These checks validate the current Unix-like platform scope. Windows support is p
 
 ### 3. Choose and set the release version
 
-The canonical version is in the root `Cargo.toml` under `[workspace.package]`:
+The canonical version is in the root `VERSION` file:
 
-```toml
-[workspace.package]
-version = "X.Y.Z"
+```text
+X.Y.Z
 ```
 
-Update `Cargo.toml` to the intended release version, then run the validation step below. `make check` already runs the normal test suite and will surface whether `Cargo.lock` needs to be updated. If `Cargo.lock` changes, include it in the release-preparation commit.
+Update `VERSION` to the intended release version (the file contains nothing but the bare version string followed by a trailing newline — no key, no quotes, no section header), then run the validation step below. `make check` already runs the normal test suite.
 
 The release tag must match this version exactly:
 
 ```text
-Cargo.toml version: X.Y.Z
-Release tag:        cld-gateway-vX.Y.Z
+VERSION file: X.Y.Z
+Release tag:  cld-gateway-vX.Y.Z
 ```
 
 The release workflow rejects mismatches.
@@ -179,7 +178,7 @@ Commit the version bump and any release-preparation changes.
 Include the submodule pointer if `homebrew-tap` changed:
 
 ```sh
-git add Cargo.toml Cargo.lock .github/workflows/release.yml README.md RELEASE.md homebrew-tap
+git add VERSION .github/workflows/release.yml README.md RELEASE.md homebrew-tap
 git commit -m "chore: prepare cld-gateway vX.Y.Z release"
 git push origin main
 ```
@@ -188,7 +187,7 @@ Only stage files that are intentionally part of the release preparation.
 
 ### 5. Create and push the release tag
 
-Use the required `cld-gateway-v` prefix. The tag version must match the version in `Cargo.toml` exactly.
+Use the required `cld-gateway-v` prefix. The tag version must match the version in `VERSION` exactly.
 
 Set the release version once in your shell:
 
@@ -196,10 +195,10 @@ Set the release version once in your shell:
 VERSION=X.Y.Z
 ```
 
-Verify that `Cargo.toml` contains the same version:
+Verify that the `VERSION` file contains the same version:
 
 ```sh
-grep -A5 '^\[workspace.package\]' Cargo.toml
+cat VERSION
 ```
 
 Verify the tag does not already exist locally:
@@ -264,8 +263,8 @@ tag-check → build (matrix) → verify → release
 
 What each job does:
 
-- `tag-check`: validates tag format and confirms tag version equals `Cargo.toml` version.
-- `build`: builds all four target binaries and packages archives.
+- `tag-check`: validates tag format and confirms tag version equals the `VERSION` file.
+- `build`: cross-compiles all four target binaries with `CGO_ENABLED=0` (no Rust, no Zig, no musl cross-toolchain needed — the Go build is pure-Go and cross-compiles natively) and packages archives.
 - `verify`: confirms each archive exists and contains `bin/cld-gateway`, `cld-gateway-package.json`, `config.yml`, `settings.json`, `homebrew/post_install.py`, `bin/cld-gateway-sh`, `bin/cldg`, `bin/clddg`, and the `commands/` subtree.
 - `release`: publishes GitHub Release assets, generates `cld-gateway-package_SHA256SUMS`, and dispatches the Homebrew tap update.
 
@@ -297,7 +296,7 @@ VERSION=X.Y.Z
 TAG="cld-gateway-v${VERSION}"
 
 git status
-git add .github/workflows/release.yml README.md RELEASE.md homebrew-tap Cargo.toml Cargo.lock
+git add .github/workflows/release.yml README.md RELEASE.md homebrew-tap VERSION
 git commit -m "fix(release): repair ${TAG} release workflow"
 git push origin main
 
@@ -319,7 +318,7 @@ VERSION=X.Y.Z
 TAG="cld-gateway-v${VERSION}"
 
 git status
-git add .github/workflows/release.yml README.md RELEASE.md homebrew-tap Cargo.toml Cargo.lock
+git add .github/workflows/release.yml README.md RELEASE.md homebrew-tap VERSION
 git commit -m "fix(release): repair ${TAG} release workflow"
 git push origin main
 
@@ -543,7 +542,7 @@ Before pushing the first tag, confirm:
 - `Bytonomics/homebrew-tap` contains the tap workflows.
 - `Bytonomics/cld-gateway` has `HOMEBREW_TAP_DISPATCH_TOKEN` configured.
 - The submodule pointer in `Bytonomics/cld-gateway` points at the pushed tap commit.
-- `Cargo.toml` version matches the tag you are about to push.
+- `VERSION` file matches the tag you are about to push.
 - The tag uses the `cld-gateway-v` prefix.
 
 Example first release for `0.1.0`:
@@ -558,11 +557,11 @@ cd ..
 # Validate main repo.
 make check
 make test
-RUN_WIREMOCK=1 make verify-test
+RUN_MOCK_BACKEND=1 make verify-test
 
 # Commit release-ready state.
 git status
-git add Cargo.toml Cargo.lock .github/workflows/release.yml README.md RELEASE.md homebrew-tap
+git add VERSION .github/workflows/release.yml README.md RELEASE.md homebrew-tap
 git commit -m "chore: prepare cld-gateway v0.1.0 release"
 git push origin main
 

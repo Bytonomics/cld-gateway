@@ -1,32 +1,47 @@
-.PHONY: check fmt-check fmt-fix clippy test test-release-scripts metadata tree
-.PHONY: verify-test
+ROOT_DIR := $(shell dirname $(realpath $(firstword $(MAKEFILE_LIST))))
 
-TEST_TIMEOUT_SECONDS ?= 120
-TEST_TIMEOUT = python3 scripts/timeout.py $(TEST_TIMEOUT_SECONDS)
-RELEASE_UV_CACHE_DIR ?= /tmp/gateway-uv-cache
+.PHONY: help check fmt-check fmt-fix lint test verify-test \
+    test-release-scripts metadata tree install vendor build build-check
 
-check: fmt-check clippy test test-release-scripts
+help: ## Show this help (wait-formally style)
+	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
 
-test-release-scripts:
-	UV_CACHE_DIR=$(RELEASE_UV_CACHE_DIR) $(TEST_TIMEOUT) uv run --project scripts/release pytest scripts/release/test/
+install: vendor ## Install deps (vendor Go modules)
 
-fmt-check:
-	cargo fmt --check
+vendor: ## go mod download + tidy + vendor
+	cd $(ROOT_DIR) && go mod download && go mod tidy && go mod vendor
 
-fmt-fix:
-	cargo fmt
+build: ## Build the gateway binary
+	cd $(ROOT_DIR) && CGO_ENABLED=0 go build -o bin/cld-gateway ./cmd/cld-gateway
 
-clippy:
-	cargo clippy --workspace --all-targets --all-features -- -D warnings
+build-check: ## Compile-only check
+	cd $(ROOT_DIR) && go build -gcflags="-e" ./...
 
-test:
-	$(TEST_TIMEOUT) cargo test --workspace --all-features
+check: fmt-check lint test test-release-scripts
 
-verify-test:
-	RUN_WIREMOCK=1 $(TEST_TIMEOUT) cargo test --workspace --all-features
+fmt-check: ## gofmt + goimports verify
+	cd $(ROOT_DIR) && test -z $$(gofmt -l . | grep -v vendor) && goimports -l . | grep -v vendor | (! read)
 
-metadata:
-	cargo metadata --no-deps --format-version 1
+fmt-fix: ## Auto-format
+	cd $(ROOT_DIR) && golangci-lint run --fix ./... || true
+	cd $(ROOT_DIR) && goimports -w $$(find . -name '*.go' -not -path './vendor/*')
+	cd $(ROOT_DIR) && gci write --skip-generated --skip-vendor -s standard -s default -s "prefix(github.com/Bytonomics/cld-gateway)" .
 
-tree:
-	cargo tree --workspace
+lint: ## golangci-lint
+	cd $(ROOT_DIR) && golangci-lint run ./...
+
+test: ## Run all tests
+	cd $(ROOT_DIR) && go test ./...
+
+verify-test: ## Tests with mock-backend gate
+	cd $(ROOT_DIR) && RUN_MOCK_BACKEND=1 go test -tags=mockbackend ./...
+
+test-release-scripts: ## Release packager tests (unchanged Python)
+	UV_CACHE_DIR=/tmp/gateway-uv-cache python3 scripts/timeout.py 120 \
+	  uv run --project scripts/release pytest scripts/release/test/
+
+metadata: ## go list -m all
+	cd $(ROOT_DIR) && go list -m all
+
+tree: ## go mod graph
+	cd $(ROOT_DIR) && go mod graph

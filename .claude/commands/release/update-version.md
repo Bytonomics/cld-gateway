@@ -19,18 +19,18 @@ Do these tasks in this exact order:
    - Parse `$ARGUMENTS` as exactly one semantic version string.
    - Reject anything that is not `X.Y.Z` or the repo’s accepted prerelease format.
 2. Read the allowed target files.
-   - Read `Cargo.toml`.
+   - Read `VERSION`.
    - Read `README.md`.
    - Read `homebrew-tap/Formula/cld-gateway.rb` only to verify later that it was not modified.
 3. Apply only the allowed version updates.
-   - Update `Cargo.toml`
-     - change `[workspace.package].version`
+   - Update `VERSION`
+     - replace its entire content with the new version string followed by a single trailing newline (e.g. `0.1.2\n`) — the file contains nothing but the bare version number, no key, no quotes, no section header
    - Update `README.md`
      - change the pinned shell installer example that uses a concrete release version
 4. Verify the generated formula file was untouched and run validation.
    - Verify `homebrew-tap/Formula/cld-gateway.rb` was not modified by this command.
    - Run `make -C /<path to cld-gateway project> check` after the allowed edits complete.
-5. Ask the used using AskQuestion tool, if they want to commit, and if they say yes, immediately run "git add Cargo.toml, Cargo.lock, and README.md"  invoke Skill(/commit) and do the commit.
+5. Ask the used using AskQuestion tool, if they want to commit, and if they say yes, immediately run "git add VERSION and README.md"  invoke Skill(/commit) and do the commit.
 
 Behavior:
 - If additional exact version references are discovered while reading the allowed files and they are clearly part of the same release-version set, include them.

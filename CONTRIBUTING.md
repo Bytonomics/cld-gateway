@@ -8,7 +8,7 @@ Thank you for your interest in contributing to cld-gateway! This guide covers th
 
 ### Required
 
-- **Rust** 1.70+: Install from [rustup.rs](https://rustup.rs/)
+- **Go** 1.24+: Install from [go.dev/dl](https://go.dev/dl/)
 - **uv**: Fast Python package manager and dependency resolver
   - Install: `curl -LsSf https://astral.sh/uv/install.sh | sh`
   - Or use Homebrew: `brew install uv`
@@ -17,9 +17,8 @@ Thank you for your interest in contributing to cld-gateway! This guide covers th
 ### Optional
 
 - **Make**: Build automation (most development commands use `make` targets)
-- **Zig** 0.14.0+: Required only if building for Linux musl targets
-  - Install: https://ziglang.org/download/
-  - Or install automatically by running a musl target build
+- **golangci-lint**: Required for `make lint` / `make fmt-fix`
+  - Install: https://golangci-lint.run/welcome/install/
 
 ### uv Setup for Development
 
@@ -29,10 +28,10 @@ Thank you for your interest in contributing to cld-gateway! This guide covers th
 # Run release-tooling commands in the scripts/release project environment
 uv run --project scripts/release pytest scripts/release/test/
 
-# Run normal Rust/Make commands directly
+# Run normal Go/Make commands directly
 make check
 make fmt-fix
-make clippy
+make lint
 make test
 ```
 
@@ -63,10 +62,10 @@ This ensures the package builder runs in an isolated, reproducible Python enviro
 Before committing, ensure your code passes formatting and linting:
 
 ```sh
-make check          # Full checks (fmt + clippy + tests + release-tooling tests)
+make check          # Full checks (fmt + lint + tests + release-tooling tests)
 make fmt-check      # Check formatting (no changes)
 make fmt-fix        # Auto-fix formatting
-make clippy         # Lint with clippy
+make lint           # Lint with golangci-lint
 ```
 
 ### 2. Running tests
@@ -75,27 +74,27 @@ make clippy         # Lint with clippy
 # All tests
 make test
 
-# With wiremock-gated integration tests (some tests early-return unless set)
-RUN_WIREMOCK=1 make verify-test
+# With mock-backend-gated integration tests (some tests early-return unless set)
+RUN_MOCK_BACKEND=1 make verify-test
 
-# Single crate
-cargo test -p gateway-http-anthropic
+# Single package
+go test ./core/domain/translator/...
 
 # Single test by name (substring match)
-cargo test -p gateway-http-anthropic streaming_bridge_matches_text_only_fixture
+go test ./core/domain/translator/... -run TestSSEBridge
 ```
 
 ### 3. Building
 
 ```sh
-# Debug build
-cargo build -p gatewayd --bin cld-gateway
+# Compile-only check (no binary written)
+make build-check
 
-# Release build
-cargo build --release -p gatewayd --bin cld-gateway
+# Build the gateway binary
+make build
 
 # Run locally with checks
-make check && cargo run -p gatewayd --bin cld-gateway
+make check && ./bin/cld-gateway
 ```
 
 ---
@@ -125,14 +124,18 @@ If a pre-commit hook modifies files during a commit attempt:
 ## Repository Structure
 
 ```
-crates/
-  ├── gatewayd/                    # Main daemon binary
-  ├── gateway-core/                # Shared types and config
-  ├── gateway-auth-codex/          # OAuth credential management
-  ├── gateway-backend-codex/       # Upstream HTTP client
-  ├── gateway-http-anthropic/      # Anthropic-compatible HTTP surface
-  ├── gateway-state/               # Local persistence (SQLite)
-  └── gateway-observability/       # Request/response logging
+cmd/cld-gateway/                  # Main daemon/CLI entrypoint
+app/                               # Providers struct, manual constructor DI, router, routes
+core/domain/                       # Use-case interfaces, DTOs, and ports (backend/auth/state/translator)
+core/impl/                         # Concrete adapters and orchestrators (services, backend clients, translators)
+handlers/                          # Thin Echo HTTP handlers
+middleware/                        # Request ID, recovery, unary exchange capture
+observability/                     # Exchange logs, redaction, transport diagnostics
+netpolicy/                         # Outbound network allow/deny policy
+config/                            # Viper-based config loading and model resolution
+tui/                                # bubbletea login vendor picker
+
+old_rust/                          # Frozen former Rust implementation, kept for reference only
 
 scripts/
   ├── release/                     # Package builder and release tools
@@ -146,8 +149,9 @@ scripts/
   └── scripts/
       └── build-cld-gateway-package-archive.sh
 
-docs/                              # Documentation
+docs/                              # Documentation (architecture, decisions, docs site content)
 
+VERSION                           # Canonical release version (plain text, single line)
 Makefile                          # Development targets
 RELEASE.md                        # Release playbook for maintainers
 README.md                         # User guide
@@ -162,7 +166,7 @@ README.md                         # User guide
 When debugging requests/responses, check the exchange log:
 
 ```sh
-tail -f ~/.gateway/logs/http-exchange.jsonl
+tail -f ~/.gateway/logs/http-exchange.log
 ```
 
 Every proxied request has an `x-proxy-request-id` header you can use to correlate entries.
@@ -174,7 +178,7 @@ Use the documented Make targets directly:
 ```sh
 make check
 make test
-RUN_WIREMOCK=1 make verify-test
+RUN_MOCK_BACKEND=1 make verify-test
 ```
 
 ### Runtime issues
@@ -185,7 +189,7 @@ Set environment variables to override default paths and ports:
 # Use custom port and data directory
 CLD_GATEWAY_LISTEN_ADDR=127.0.0.1:8081 \
 GATEWAY_HOME=~/.gateway-dev \
-cargo run -p gatewayd --bin cld-gateway
+./bin/cld-gateway serve
 ```
 
 See `README.md` for a full list of environment variables.
@@ -194,8 +198,8 @@ See `README.md` for a full list of environment variables.
 
 ## Codebase Philosophy
 
-- **Small crates with explicit boundaries**: Each crate documents what it can and cannot import
-- **Type safety**: Leverage Rust's type system; `Secret<T>` wraps sensitive values
+- **Small packages with explicit boundaries**: Each package documents what it can and cannot import
+- **Type safety**: `core.Secret` wraps sensitive values to prevent accidental logging
 - **Observability first**: All exchanges are logged with correlation IDs
 - **Intentional no-ops**: Unsupported Anthropic fields are parsed but logged, see `UNSUPPORTED.md`
 

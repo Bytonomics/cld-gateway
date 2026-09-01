@@ -315,7 +315,7 @@ class TestPackageMetadataValidation:
 class TestWorkspaceVersionConsistency:
     """Regression tests for version consistency across the workspace."""
 
-    def test_version_read_from_cargo_toml(self) -> None:
+    def test_version_read_from_version_file(self) -> None:
         version = read_workspace_version()
         assert isinstance(version, str)
         assert len(version) > 0

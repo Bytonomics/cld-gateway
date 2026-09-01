@@ -8,18 +8,22 @@
 package conversation
 
 import (
+	"bytes"
 	"context"
 	crand "crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
-	"reflect"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gofrs/flock"
 
 	"github.com/Bytonomics/cld-gateway/config"
 	"github.com/Bytonomics/cld-gateway/core/domain/port/state"
@@ -30,6 +34,13 @@ const (
 	branchSchemaVersion               = 1
 	sparseCheckpointSchemaVersion     = 1
 	turnOpenAICheckpointSchemaVersion = 1
+
+	// maxRetentionDays is the largest days value that can be multiplied by
+	// 86400 (24*60*60) without overflowing int64. Mirrors the checked_mul
+	// chain in crates/gateway-state/src/conversation.rs:361-368, which
+	// returns Ok(0) (clean up nothing) if the seconds computation would
+	// overflow or not fit in i64.
+	maxRetentionDays = math.MaxInt64 / (24 * 60 * 60)
 )
 
 // CorruptionPolicy mirrors gateway_core::config::ConversationStateCorruptionPolicy.
@@ -150,10 +161,31 @@ func acquireSessionLock(sessionID string) *sync.Mutex {
 // withSessionLock ports with_session_lock: acquire the per-session mutex,
 // run operation, and on a recoverable corruption error under
 // quarantine_and_reset, quarantine the session directory and retry once.
+// Additionally acquires an OS-level advisory file lock (.session.lock) for
+// cross-process coordination (matching the Rust implementation).
 func withSessionLock[T any](s *Store, sessionID string, operation func() (T, error)) (T, error) {
 	lock := acquireSessionLock(sessionID)
 	lock.Lock()
 	defer lock.Unlock()
+
+	// Acquire OS-level advisory file lock for cross-process coordination
+	sessionDir := s.SessionDir(sessionID)
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		var zero T
+		return zero, err
+	}
+
+	lockFilePath := filepath.Join(sessionDir, ".session.lock")
+	fileLock := flock.New(lockFilePath)
+	if err := fileLock.Lock(); err != nil {
+		var zero T
+		return zero, fmt.Errorf("failed to acquire session file lock: %w", err)
+	}
+	defer func() {
+		if unlockErr := fileLock.Unlock(); unlockErr != nil {
+			slog.Error("failed to release session file lock", "path", lockFilePath, "error", unlockErr)
+		}
+	}()
 
 	result, err := operation()
 	if err != nil && s.corruptionPolicy == CorruptionPolicyQuarantineAndReset && isRecoverableStateCorruption(err) {
@@ -278,6 +310,9 @@ func (s *Store) loadAllBranchesForSelectionUnlocked(claudeSessionID string) ([]s
 
 func (s *Store) CleanupSessionsOlderThan(ctx context.Context, days int) (int, error) {
 	if days < 0 {
+		return 0, nil
+	}
+	if days > maxRetentionDays {
 		return 0, nil
 	}
 	maxAgeSeconds := int64(days) * 24 * 60 * 60
@@ -745,12 +780,39 @@ func (s *Store) ReconcileSnapshot(ctx context.Context, claudeSessionID, branchID
 	})
 }
 
+// jsonEqual compares two JSON-representable values for equality using JSON
+// marshaling/unmarshaling normalization. This ensures consistent comparison
+// regardless of how each value was constructed (e.g., float64 vs int for JSON
+// numbers). Both values are marshaled to JSON and then unmarshaled back to
+// normalize numeric types, then compared by re-marshaling and comparing the
+// byte representations.
+func jsonEqual(a, b any) bool {
+	encodedA, errA := json.Marshal(a)
+	encodedB, errB := json.Marshal(b)
+	if errA != nil || errB != nil {
+		return false
+	}
+	var normA, normB any
+	if err := json.Unmarshal(encodedA, &normA); err != nil {
+		return false
+	}
+	if err := json.Unmarshal(encodedB, &normB); err != nil {
+		return false
+	}
+	reencodedA, errA := json.Marshal(normA)
+	reencodedB, errB := json.Marshal(normB)
+	if errA != nil || errB != nil {
+		return false
+	}
+	return bytes.Equal(reencodedA, reencodedB)
+}
+
 func (s *Store) reconcileBranchSnapshotUnlocked(claudeSessionID, branchID string, params state.ReconcileSnapshotParams) (state.BranchMetadata, error) {
 	branch, err := s.loadBranchUnlocked(claudeSessionID, branchID)
 	if err != nil {
 		return state.BranchMetadata{}, err
 	}
-	snapshotChanged := !reflect.DeepEqual(branch.ActiveCanonicalMessages, params.Messages)
+	snapshotChanged := !jsonEqual(branch.ActiveCanonicalMessages, params.Messages)
 	branch.ActiveCanonicalMessages = params.Messages
 	branch.Fingerprints = params.Fingerprints
 	branch.UpdatedAtUnixSeconds = s.nowUnixSeconds()
@@ -773,23 +835,21 @@ func (s *Store) reconcileBranchSnapshotUnlocked(claudeSessionID, branchID string
 	return branch, nil
 }
 
-// ApplyCompaction deviates from conversation.rs:862-907's apply_compaction,
-// which also takes a fingerprints parameter and overwrites
-// branch.fingerprints with it. The pinned ConversationRepo interface
-// (core/domain/port/state/conversation.go) only carries summaryHash, so
-// this leaves the branch's existing fingerprints unchanged. An empty
-// summaryHash is treated as Rust's None.
-func (s *Store) ApplyCompaction(ctx context.Context, claudeSessionID, branchID string, summaryHash string) (state.BranchMetadata, error) {
+// ApplyCompaction ports apply_compaction and apply_compaction_unlocked
+// (conversation.rs:862-907) verbatim, including the fingerprints overwrite.
+// An empty summaryHash is treated as Rust's None.
+func (s *Store) ApplyCompaction(ctx context.Context, claudeSessionID, branchID string, summaryHash string, fingerprints state.BranchFingerprintSet) (state.BranchMetadata, error) {
 	return withSessionLock(s, claudeSessionID, func() (state.BranchMetadata, error) {
-		return s.applyCompactionUnlocked(claudeSessionID, branchID, summaryHash)
+		return s.applyCompactionUnlocked(claudeSessionID, branchID, summaryHash, fingerprints)
 	})
 }
 
-func (s *Store) applyCompactionUnlocked(claudeSessionID, branchID, summaryHash string) (state.BranchMetadata, error) {
+func (s *Store) applyCompactionUnlocked(claudeSessionID, branchID, summaryHash string, fingerprints state.BranchFingerprintSet) (state.BranchMetadata, error) {
 	branch, err := s.loadBranchUnlocked(claudeSessionID, branchID)
 	if err != nil {
 		return state.BranchMetadata{}, err
 	}
+	branch.Fingerprints = fingerprints
 	branch.CompactionResetPending = true
 	now := s.nowUnixSeconds()
 	branch.UpdatedAtUnixSeconds = now
@@ -860,13 +920,8 @@ func (s *Store) rebuildBranchFromDiskUnlocked(claudeSessionID, branchID string) 
 	return branch, nil
 }
 
-// FindTurnCheckpoint deviates from conversation.rs:947-962's
-// find_turn_openai_checkpoint, a static lookup by
-// (canonical_message_count, canonical_prefix_hash) against an in-memory
-// BranchMetadata. The pinned interface instead passes a turnID and no
-// BranchMetadata, so this loads the branch itself and matches on TurnID,
-// keeping the max-by-created-at tie-break for multiple matches.
-func (s *Store) FindTurnCheckpoint(ctx context.Context, claudeSessionID, branchID, turnID string) (*state.TurnOpenAiCheckpoint, bool) {
+// FindTurnCheckpoint ports find_turn_openai_checkpoint (conversation.rs:947-962) verbatim.
+func (s *Store) FindTurnCheckpoint(ctx context.Context, claudeSessionID, branchID string, canonicalMessageCount uint64, canonicalPrefixHash string) (*state.TurnOpenAiCheckpoint, bool) {
 	branch, err := s.loadBranchUnlocked(claudeSessionID, branchID)
 	if err != nil {
 		return nil, false
@@ -874,7 +929,7 @@ func (s *Store) FindTurnCheckpoint(ctx context.Context, claudeSessionID, branchI
 	var best *state.TurnOpenAiCheckpoint
 	for i := range branch.TurnOpenAiCheckpoints {
 		cp := branch.TurnOpenAiCheckpoints[i]
-		if cp.TurnID != turnID {
+		if cp.CanonicalMessageCount != canonicalMessageCount || cp.CanonicalPrefixHash != canonicalPrefixHash {
 			continue
 		}
 		if best == nil || cp.CreatedAtUnixSeconds > best.CreatedAtUnixSeconds {

@@ -61,6 +61,10 @@ type GenericBackendTranslator struct {
 	ResponseModel          string
 	Clock                  state.Clock
 	stream                 *bridgeState
+	// toolCallKindsAccumulated stores tool call kinds extracted from the most
+	// recent BuildUnaryResponse or stream processing, keyed by call_id.
+	// This allows retrieval after translation completes.
+	toolCallKindsAccumulated map[string]string
 }
 
 func (g *GenericBackendTranslator) kindForCall(callID string) ToolCallKind {
@@ -778,6 +782,9 @@ func translateToolChoice(toolChoice *dto.ToolChoice) string {
 }
 
 // translateOutputConfig ports translate_output_config (translate.rs:737-759).
+// Schema normalization to OpenAI strict json_schema requirements happens
+// downstream in buildRequestBody via ApplyOpenAIStrictSchemaGate, which normalizes
+// both text.format.schema and all tool parameter schemas in a single unified pass.
 func translateOutputConfig(outputConfig *dto.OutputConfig) *map[string]any {
 	if outputConfig == nil {
 		return nil
@@ -786,15 +793,14 @@ func translateOutputConfig(outputConfig *dto.OutputConfig) *map[string]any {
 	if !ok {
 		return nil
 	}
-	formatType, _ := format["type"].(string)
-	if formatType != "json_schema" {
+	formatType, isString := format["type"].(string)
+	if !isString || formatType != "json_schema" {
 		return nil
 	}
 	schema, ok := format["schema"]
 	if !ok {
 		schema = map[string]any{}
 	}
-	schema = normalizeOpenAIStrictResponseSchema(schema)
 
 	result := map[string]any{
 		"format": map[string]any{
@@ -805,155 +811,4 @@ func translateOutputConfig(outputConfig *dto.OutputConfig) *map[string]any {
 		},
 	}
 	return &result
-}
-
-// normalizeOpenAIStrictResponseSchema, normalizeOpenAIStrictSchemaValue,
-// normalizeOpenAIStrictObjectSchema, isObjectSchema and makeSchemaNullable
-// port the OpenAI strict-JSON-schema gate consumed by translate_output_config
-// (crates/gateway-backend-codex/src/schema_gate.rs:9-13,49-182). That crate
-// is Codex-backend-specific, but the request-side gate itself has no
-// Codex-only behavior, so it lives here rather than being invented as a
-// second file outside this task's scope.
-func normalizeOpenAIStrictResponseSchema(schema any) any {
-	return normalizeOpenAIStrictSchemaValue(schema)
-}
-
-func normalizeOpenAIStrictSchemaValue(schema any) any {
-	obj, ok := schema.(map[string]any)
-	if !ok {
-		return schema
-	}
-
-	out := make(map[string]any, len(obj))
-	for k, v := range obj {
-		out[k] = v
-	}
-
-	if isObjectSchema(out) {
-		normalizeOpenAIStrictObjectSchema(out)
-	}
-
-	for _, key := range []string{"items", "additionalProperties", "contains", "not", "if", "then", "else"} {
-		if v, ok := out[key]; ok {
-			out[key] = normalizeOpenAIStrictSchemaValue(v)
-		}
-	}
-
-	for _, key := range []string{"anyOf", "oneOf", "allOf"} {
-		if arr, ok := out[key].([]any); ok {
-			newArr := make([]any, len(arr))
-			for i, v := range arr {
-				newArr[i] = normalizeOpenAIStrictSchemaValue(v)
-			}
-			out[key] = newArr
-		}
-	}
-
-	for _, key := range []string{"$defs", "definitions"} {
-		if defs, ok := out[key].(map[string]any); ok {
-			newDefs := make(map[string]any, len(defs))
-			for k, v := range defs {
-				newDefs[k] = normalizeOpenAIStrictSchemaValue(v)
-			}
-			out[key] = newDefs
-		}
-	}
-
-	return out
-}
-
-func isObjectSchema(obj map[string]any) bool {
-	if _, ok := obj["properties"]; ok {
-		return true
-	}
-	ty, ok := obj["type"].(string)
-	return ok && ty == "object"
-}
-
-func normalizeOpenAIStrictObjectSchema(obj map[string]any) {
-	obj["additionalProperties"] = false
-
-	originalRequired := map[string]bool{}
-	if reqArr, ok := obj["required"].([]any); ok {
-		for _, r := range reqArr {
-			if s, ok := r.(string); ok {
-				originalRequired[s] = true
-			}
-		}
-	}
-
-	propertiesRaw, ok := obj["properties"]
-	if !ok {
-		propertiesRaw = map[string]any{}
-	}
-	properties, ok := propertiesRaw.(map[string]any)
-	if !ok {
-		obj["properties"] = propertiesRaw
-		return
-	}
-
-	propertyNames := make([]string, 0, len(properties))
-	for name := range properties {
-		propertyNames = append(propertyNames, name)
-	}
-	sort.Strings(propertyNames)
-
-	newProperties := make(map[string]any, len(properties))
-	for _, name := range propertyNames {
-		normalized := normalizeOpenAIStrictSchemaValue(properties[name])
-		if !originalRequired[name] {
-			normalized = makeSchemaNullable(normalized)
-		}
-		newProperties[name] = normalized
-	}
-	obj["properties"] = newProperties
-
-	required := make([]any, len(propertyNames))
-	for i, name := range propertyNames {
-		required[i] = name
-	}
-	obj["required"] = required
-}
-
-func makeSchemaNullable(schema any) any {
-	obj, ok := schema.(map[string]any)
-	if !ok {
-		return schema
-	}
-	out := make(map[string]any, len(obj))
-	for k, v := range obj {
-		out[k] = v
-	}
-
-	typeVal, hasType := out["type"]
-	if !hasType {
-		return map[string]any{
-			"anyOf": []any{
-				out,
-				map[string]any{"type": "null"},
-			},
-		}
-	}
-
-	switch ty := typeVal.(type) {
-	case string:
-		if ty != "null" {
-			out["type"] = []any{ty, "null"}
-		}
-	case []any:
-		hasNull := false
-		for _, v := range ty {
-			if s, ok := v.(string); ok && s == "null" {
-				hasNull = true
-				break
-			}
-		}
-		if !hasNull {
-			out["type"] = append(append([]any{}, ty...), "null")
-		}
-	default:
-		// Some(_) in Rust: leave unchanged (covers explicit JSON null and
-		// any other non-string/array "type" value).
-	}
-	return out
 }

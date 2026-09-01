@@ -11,8 +11,8 @@ import (
 
 // TransportDiagLog is a JSONL sink for transport decisions, kept separate
 // from the formatted-text exchange log (see ARCHITECTURE_v2.md
-// "observability/" section). Mirrors append_transport_diagnostic in
-// crates/gateway-http-anthropic/src/lib.rs.
+// "observability/" section, ✱G9 rotation/retention decision). Mirrors
+// append_transport_diagnostic in crates/gateway-http-anthropic/src/lib.rs.
 type TransportDiagLog struct {
 	mu   sync.Mutex
 	path string
@@ -40,9 +40,10 @@ func DefaultTransportDiagLogPath() string {
 }
 
 // Append appends record as one JSON line, stamping timestamp_unix_ms onto
-// it when record marshals to a JSON object. Write failures are returned to
-// the caller (transport decisions are best-effort diagnostics, not part of
-// the request-serving path).
+// it when record marshals to a JSON object. The log rotates by size using
+// the same policy as the formatted exchange log (✱G9). Write failures are
+// returned to the caller (transport decisions are best-effort diagnostics,
+// not part of the request-serving path).
 func (l *TransportDiagLog) Append(record any) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -66,6 +67,14 @@ func (l *TransportDiagLog) Append(record any) error {
 			return fmt.Errorf("create transport diagnostics log dir: %w", err)
 		}
 	}
+
+	// Rotate the log if it has exceeded the size threshold, then prune
+	// old rotated files to stay within the retention limit (✱G9). Rotation
+	// failures are non-fatal; allow the write to proceed. (In format.go this
+	// is handled by FileExchangeLog's circuit breaker; TransportDiagLog is
+	// best-effort and does not need one.)
+	_ = rotateIfOversized(l.path, maxLogSizeBytes, maxRetainedRotatedLogs)
+
 	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		return fmt.Errorf("open transport diagnostics log: %w", err)

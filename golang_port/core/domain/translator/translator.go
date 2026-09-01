@@ -29,4 +29,8 @@ type BackendTranslator interface {
 	TranslateRequest(ctx context.Context, in *dto.MessagesRequest, meta TranslateMeta) (*backend.Request, error)
 	TranslateResponseEvent(ev backend.Event) ([]dto.SSEEvent, error)
 	BuildUnaryResponse(events []backend.Event) (*dto.MessagesResponse, error)
+	// GetToolCallKinds returns the tool-call kinds (by call ID) extracted
+	// during the most recent BuildUnaryResponse or stream processing.
+	// Returns a map from call_id to the canonical wire-format ToolCallKind string.
+	GetToolCallKinds() map[string]string
 }

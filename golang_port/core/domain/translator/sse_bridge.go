@@ -1220,6 +1220,12 @@ func (g *GenericBackendTranslator) BuildUnaryResponse(events []backend.Event) (*
 		mapBackendEvent(st, ev.Type, string(ev.Data), g.ToolCalls, g.RequestID, g.now)
 	}
 
+	// Store tool call kinds for later retrieval by GetToolCallKinds.
+	g.toolCallKindsAccumulated = make(map[string]string, len(st.toolKindByCallID))
+	for callID, kind := range st.toolKindByCallID {
+		g.toolCallKindsAccumulated[callID] = string(kind)
+	}
+
 	assistantText := CleanupStructuredOutputTextWithSchema(g.StructuredOutputSchema, st.finalTextBuffer.String())
 
 	usage := dto.Usage{}
@@ -1286,4 +1292,23 @@ func (g *GenericBackendTranslator) BuildUnaryResponse(events []backend.Event) (*
 		StopReason: &toolUse,
 		Usage:      usage,
 	}, nil
+}
+
+// GetToolCallKinds returns the tool-call kinds (by call ID) extracted during
+// the most recent BuildUnaryResponse or stream processing. Returns a map from
+// call_id to the canonical wire-format ToolCallKind string (e.g.
+// "function_call", "custom_tool_call").
+func (g *GenericBackendTranslator) GetToolCallKinds() map[string]string {
+	if g.toolCallKindsAccumulated == nil {
+		// For streaming, pull from the active stream state if available.
+		if g.stream != nil && g.stream.toolKindByCallID != nil {
+			kinds := make(map[string]string, len(g.stream.toolKindByCallID))
+			for callID, kind := range g.stream.toolKindByCallID {
+				kinds[callID] = string(kind)
+			}
+			return kinds
+		}
+		return map[string]string{}
+	}
+	return g.toolCallKindsAccumulated
 }

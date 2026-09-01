@@ -70,15 +70,19 @@ func (h *MessagesHandler) Post(c echo.Context) error {
 	if result.Stream != nil {
 		writer := coresvc.NewStreamWriter(c.Response(), 0)
 		writer.Run(ctx, result.Stream, coresvc.StreamLogEntry{
-			RequestID:       reqID,
-			StartedAtUnixMs: started.UnixMilli(),
-			Request:         h.requestRecord(c, rawBody),
+			RequestID:           reqID,
+			StartedAtUnixMs:     started.UnixMilli(),
+			ContextManagementMd: result.ContextManagementMetadata,
+			Request:             h.requestRecord(c, rawBody),
 		}, h.log)
 		return nil
 	}
 
-	h.logUnary(c, reqID, started, rawBody, result.Unary)
-	return c.JSON(http.StatusOK, result.Unary)
+	if err := c.JSON(http.StatusOK, result.Unary); err != nil {
+		return err
+	}
+	h.logUnary(c, reqID, started, rawBody, result.Unary, result.ContextManagementMetadata)
+	return nil
 }
 
 func (h *MessagesHandler) requestRecord(c echo.Context, rawBody []byte) observability.HTTPRequestRecord {
@@ -90,7 +94,7 @@ func (h *MessagesHandler) requestRecord(c echo.Context, rawBody []byte) observab
 	}
 }
 
-func (h *MessagesHandler) logUnary(c echo.Context, reqID core.RequestID, started time.Time, rawBody []byte, resp *dto.MessagesResponse) {
+func (h *MessagesHandler) logUnary(c echo.Context, reqID core.RequestID, started time.Time, rawBody []byte, resp *dto.MessagesResponse, metadata map[string]any) {
 	if h.log == nil {
 		return
 	}
@@ -102,9 +106,10 @@ func (h *MessagesHandler) logUnary(c echo.Context, reqID core.RequestID, started
 		RequestID:       reqID,
 		StartedAtUnixMs: started.UnixMilli(),
 		DurationMs:      time.Since(started).Milliseconds(),
+		Metadata:        metadata,
 		Request:         h.requestRecord(c, rawBody),
 		Response: observability.HTTPResponseRecord{
-			Status:  http.StatusOK,
+			Status:  c.Response().Status,
 			Headers: observability.RedactHeaders(c.Response().Header()),
 			Body:    observability.CaptureBody("application/json", respBody),
 		},

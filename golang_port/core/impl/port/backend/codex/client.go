@@ -15,6 +15,7 @@ import (
 
 	portauth "github.com/Bytonomics/cld-gateway/core/domain/port/auth"
 	"github.com/Bytonomics/cld-gateway/core/domain/port/backend"
+	"github.com/Bytonomics/cld-gateway/core/impl/port/auth/codexauth"
 	"github.com/Bytonomics/cld-gateway/netpolicy"
 )
 
@@ -26,6 +27,12 @@ const (
 	// which has request_timeout: None (client.rs:64). Streaming requests are
 	// unaffected: only SendUnary applies this timeout.
 	DefaultUnaryTimeout = 120 * time.Second
+
+	// DefaultStreamIdleReadTimeout is a G4 (approved) idle-read timeout for
+	// streaming responses. Matches StreamWriter's DefaultIdleEventTimeout for
+	// symmetry: if no SSE line arrives within this window, the decoder closes
+	// the body and emits an error event to prevent goroutine leaks.
+	DefaultStreamIdleReadTimeout = 60 * time.Second
 
 	responsesPath = "/backend-api/codex/responses"
 
@@ -40,8 +47,9 @@ const (
 
 // Config configures a Client.
 type Config struct {
-	BaseURL      string
-	UnaryTimeout time.Duration
+	BaseURL               string
+	UnaryTimeout          time.Duration
+	StreamIdleReadTimeout time.Duration
 }
 
 // Client implements backend.Backend against the Codex "Responses-like"
@@ -55,13 +63,16 @@ type Client struct {
 var _ backend.Backend = (*Client)(nil)
 
 // New builds a Client. Zero-value Config fields fall back to
-// DefaultBaseURL / DefaultUnaryTimeout.
+// DefaultBaseURL / DefaultUnaryTimeout / DefaultStreamIdleReadTimeout.
 func New(cfg Config, auth portauth.Provider, httpClient *netpolicy.Client) *Client {
 	if cfg.BaseURL == "" {
 		cfg.BaseURL = DefaultBaseURL
 	}
 	if cfg.UnaryTimeout == 0 {
 		cfg.UnaryTimeout = DefaultUnaryTimeout
+	}
+	if cfg.StreamIdleReadTimeout == 0 {
+		cfg.StreamIdleReadTimeout = DefaultStreamIdleReadTimeout
 	}
 	return &Client{cfg: cfg, auth: auth, http: httpClient}
 }
@@ -139,7 +150,7 @@ func (c *Client) SendStream(ctx context.Context, req *backend.Request) (<-chan b
 	if err != nil {
 		return nil, err
 	}
-	return DecodeEventStream(ctx, res.Body), nil
+	return DecodeEventStream(ctx, res.Body, c.cfg.StreamIdleReadTimeout), nil
 }
 
 // requestWithRefreshRetry ports the shared "refresh once, retry once" 401
@@ -158,6 +169,9 @@ func (c *Client) requestWithRefreshRetry(ctx context.Context, req *backend.Reque
 	}
 
 	if rerr := c.refreshOnUnauthorized(ctx, req); rerr != nil {
+		if errors.Is(rerr, codexauth.ErrRefreshUnauthorized) {
+			_ = c.auth.Logout(ctx, true)
+		}
 		return nil, rerr
 	}
 
@@ -227,12 +241,10 @@ func (c *Client) doRequest(ctx context.Context, req *backend.Request) (*http.Res
 	return res, nil
 }
 
-// buildRequestBody mirrors build_request_body (client.rs:378-445), minus the
-// OpenAI strict-schema gate (crate::schema_gate::apply_openai_strict_schema_gate),
-// which is out of this file's scope and belongs to the translator layer per
-// FILEMAP.md (core/domain/translator/tool_arg_policy.go /
-// claude_response_gate.go). previous_response_id is intentionally not sent
-// here, matching build_request_body, which never includes it in the HTTP
+// buildRequestBody mirrors build_request_body (client.rs:378-445), including
+// the OpenAI strict-schema gate (crate::schema_gate::apply_openai_strict_schema_gate)
+// called as the final step before returning. previous_response_id is intentionally
+// not sent here, matching build_request_body, which never includes it in the HTTP
 // body; incremental transport reuse is a pooled-WebSocket concern (wspool.go).
 func buildRequestBody(req *backend.Request) map[string]any {
 	body := map[string]any{
@@ -255,9 +267,10 @@ func buildRequestBody(req *backend.Request) map[string]any {
 	if req.ServiceTier != nil {
 		body["service_tier"] = *req.ServiceTier
 	}
-	if len(req.ClientMetadata) > 0 {
+	if req.ClientMetadata != nil {
 		body["client_metadata"] = req.ClientMetadata
 	}
+	ApplyOpenAIStrictSchemaGate(body)
 	return body
 }
 

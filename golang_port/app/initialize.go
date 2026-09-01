@@ -52,7 +52,7 @@ func Initialize(cfg *config.Config) (*Providers, error) {
 		conversations = store
 	}
 
-	toolCalls, err := toolcallsstate.Open(toolcallsstate.DefaultToolCallsDBPath())
+	toolCalls, err := toolcallsstate.Open(toolcallsstate.DefaultToolCallsDBPath(), clock)
 	if err != nil {
 		return nil, fmt.Errorf("open tool calls store: %w", err)
 	}

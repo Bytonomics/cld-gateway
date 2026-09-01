@@ -12,13 +12,15 @@ import (
 // domain-level type rather than importing the codex impl package, so this
 // policy stays backend-agnostic per the translator port's extend-via-
 // composition design (ARCHITECTURE_v2.md).
+// Values match the canonical wire-format strings from
+// crates/gateway-backend-codex/src/types.rs::CodexToolCallKind::as_str().
 type ToolCallKind string
 
 const (
-	ToolCallKindFunction   ToolCallKind = "function"
-	ToolCallKindCustom     ToolCallKind = "custom"
-	ToolCallKindToolSearch ToolCallKind = "tool_search"
-	ToolCallKindLocalShell ToolCallKind = "local_shell"
+	ToolCallKindFunction   ToolCallKind = "function_call"
+	ToolCallKindCustom     ToolCallKind = "custom_tool_call"
+	ToolCallKindToolSearch ToolCallKind = "tool_search_call"
+	ToolCallKindLocalShell ToolCallKind = "local_shell_call"
 )
 
 // PolicyEdit records one tool-arg mutation applied by ApplyPolicies, for

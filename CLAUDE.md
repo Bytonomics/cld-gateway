@@ -81,7 +81,7 @@ If a commit fails because a hook modified files, re-stage the hook-changed files
 `gatewayd` is the runnable daemon that wires everything together:
 
 - Binds an Axum HTTP server to `network.listen_addr` from gateway config, defaulting to `127.0.0.1:6483`.
-- Performs a non-interactive OpenAI auth preflight in `serve` mode; missing or invalid auth is logged and startup continues.
+- Performs a non-interactive OpenAI auth preflight in `serve` mode; auth failures abort startup.
 - Runs interactive auth only through `cld-gateway login [openai|gemini]`.
 - Wraps the router with observability middleware that logs exchanges.
 

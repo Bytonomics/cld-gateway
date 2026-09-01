@@ -25,10 +25,9 @@ type Classifier interface {
 //     no deterministic replacement has been defined yet
 //     (classification-signal-redesign.md, PARKED), so this classifier never
 //     returns PermissionClassifier.
-//   - the HookEvaluator check is ported using ONLY the explicit
-//     request-field signals it read (stream flag, output_config presence);
-//     its message-count/role-mix component is dropped per AI_SLOP.md's
-//     explicit "HookEvaluator check" shape-heuristic disposition.
+//   - HookEvaluator classification is currently UNIMPLEMENTED, pending a
+//     deterministic structural/metadata signal from the parked
+//     classification-signal-redesign work.
 //   - the cc_is_subagent=true system-text check (Slop 3) and the SDK/skills
 //     phrase check (Slop 4) are KEPT, each marked BUG(prompt-text) at the
 //     call site, per their AI_SLOP.md dispositions. Slop 4's original Rust
@@ -52,10 +51,6 @@ func (StructuralClassifier) Classify(req *dto.MessagesRequest, meta map[string]s
 	// samples. The signal belongs in request metadata, not prompt text.
 	if strings.Contains(systemText, "cc_is_subagent=true") {
 		return SubagentOffshoot
-	}
-
-	if !req.Stream && req.OutputConfig != nil {
-		return HookEvaluator
 	}
 
 	// BUG(prompt-text): reads system/message prompt text (SDK/skills-list

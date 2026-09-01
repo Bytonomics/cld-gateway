@@ -2,6 +2,26 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Absolute rule: never depend on prompt text
+
+Gateway code can NEVER depend on the text content of prompts (system or
+user messages) — not even if that seems like the only way to support a
+feature or fix a bug. It is not to be considered. Any decision that sniffs
+prompt wording (e.g. `contains("some phrase")` over message text) is a bug.
+
+Message SIZE or SHAPE heuristics (small/large message count, short/long
+request, role-mix patterns used as a proxy for intent) are equally
+forbidden — they are the same dependence wearing a different costume.
+
+Decisions must use deterministic, structured signals only:
+- message tags the client emits from code (`<command-message>`,
+  `<command-name>`, `<command-args>`, `<local-command-stdout>`)
+- client metadata fields (e.g. `gateway_conversation_inclusion`)
+- explicit request fields (stream flag, output config, tool_choice)
+
+Known violations live in `golang_port/docs/AI_SLOP.md`. Do not port them;
+do not add new ones.
+
 ## Quick commands (Rust workspace)
 
 This repo is a Rust workspace (`Cargo.toml` is a virtual workspace manifest) with a repo-level `Makefile`.

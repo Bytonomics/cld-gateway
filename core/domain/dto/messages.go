@@ -7,8 +7,17 @@ package dto
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"github.com/SmrutAI/pedantigo/v2/validator"
+)
+
+var (
+	_ validator.WalkerDecoder = (*Content)(nil)
+	_ validator.WalkerDecoder = (*ToolChoice)(nil)
+	_ validator.WalkerDecoder = (*Tool)(nil)
+	_ validator.WalkerDecoder = (*ContentBlock)(nil)
+	_ validator.WalkerDecoder = (*ImageSource)(nil)
 )
 
 // MessagesRequest ports AnthropicMessagesRequest (types.rs:3-33).
@@ -74,7 +83,7 @@ type Tool struct {
 }
 
 type toolShadow struct {
-	Name           string   `json:"name"`
+	Name           string   `json:"name" validate:"required"`
 	ToolType       *string  `json:"type,omitempty"`
 	Description    *string  `json:"description,omitempty"`
 	InputSchema    any      `json:"input_schema,omitempty"`
@@ -90,20 +99,25 @@ var knownToolKeys = map[string]bool{
 	"allowed_domains": true, "blocked_domains": true, "max_uses": true,
 }
 
-func (t *Tool) UnmarshalJSON(data []byte) error {
-	var shadow toolShadow
-	if err := json.Unmarshal(data, &shadow); err != nil {
-		return err
+func (t *Tool) DecodeWalk(decoded any, recurse func(dst any, decoded any) error) error {
+	obj, ok := decoded.(map[string]any)
+	if !ok {
+		return fmt.Errorf("tool must be a JSON object, got %T", decoded)
 	}
-	raw := map[string]json.RawMessage{}
-	if err := json.Unmarshal(data, &raw); err != nil {
+	var shadow toolShadow
+	if err := recurse(&shadow, decoded); err != nil {
 		return err
 	}
 	extra := map[string]json.RawMessage{}
-	for k, v := range raw {
-		if !knownToolKeys[k] {
-			extra[k] = v
+	for k, val := range obj {
+		if knownToolKeys[k] {
+			continue
 		}
+		raw, err := json.Marshal(val)
+		if err != nil {
+			return err
+		}
+		extra[k] = raw
 	}
 	t.Name = shadow.Name
 	t.ToolType = shadow.ToolType
@@ -147,8 +161,12 @@ type ToolChoice struct {
 	Raw json.RawMessage
 }
 
-func (tc *ToolChoice) UnmarshalJSON(data []byte) error {
-	tc.Raw = append(json.RawMessage(nil), data...)
+func (tc *ToolChoice) DecodeWalk(decoded any, recurse func(dst any, decoded any) error) error {
+	raw, err := json.Marshal(decoded)
+	if err != nil {
+		return err
+	}
+	tc.Raw = raw
 	return nil
 }
 
@@ -178,20 +196,18 @@ type Content struct {
 	Blocks []ContentBlock
 }
 
-func (c *Content) UnmarshalJSON(data []byte) error {
-	var text string
-	if err := json.Unmarshal(data, &text); err == nil {
-		c.Text = &text
+func (c *Content) DecodeWalk(decoded any, recurse func(dst any, decoded any) error) error {
+	switch v := decoded.(type) {
+	case string:
+		c.Text = &v
 		c.Blocks = nil
 		return nil
+	case []any:
+		c.Text = nil
+		return recurse(&c.Blocks, v)
+	default:
+		return fmt.Errorf("content must be a string or an array of content blocks, got %T", decoded)
 	}
-	var blocks []ContentBlock
-	if err := json.Unmarshal(data, &blocks); err != nil {
-		return err
-	}
-	c.Blocks = blocks
-	c.Text = nil
-	return nil
 }
 
 func (c Content) MarshalJSON() ([]byte, error) {
@@ -216,7 +232,7 @@ type ContentBlock struct {
 }
 
 type contentBlockShadow struct {
-	BlockType string       `json:"type"`
+	BlockType string       `json:"type" validate:"required"`
 	Text      *string      `json:"text,omitempty"`
 	ID        *string      `json:"id,omitempty"`
 	Name      *string      `json:"name,omitempty"`
@@ -232,20 +248,25 @@ var knownContentBlockKeys = map[string]bool{
 	"tool_use_id": true, "content": true, "is_error": true, "source": true,
 }
 
-func (b *ContentBlock) UnmarshalJSON(data []byte) error {
-	var shadow contentBlockShadow
-	if err := json.Unmarshal(data, &shadow); err != nil {
-		return err
+func (b *ContentBlock) DecodeWalk(decoded any, recurse func(dst any, decoded any) error) error {
+	obj, ok := decoded.(map[string]any)
+	if !ok {
+		return fmt.Errorf("content block must be a JSON object, got %T", decoded)
 	}
-	raw := map[string]json.RawMessage{}
-	if err := json.Unmarshal(data, &raw); err != nil {
+	var shadow contentBlockShadow
+	if err := recurse(&shadow, decoded); err != nil {
 		return err
 	}
 	extra := map[string]json.RawMessage{}
-	for k, v := range raw {
-		if !knownContentBlockKeys[k] {
-			extra[k] = v
+	for k, val := range obj {
+		if knownContentBlockKeys[k] {
+			continue
 		}
+		raw, err := json.Marshal(val)
+		if err != nil {
+			return err
+		}
+		extra[k] = raw
 	}
 	b.BlockType = shadow.BlockType
 	b.Text = shadow.Text
@@ -293,27 +314,32 @@ type ImageSource struct {
 }
 
 type imageSourceShadow struct {
-	SourceType string  `json:"type"`
+	SourceType string  `json:"type" validate:"required"`
 	MediaType  *string `json:"media_type,omitempty"`
 	Data       *string `json:"data,omitempty"`
 }
 
 var knownImageSourceKeys = map[string]bool{"type": true, "media_type": true, "data": true}
 
-func (s *ImageSource) UnmarshalJSON(data []byte) error {
-	var shadow imageSourceShadow
-	if err := json.Unmarshal(data, &shadow); err != nil {
-		return err
+func (s *ImageSource) DecodeWalk(decoded any, recurse func(dst any, decoded any) error) error {
+	obj, ok := decoded.(map[string]any)
+	if !ok {
+		return fmt.Errorf("image source must be a JSON object, got %T", decoded)
 	}
-	raw := map[string]json.RawMessage{}
-	if err := json.Unmarshal(data, &raw); err != nil {
+	var shadow imageSourceShadow
+	if err := recurse(&shadow, decoded); err != nil {
 		return err
 	}
 	extra := map[string]json.RawMessage{}
-	for k, v := range raw {
-		if !knownImageSourceKeys[k] {
-			extra[k] = v
+	for k, val := range obj {
+		if knownImageSourceKeys[k] {
+			continue
 		}
+		raw, err := json.Marshal(val)
+		if err != nil {
+			return err
+		}
+		extra[k] = raw
 	}
 	s.SourceType = shadow.SourceType
 	s.MediaType = shadow.MediaType

@@ -161,9 +161,16 @@ func (g *GenericBackendTranslator) TranslateRequest(_ context.Context, in *dto.M
 		ParallelToolCalls: true,
 		Text:              text,
 		Reasoning:         reasoning,
-		Stream:            in.Stream,
-		Include:           tools.include,
-		ServiceTier:       meta.ServiceTier,
+		// Hardcoded true, independent of the client's own Anthropic-level
+		// stream field: the Codex/ChatGPT backend requires stream:true on
+		// every call and rejects stream:false with 400 "Stream must be set
+		// to true". Mirrors Rust's build_backend_request, which hardcoded
+		// the same (old_rust/crates/gateway-http-anthropic/src/lib.rs:1686).
+		// Unary vs streaming is purely how this gateway presents its own
+		// response to the client; it was never about what goes upstream.
+		Stream:      true,
+		Include:     tools.include,
+		ServiceTier: meta.ServiceTier,
 	}
 	if len(clientMetadata) > 0 {
 		req.ClientMetadata = clientMetadata

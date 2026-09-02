@@ -1,7 +1,5 @@
 github.com/SmrutAI/pedantigo/plugins/web/pedantigoecho/v2 v2.1.1 h1:BmSQ8Lw0ra8NApPABVgG+IBMSas030LTOEexcfb2TPg=
 github.com/SmrutAI/pedantigo/plugins/web/pedantigoecho/v2 v2.1.1/go.mod h1:YwH62JcBEmKC/p88Z2WpVeJx8Nq3DHFMzNbgB9IdRIQ=
-github.com/SmrutAI/pedantigo/v2 v2.1.1 h1:Kgr6wizjR57dYqpA7CpLgFJQqRC2jr26/06Vw9k6QTE=
-github.com/SmrutAI/pedantigo/v2 v2.1.1/go.mod h1:yaMW/SZnsinglEYBtZr7+YicV0zOF80zMGtk+BN9bjo=
 github.com/aymanbagabas/go-osc52/v2 v2.0.1 h1:HwpRHbFMcZLEVr42D4p7XBqjyuxQH5SMiErDT4WkJ2k=
 github.com/aymanbagabas/go-osc52/v2 v2.0.1/go.mod h1:uYgXzlJ7ZpABp8OJ+exZzJJhRNQ2ASbcXHWsFqH8hp8=
 github.com/bahlo/generic-list-go v0.2.0 h1:5sz/EEAK+ls5wF+NeqDpk5+iNdMDXrh3z3nPnH1Wvgk=

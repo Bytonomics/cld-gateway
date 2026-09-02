@@ -14,6 +14,7 @@ import (
 
 	"github.com/Bytonomics/cld-gateway/core"
 	"github.com/Bytonomics/cld-gateway/core/domain/dto"
+	apperr "github.com/Bytonomics/cld-gateway/core/domain/errors"
 	"github.com/Bytonomics/cld-gateway/core/domain/services"
 	coresvc "github.com/Bytonomics/cld-gateway/core/impl/services"
 	"github.com/Bytonomics/cld-gateway/middleware"
@@ -64,6 +65,7 @@ func (h *MessagesHandler) Post(c echo.Context) error {
 	started := time.Now()
 	result := h.svc.Handle(ctx, &req)
 	if result.Err != nil {
+		h.logError(c, reqID, started, rawBody, result.Err)
 		return result.Err
 	}
 
@@ -92,6 +94,42 @@ func (h *MessagesHandler) requestRecord(c echo.Context, rawBody []byte) observab
 		Headers: observability.RedactHeaders(c.Request().Header),
 		Body:    observability.CaptureBody(c.Request().Header.Get(echo.HeaderContentType), rawBody),
 	}
+}
+
+// logError logs the exchange for a request that failed before any response
+// was written (result.Err != nil in Post, above), mirroring the always-log
+// behavior of the Rust port's capture_http_exchange middleware
+// (gateway-observability/src/middleware.rs:42-140), which wraps every
+// response - success or error - via `next.run(req).await`. Go's handler
+// short-circuits on error instead of building a Response value the way Rust
+// did, so without this call the exchange log would never see errored
+// requests at all. Reuses apperr.AnthropicPayload - the exact function
+// middleware.ErrorHandler uses to build the client's response body - so the
+// logged status/body always match what the client actually received.
+func (h *MessagesHandler) logError(c echo.Context, reqID core.RequestID, started time.Time, rawBody []byte, handleErr error) {
+	if h.log == nil {
+		return
+	}
+	status := http.StatusInternalServerError
+	if appErr, ok := handleErr.(*apperr.AppError); ok && appErr.HTTPStatus != 0 {
+		status = appErr.HTTPStatus
+	}
+	respBody, err := json.Marshal(apperr.AnthropicPayload(handleErr))
+	if err != nil {
+		respBody = nil
+	}
+	entry := observability.Entry{
+		RequestID:       reqID,
+		StartedAtUnixMs: started.UnixMilli(),
+		DurationMs:      time.Since(started).Milliseconds(),
+		Request:         h.requestRecord(c, rawBody),
+		Response: observability.HTTPResponseRecord{
+			Status:  status,
+			Headers: observability.RedactHeaders(c.Response().Header()),
+			Body:    observability.CaptureBody("application/json", respBody),
+		},
+	}
+	_ = h.log.Append(entry)
 }
 
 func (h *MessagesHandler) logUnary(c echo.Context, reqID core.RequestID, started time.Time, rawBody []byte, resp *dto.MessagesResponse, metadata map[string]any) {

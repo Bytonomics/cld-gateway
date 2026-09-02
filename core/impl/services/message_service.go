@@ -282,7 +282,7 @@ func (s *MessageService) handleUnary(ctx context.Context, plan *turnPlan, workin
 	resp, err := s.deps.Backend.SendUnary(ctx, plan.backendReq)
 	if err != nil {
 		s.releaseLease(plan, transport.BackendFailedBeforeCommit)
-		return services.MessageResult{Err: apperr.Wrap(err, apperr.CodeAPI, "backend request failed", 502)}
+		return services.MessageResult{Err: apperr.Wrap(err, apperr.CodeAPI, err.Error(), 502)}
 	}
 
 	// Promote WebSocket chain on the lease if one was acquired (only when persisted && commitTurn).
@@ -349,7 +349,7 @@ func (s *MessageService) handleStream(ctx context.Context, plan *turnPlan, worki
 	backendEvents, err := s.deps.Backend.SendStream(ctx, plan.backendReq)
 	if err != nil {
 		s.releaseLease(plan, transport.BackendFailedBeforeCommit)
-		return services.MessageResult{Err: apperr.Wrap(err, apperr.CodeAPI, "backend stream failed", 502)}
+		return services.MessageResult{Err: apperr.Wrap(err, apperr.CodeAPI, err.Error(), 502)}
 	}
 
 	out := make(chan dto.SSEEvent)

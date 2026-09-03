@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/Bytonomics/cld-gateway/config"
 	"github.com/Bytonomics/cld-gateway/core"
 	"github.com/Bytonomics/cld-gateway/core/domain/claudecode"
@@ -366,6 +368,31 @@ func (s *MessageService) runStream(ctx context.Context, plan *turnPlan, workingR
 	var accumulated []backendport.Event
 	visibleOutputSent := false
 	aborted := false
+
+	// message_start must open every streaming response, unconditionally,
+	// before anything derived from the backend is relayed - sent here,
+	// not from inside the backend-event loop below, so its timing never
+	// depends on how fast the backend responds (ports
+	// anthropic_stream_start_events + build_stream_sse's ordering,
+	// lib.rs:2617-2641,2902-2906; see translator.BuildStreamStartEvents's
+	// doc comment for why TranslateResponseEvent cannot own this itself).
+	msgID := "msg_" + uuid.NewString()
+	for _, startEvent := range translatorpkg.BuildStreamStartEvents(msgID, workingReq.Model) {
+		select {
+		case out <- startEvent:
+			visibleOutputSent = true
+		case <-ctx.Done():
+			aborted = true
+		}
+		if aborted {
+			break
+		}
+	}
+
+	if aborted {
+		s.releaseLease(plan, transport.ClientAbortedBeforeFirstEvent)
+		return
+	}
 
 	for ev := range in {
 		accumulated = append(accumulated, ev)

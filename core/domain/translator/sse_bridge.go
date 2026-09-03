@@ -166,6 +166,35 @@ func sseEvent(name string, payload any) dto.SSEEvent {
 	return dto.SSEEvent{Event: name, Data: data}
 }
 
+// BuildStreamStartEvents ports anthropic_stream_start_events (lib.rs:2617-2641):
+// the message_start event that must open every streaming response, built by
+// the caller before any backend-derived event is relayed (see the package
+// doc's design note - TranslateResponseEvent only sees one backend event at
+// a time and has no notion of "this is the first one", so it cannot safely
+// own this; the caller who controls the outgoing channel and its ordering
+// must send this first, unconditionally, before consuming the backend
+// stream at all).
+func BuildStreamStartEvents(msgID, model string) []dto.SSEEvent {
+	return []dto.SSEEvent{sseEvent("message_start", map[string]any{
+		"type": "message_start",
+		"message": map[string]any{
+			"id":            msgID,
+			"type":          "message",
+			"role":          "assistant",
+			"content":       []any{},
+			"model":         model,
+			"stop_reason":   nil,
+			"stop_sequence": nil,
+			"usage": map[string]any{
+				"input_tokens":                0,
+				"cache_creation_input_tokens": 0,
+				"cache_read_input_tokens":     0,
+				"output_tokens":               0,
+			},
+		},
+	})}
+}
+
 func contentBlockStartText(index uint32) dto.SSEEvent {
 	return sseEvent("content_block_start", map[string]any{
 		"type":  "content_block_start",

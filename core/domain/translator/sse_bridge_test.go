@@ -36,9 +36,12 @@ func runBridge(t *testing.T, tr *GenericBackendTranslator, events []rawEvent) []
 }
 
 // expected is a (event, data) pair mirroring one line of an
-// expected_anthropic_*.jsonl fixture, minus its leading message_start line
-// (message_start is built by the caller in Rust, outside sse_bridge.rs, so
-// it is outside this port's scope).
+// expected_anthropic_*.jsonl fixture, minus its leading message_start line:
+// TranslateResponseEvent only ever sees one backend event at a time and has
+// no notion of "this is the first one", so message_start is built by
+// BuildStreamStartEvents (see its doc comment) and sent by the caller
+// (message_service.go's runStream) before this bridge is ever invoked, not
+// reproduced by anything under test here.
 type expected struct {
 	event string
 	data  string
@@ -435,5 +438,40 @@ func TestBuildUnaryResponseWithToolCall(t *testing.T) {
 	}
 	if input["file_path"] != "/tmp/a.txt" {
 		t.Errorf("input.file_path = %v, want /tmp/a.txt", input["file_path"])
+	}
+}
+
+func TestBuildStreamStartEventsShapeAndContent(t *testing.T) {
+	events := BuildStreamStartEvents("msg_abc123", "claude-opus-4-6")
+	assertSSEEventsEqual(t, events, []expected{{
+		event: "message_start",
+		data: `{
+			"type": "message_start",
+			"message": {
+				"id": "msg_abc123",
+				"type": "message",
+				"role": "assistant",
+				"content": [],
+				"model": "claude-opus-4-6",
+				"stop_reason": null,
+				"stop_sequence": null,
+				"usage": {
+					"input_tokens": 0,
+					"cache_creation_input_tokens": 0,
+					"cache_read_input_tokens": 0,
+					"output_tokens": 0
+				}
+			}
+		}`,
+	}})
+}
+
+func TestBuildStreamStartEventsIsSingleEvent(t *testing.T) {
+	events := BuildStreamStartEvents("msg_x", "model_y")
+	if len(events) != 1 {
+		t.Fatalf("BuildStreamStartEvents returned %d events, want exactly 1", len(events))
+	}
+	if events[0].Event != "message_start" {
+		t.Errorf("Event = %q, want message_start", events[0].Event)
 	}
 }

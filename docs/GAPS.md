@@ -1,13 +1,36 @@
-# GAPS: Rust implementation review (verified findings)
+---
+type: explanation
+title: "Implementation Gaps Tracker (G1-G13)"
+status: stable
+tags:
+  - gaps
+  - decisions
+  - go-port
+stale_after: 2027-05-01
+generated:
+  by: claude-sonnet-5
+  at: 2026-09-03T00:00:00Z
+---
 
-Source: critical review of `crates/`, 2026-08-22. Every finding cites code.
-These are candidates to FIX in the Go port — each needs an owner decision
-before the file map freezes. None are silently folded in.
+# Implementation Gaps Tracker (G1-G13)
+
+| Section | What it covers |
+|---------|----------------|
+| [Critical](#critical) | G1-G4: restart safety and hung-request risk |
+| [High](#high) | G5-G8: swallowed errors and locking assumptions |
+| [Medium](#medium) | G9-G11: log growth, keepalive, health endpoint |
+| [Low](#low) | G12-G13: metrics and error context |
+| [Decisions](#decisions-owner-2026-08-22) | Owner disposition per gap: approved, open, or noted |
+
+Source: critical review of `old_rust/crates/`. Every finding cites code. These are candidates
+to fix in the Go port — each needs an owner decision before it is closed. None are silently
+folded in. `docs/runbooks/deferred-work-audit-triage.md` cross-references the still-open items
+(G1, G3, G10) against their current `TODO` markers in the Go codebase.
 
 ## Critical
 
 ### G1. Chain-checkpoint store lost on restart
-- Where: `crates/gateway-http-anthropic/src/lib.rs:81-82`
+- Where: `old_rust/crates/gateway-http-anthropic/src/lib.rs:81-82`
   (`OpenAiChainCheckpointStore` = `Arc<Mutex<HashMap>>`).
 - What: WS-chain ↔ response-id associations live only in process memory.
 - Consequence: after any restart, incremental transport can't revalidate
@@ -27,14 +50,14 @@ before the file map freezes. None are silently folded in.
 - Recommendation: (b) with TTL sweep — small, removes the crash window.
 
 ### G3. No graceful shutdown
-- Where: `crates/gatewayd/src/main.rs:109-112` — bind and serve; no
+- Where: `old_rust/crates/gatewayd/src/main.rs:109-112` — bind and serve; no
   signal handling.
 - Consequence: SIGTERM drops in-flight streams mid-turn.
 - Go fix: signal.NotifyContext + http.Server.Shutdown with drain timeout;
   leases release on drain. Go makes this easy — do it.
 
 ### G4. Default backend timeout is None
-- Where: `crates/gateway-backend-codex/src/client.rs:64`
+- Where: `old_rust/crates/gateway-backend-codex/src/client.rs:64`
   (`request_timeout: None`).
 - Consequence: frozen upstream hangs a request forever.
 - Go fix: default 120s unary / no header-timeout for streams (streams are
@@ -48,7 +71,7 @@ before the file map freezes. None are silently folded in.
   but never silent).
 
 ### G6. Advisory file locking only
-- Where: `crates/gateway-state/src/conversation.rs:1116-1134`.
+- Where: `old_rust/crates/gateway-state/src/conversation.rs:1116-1134`.
 - Consequence: two gateway processes can interleave writes.
 - Reality: single-user daemon; brew service runs one instance.
 - Go fix: keep flock-style advisory locking + document single-instance
@@ -56,7 +79,7 @@ before the file map freezes. None are silently folded in.
   serve on the same port/state root.
 
 ### G7. Swallowed logging errors
-- Where: `crates/gateway-observability/src/middleware.rs:135-136`.
+- Where: `old_rust/crates/gateway-observability/src/middleware.rs:135-136`.
 - Go fix: slog-warn on append failure; disable-logging circuit breaker
   after N consecutive failures to avoid per-request error spam.
 

@@ -19,7 +19,7 @@ Decisions must use deterministic, structured signals only:
 - client metadata fields (e.g. `gateway_conversation_inclusion`)
 - explicit request fields (stream flag, output config, tool_choice)
 
-Known violations live in `golang_port/docs/AI_SLOP.md`. Do not port them;
+Known violations live in `docs/AI_SLOP.md`. Do not port them;
 do not add new ones.
 
 ## Quick commands (Go module)
@@ -144,7 +144,7 @@ The module is organized as small packages with explicit domain/impl boundaries (
 
 - `core/domain/port/state` + `core/impl/port/state/conversation` + `core/impl/port/state/toolcalls`
   - Local persistence for gateway runtime state.
-  - Stores tool-call metadata/correlation in SQLite (GORM + `glebarez/sqlite`, pure Go, no CGO) under `~/.gateway/state/tool_calls.sqlite` by default.
+  - Stores tool-call metadata/correlation in SQLite (GORM + *glebarez/sqlite*, pure Go, no CGO) under `~/.gateway/state/tool_calls.sqlite` by default.
   - Stores conversation-state sessions, branches, sparse checkpoints, OpenAI provider checkpoints, fingerprints, reconciliation metadata, compaction/reset state, corruption policy, and retention cleanup under the configured conversation-state root.
   - Key files:
     - `core/impl/port/state/conversation/fs.go`

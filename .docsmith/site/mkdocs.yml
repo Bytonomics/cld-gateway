@@ -1,0 +1,300 @@
+site_name: "gateway Docs"
+site_description: ""
+site_author: ""
+
+repo_url: "https://github.com/Bytonomics/cld-gateway"
+edit_uri: "edit/main/"
+
+docs_dir: ./autogen/docs
+site_dir: ./autogen/site
+
+# Fail the build on ANY mkdocs warning -- most importantly a broken internal
+# link, which yields a broken (404) site. Warnings are errors; fix them.
+strict: true
+
+
+nav:
+  - Home: index.md
+
+  - "Decisions":
+
+
+    - "Overview": "_hubs/decisions/index.md"
+
+
+    - "Architecture Decision Records": "decisions/index.md"
+
+
+  - "Explanation":
+
+
+    - "Overview": "_hubs/explanation/index.md"
+
+
+    - "Architecture": "explanation/architecture.md"
+
+
+    - "Design decisions": "explanation/design-decisions.md"
+
+
+    - "Gateway Overview": "explanation/overview.md"
+
+
+    - "Security": "explanation/security.md"
+
+
+  - "General":
+
+
+    - "Overview": "_hubs/general/index.md"
+
+
+    - "AI_SLOP.md": "AI_SLOP.md"
+
+
+    - "Gateway Architecture (Detailed Package Design)": "ARCHITECTURE_v2.md"
+
+
+    - "File and Interface Map": "FILEMAP.md"
+
+
+    - "Implementation Gaps Tracker (G1-G13)": "GAPS.md"
+
+
+    - "Rust-to-Go Release Pipeline Swap": "RELEASE_INTEGRATION.md"
+
+
+    - "Gateway Go Port: Consolidated Spec": "SPEC.md"
+
+
+  - "How To":
+
+
+    - "Overview": "_hubs/how-to/index.md"
+
+
+    - "Extending: adding a backend": "how-to/extending-backends.md"
+
+
+    - "Extending: the translator surface": "how-to/extending-translators.md"
+
+
+    - "Testing": "how-to/testing.md"
+
+
+  - "Reference":
+
+
+    - "Overview": "_hubs/reference/index.md"
+
+
+    - "API reference": "reference/api.md"
+
+
+    - "Command reference": "reference/commands.md"
+
+
+    - "Backends": "reference/configuration/backends.md"
+
+
+    - "Configuration reference": "reference/configuration/index.md"
+
+
+    - "Logs and state": "reference/configuration/logs-and-state.md"
+
+
+  - "Runbooks":
+
+
+    - "Overview": "_hubs/runbooks/index.md"
+
+
+    - "Deferred-Work Audit Triage Handoff": "runbooks/deferred-work-audit-triage.md"
+
+
+    - "Releasing": "runbooks/releasing.md"
+
+
+    - "Troubleshooting": "runbooks/troubleshooting.md"
+
+
+  - "Tutorials":
+
+
+    - "Overview": "_hubs/tutorials/index.md"
+
+
+    - "Installation": "tutorials/installation.md"
+
+
+    - "Quickstart": "tutorials/quickstart.md"
+
+
+    - "The setup command": "tutorials/setup-command.md"
+
+
+  - "Decisions":
+
+
+    - "Index": "decisions-index.md"
+
+
+    - "ADR-0001: 1-to-n scope \u2014 Claude Code inbound only": "decisions/ADR-0001-claude-code-inbound-only.md"
+
+
+    - "ADR-0002: smritea-style DDD layout, single Go module": "decisions/ADR-0002-ddd-layout-single-go-module.md"
+
+
+    - "ADR-0003: Echo + pedantigoecho + pedantigo v2": "decisions/ADR-0003-echo-pedantigo.md"
+
+
+    - "ADR-0004: SSE single-writer goroutine + Option C post-stream logging": "decisions/ADR-0004-sse-single-writer-goroutine.md"
+
+
+    - "ADR-0005: AppError \u2192 Anthropic error shape": "decisions/ADR-0005-apperror-anthropic-error-shape.md"
+
+
+    - "ADR-0006: Backend port + extend-via-composition translators": "decisions/ADR-0006-backend-port-composition-translators.md"
+
+
+    - "ADR-0007: Conversation state stays core, not a pluggable port": "decisions/ADR-0007-conversation-state-core-not-pluggable.md"
+
+
+    - "ADR-0008: Lease machine ported verbatim": "decisions/ADR-0008-lease-machine-ported-verbatim.md"
+
+
+    - "ADR-0009: Library selections": "decisions/ADR-0009-library-selections.md"
+
+
+    - "ADR-0010: Approved gap fixes from the Rust implementation review": "decisions/ADR-0010-approved-gap-fixes-rust-review.md"
+
+
+    - "ADR-0011: Formatted-text exchange log format": "decisions/ADR-0011-formatted-text-exchange-log-format.md"
+
+
+    - "ADR-0012: Rust retained until parity cutover, then one-commit delete": "decisions/ADR-0012-rust-retained-until-parity-cutover.md"
+
+
+  - "Plans":
+
+
+    - "Index": "plans-index.md"
+
+
+    - "Plan: Test Coverage Buildout (C2)": "TEST_PLAN.md"
+
+
+    - "TODO: Classification-signal redesign (parked)": "classification-signal-redesign.md"
+
+
+    - "PLAN: Structured, self-diagnosing error responses + success-path warnings + bug-report guidance": "plans/structured-errors-warnings-bug-reports.md"
+
+
+    - "TODO: Full test audit + migration plan (parked)": "test-audit-and-migration-plan.md"
+
+
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: blue
+      accent: blue
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: blue
+      accent: blue
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - navigation.tracking
+    - navigation.indexes
+    - search.highlight
+    - search.share
+    - search.suggest
+    - toc.follow
+    - toc.integrate
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+    - content.tooltips
+    - header.autohide
+  icon:
+    repo: fontawesome/brands/github
+    edit: material/pencil
+    view: material/eye
+  font:
+    text: "Roboto"
+    code: "Roboto Mono"
+
+plugins:
+  - search:
+      separator: '[\s\-,:!=\[\]()"`/]+|\.(?!\d)|&[lg]t;|(?!\b)(?=[A-Z][a-z])'
+
+  - mermaid2:
+      arguments:
+        theme: |
+          ^(JSON.parse(__md_get("__palette").index == 1)) ?
+          'dark' : 'light'
+
+  - git-revision-date-localized:
+      # enable_creation_date is OFF on purpose. The site is built from the
+      # generated, gitignored autogen/ tree, which has no git history. With
+      # creation dates ON, the plugin computes a fallback "first" vs "last"
+      # timestamp and, whenever first > last, emits a "First revision timestamp
+      # is older than last revision timestamp" message via logging.warning() on
+      # the ROOT logger (plugin.py). That call bypasses this plugin's own
+      # strict:false (which only governs its own `log` channel), so it cannot
+      # be downgraded -- the ONLY switch that skips it is enable_creation_date:
+      # false, which early-returns before the comparison. On an untracked
+      # autogen tree that comparison fires on essentially every page, so
+      # leaving creation dates on produced hundreds of un-suppressable warnings.
+      enable_creation_date: false
+      type: timeago
+      # The autogen tree has no git history, so last-updated falls back to the
+      # build date; strict:false keeps a missing history an info, not a warning,
+      # under mkdocs' top-level strict:true. The autogen tree stays
+      # generated-only; nothing here edits those files.
+      fallback_to_build_date: true
+      strict: false
+      enable_git_follow: false
+
+  - minify:
+      minify_html: true
+      minify_js: true
+      minify_css: true
+      htmlmin_opts:
+        remove_comments: true
+
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets:
+      check_paths: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - admonition
+  - attr_list
+  - tables
+  - toc:
+      permalink: true
+      title: On this page
+

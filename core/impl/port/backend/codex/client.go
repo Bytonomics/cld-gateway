@@ -92,6 +92,16 @@ func (e *StatusError) Error() string {
 	return fmt.Sprintf("unexpected response status %d", e.Status)
 }
 
+// UpstreamStatus implements core/domain/port/backend.UpstreamStatusError.
+func (e *StatusError) UpstreamStatus() int {
+	return e.Status
+}
+
+// UpstreamBody implements core/domain/port/backend.UpstreamStatusError.
+func (e *StatusError) UpstreamBody() string {
+	return e.Body
+}
+
 func newStatusError(status int, rawBody []byte) error {
 	trimmed := strings.TrimSpace(string(rawBody))
 	if trimmed == "" {

@@ -442,7 +442,7 @@ func TestBuildUnaryResponseWithToolCall(t *testing.T) {
 }
 
 func TestBuildStreamStartEventsShapeAndContent(t *testing.T) {
-	events := BuildStreamStartEvents("msg_abc123", "claude-opus-4-6")
+	events := BuildStreamStartEvents("msg_abc123", "claude-opus-4-6", nil)
 	assertSSEEventsEqual(t, events, []expected{{
 		event: "message_start",
 		data: `{
@@ -467,11 +467,38 @@ func TestBuildStreamStartEventsShapeAndContent(t *testing.T) {
 }
 
 func TestBuildStreamStartEventsIsSingleEvent(t *testing.T) {
-	events := BuildStreamStartEvents("msg_x", "model_y")
+	events := BuildStreamStartEvents("msg_x", "model_y", nil)
 	if len(events) != 1 {
 		t.Fatalf("BuildStreamStartEvents returned %d events, want exactly 1", len(events))
 	}
 	if events[0].Event != "message_start" {
 		t.Errorf("Event = %q, want message_start", events[0].Event)
 	}
+}
+
+func TestBuildStreamStartEventsWithWarnings(t *testing.T) {
+	warnings := []dto.Warning{{Code: "delta_calculation_skipped", Message: "[CLD-Gateway] Sent full conversation history instead of an incremental update for this turn."}}
+	events := BuildStreamStartEvents("msg_w1", "claude-opus-4-6", warnings)
+	assertSSEEventsEqual(t, events, []expected{{
+		event: "message_start",
+		data: `{
+			"type": "message_start",
+			"message": {
+				"id": "msg_w1",
+				"type": "message",
+				"role": "assistant",
+				"content": [],
+				"model": "claude-opus-4-6",
+				"stop_reason": null,
+				"stop_sequence": null,
+				"usage": {
+					"input_tokens": 0,
+					"cache_creation_input_tokens": 0,
+					"cache_read_input_tokens": 0,
+					"output_tokens": 0
+				},
+				"warnings": [{"code": "delta_calculation_skipped", "message": "[CLD-Gateway] Sent full conversation history instead of an incremental update for this turn."}]
+			}
+		}`,
+	}})
 }

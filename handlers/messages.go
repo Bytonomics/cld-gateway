@@ -14,7 +14,6 @@ import (
 
 	"github.com/Bytonomics/cld-gateway/core"
 	"github.com/Bytonomics/cld-gateway/core/domain/dto"
-	apperr "github.com/Bytonomics/cld-gateway/core/domain/errors"
 	"github.com/Bytonomics/cld-gateway/core/domain/services"
 	coresvc "github.com/Bytonomics/cld-gateway/core/impl/services"
 	"github.com/Bytonomics/cld-gateway/middleware"
@@ -103,18 +102,18 @@ func (h *MessagesHandler) requestRecord(c echo.Context, rawBody []byte) observab
 // response - success or error - via `next.run(req).await`. Go's handler
 // short-circuits on error instead of building a Response value the way Rust
 // did, so without this call the exchange log would never see errored
-// requests at all. Reuses apperr.AnthropicPayload - the exact function
-// middleware.ErrorHandler uses to build the client's response body - so the
-// logged status/body always match what the client actually received.
+// requests at all. Reuses middleware.ClassifyForResponse - the same
+// function middleware.ErrorHandler and middleware.Capture use - so the
+// logged status/body always match what the client actually received, and
+// so /v1/messages gets identical error classification (origin, branding,
+// bug-report guidance) to every other route instead of a separately
+// duplicated derivation.
 func (h *MessagesHandler) logError(c echo.Context, reqID core.RequestID, started time.Time, rawBody []byte, handleErr error) {
 	if h.log == nil {
 		return
 	}
-	status := http.StatusInternalServerError
-	if appErr, ok := handleErr.(*apperr.AppError); ok && appErr.HTTPStatus != 0 {
-		status = appErr.HTTPStatus
-	}
-	respBody, err := json.Marshal(apperr.AnthropicPayload(handleErr))
+	status, payload := middleware.ClassifyForResponse(handleErr)
+	respBody, err := json.Marshal(payload)
 	if err != nil {
 		respBody = nil
 	}

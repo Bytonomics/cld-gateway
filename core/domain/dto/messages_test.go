@@ -1,6 +1,8 @@
 package dto
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/SmrutAI/pedantigo/v2/validator"
@@ -78,5 +80,54 @@ func TestMessagesRequest_ToolRequiredNameEnforced(t *testing.T) {
 	var req MessagesRequest
 	if err := validator.UnmarshalInto(body, &req); err == nil {
 		t.Fatalf("expected error for tool missing required name, got nil")
+	}
+}
+
+func TestMessagesResponse_NoWarnings_OmitsWarningsKey(t *testing.T) {
+	resp := MessagesResponse{ID: "msg_1", Type: "message", Role: "assistant", Model: "claude-opus-4-6", Content: []ContentBlock{}, Usage: Usage{}}
+	data, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	if strings.Contains(string(data), "warnings") {
+		t.Errorf("marshaled JSON contains \"warnings\" key when Warnings is nil/empty: %s", data)
+	}
+}
+
+func TestMessagesResponse_WithWarnings_MarshalsCorrectly(t *testing.T) {
+	resp := MessagesResponse{
+		ID: "msg_1", Type: "message", Role: "assistant", Model: "claude-opus-4-6",
+		Content: []ContentBlock{}, Usage: Usage{},
+		Warnings: []Warning{{Code: "delta_calculation_skipped", Message: "[CLD-Gateway] Sent full conversation history instead of an incremental update for this turn."}},
+	}
+	data, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	var roundTripped MessagesResponse
+	if err := json.Unmarshal(data, &roundTripped); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	if len(roundTripped.Warnings) != 1 {
+		t.Fatalf("len(Warnings) = %d, want 1", len(roundTripped.Warnings))
+	}
+	if roundTripped.Warnings[0].Code != "delta_calculation_skipped" {
+		t.Errorf("Warnings[0].Code = %q, want %q", roundTripped.Warnings[0].Code, "delta_calculation_skipped")
+	}
+	wantMsg := "[CLD-Gateway] Sent full conversation history instead of an incremental update for this turn."
+	if roundTripped.Warnings[0].Message != wantMsg {
+		t.Errorf("Warnings[0].Message = %q, want %q", roundTripped.Warnings[0].Message, wantMsg)
+	}
+}
+
+func TestWarning_JSONTags_AreLowerSnakeCase(t *testing.T) {
+	w := Warning{Code: "x", Message: "y"}
+	data, err := json.Marshal(w)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	want := `{"code":"x","message":"y"}`
+	if string(data) != want {
+		t.Errorf("Marshal(Warning{Code:\"x\",Message:\"y\"}) = %s, want %s", data, want)
 	}
 }

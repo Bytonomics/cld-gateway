@@ -1,28 +1,52 @@
-# SPEC: golang_port (consolidated, single file)
+---
+type: explanation
+title: "Gateway Go Port: Consolidated Spec"
+status: stable
+tags:
+  - spec
+  - go-port
+  - architecture
+stale_after: 2027-05-01
+generated:
+  by: claude-sonnet-5
+  at: 2026-09-03T00:00:00Z
+---
 
-Version: 1.0 — consolidates all grill-me interview rounds (2026-08-22).
-Canonical in-repo spec; GitHub issue #3 mirrors this text.
+# Gateway Go Port: Consolidated Spec
+
+| Section | What it covers |
+|---------|----------------|
+| [Problem Statement](#problem-statement) | Why the Rust daemon was replaced |
+| [Solution](#solution) | The shipped Go architecture |
+| [User Stories](#user-stories) | The 20 behaviors the port had to preserve or add |
+| [Implementation Decisions](#implementation-decisions) | Scope, layout, libraries, DDD decomposition |
+| [Testing Decisions](#testing-decisions) | Seam choice and parity-gate approach |
+| [Out of Scope](#out-of-scope) | What this spec deliberately excluded |
+| [Further Notes](#further-notes) | Related parked/detail docs |
+
+Consolidates the grill-me interview rounds behind the Go rewrite. This spec's implementation is
+complete: the codebase at the repo root (`cmd/`, `core/domain/`, `core/impl/`, `app/`,
+`handlers/`, `middleware/`, `observability/`, `config/`) matches the layout and decisions
+below. The former Rust daemon is frozen for reference at `old_rust/`.
 
 ## Problem Statement
 
-The gateway is a single-user local Rust daemon (~17k lines, 8 crates) whose
-`gateway-http-anthropic/src/lib.rs` is a 10k-line god object owning routing,
-translation, transport selection, and commits. The owner wants a maintainable
-Go rewrite that preserves every runtime behavior and the Homebrew install
-contract, re-architects the outbound side as pluggable backends (1-to-n),
-and permanently excludes the Codex-generated prompt-text heuristics
-(`AI_SLOP.md`).
+The gateway was a single-user local Rust daemon (~17k lines, 8 crates) whose
+`gateway-http-anthropic/src/lib.rs` was a 10k-line god object owning routing, translation,
+transport selection, and commits. The owner wanted a maintainable Go rewrite that preserves
+every runtime behavior and the Homebrew install contract, re-architects the outbound side as
+pluggable backends (1-to-n), and permanently excludes the Codex-generated prompt-text
+heuristics (`docs/AI_SLOP.md`).
 
 ## Solution
 
-A Go port in `golang_port/` following the smritea-cloud DDD layout — thin
-`cmd/` main, `app/` with a Providers struct and manual constructor DI,
-`core/domain` (service interfaces + ports) and `core/impl` (implementations),
-thin `handlers/`, `middleware/` — built on Echo v4 with the pedantigoecho
-binder and pedantigo v2. The outbound side is a Backend port with one Codex
-implementation and extend-via-composition translators. SSE streaming runs on
-a single-writer goroutine over an event channel; exchange logging happens
-post-stream in formatted text entries.
+A Go codebase at the repo root following the smritea-cloud DDD layout — thin `cmd/` main,
+`app/` with a Providers struct and manual constructor DI, `core/domain` (service interfaces +
+ports) and `core/impl` (implementations), thin `handlers/`, `middleware/` — built on Echo v4
+with the pedantigoecho binder and pedantigo v2. The outbound side is a Backend port with one
+Codex implementation and extend-via-composition translators. SSE streaming runs on a
+single-writer goroutine over an event channel; exchange logging happens post-stream in
+formatted text entries.
 
 ## User Stories
 
@@ -77,7 +101,7 @@ post-stream in formatted text entries.
   one active backend at a time; no harness port; no neutral IR.
 
 ### Layout (approved)
-- Single Go module `github.com/Bytonomics/cld-gateway`; entrypoint
+- Single Go module github.com/Bytonomics/cld-gateway (see `go.mod`); entrypoint
   `cmd/cld-gateway`; smritea-cloud layout: app/ (Providers, routes_*.go,
   manual DI — no fx/wire), core/domain + core/impl mirror, handlers/,
   middleware/, observability/. Compile-time interface asserts.
@@ -168,10 +192,9 @@ post-stream in formatted text entries.
 
 ## Further Notes
 
-- Parked docs live in golang_port/docs/: classification-signal-redesign.md,
-  test-audit-and-migration-plan.md, AI_SLOP.md.
-- ARCHITECTURE_v2.md (this folder) is the detailed package design matching
-  this spec.
+- Parked docs live in `docs/`: `docs/classification-signal-redesign.md`,
+  `docs/test-audit-and-migration-plan.md`, `docs/AI_SLOP.md`.
+- `docs/ARCHITECTURE_v2.md` is the detailed package design matching this spec.
 - The owner explicitly distrusts the slop inventory: the re-audit must both
   find missed prompt-text decisions and re-verify the four known ones before
   replacement signals are designed.

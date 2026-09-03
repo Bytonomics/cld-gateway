@@ -1,9 +1,45 @@
-# FILEMAP: exact files, interfaces, public methods (golang_port)
+---
+type: reference
+title: "File and Interface Map"
+status: stable
+tags:
+  - reference
+  - architecture
+  - go-port
+stale_after: 2026-12-02
+generated:
+  by: claude-sonnet-5
+  at: 2026-09-03T00:00:00Z
+---
 
-Derived from the verified Rust public API surface (gateway-state 48 public
-items; auth/net/backend/core/module APIs extracted 2026-08-22). Public
-surface only — unexported internals decided during implementation.
-GAP fixes (GAPS.md) marked ✱ where they add methods; pending owner approval.
+# File and Interface Map
+
+| Section | What it covers |
+|---------|----------------|
+| [cmd/cld-gateway/main.go](#cmdcld-gatewaymaingo) | Entry point |
+| [app/](#app) | Providers struct, DI, router, route mounts |
+| [core/domain/errors/](#coredomainerrors) | AppError and the Anthropic error shape |
+| [core/domain/services/](#coredomainservices) | Service interfaces |
+| [core/domain/dto/](#coredomaindto-one-file-per-family) | Request/response DTOs |
+| [core/domain/port/](#coredomainport) | Backend, auth, and state port interfaces |
+| [core/domain/translator/](#coredomaintranslator) | BackendTranslator interface and shared policy |
+| [core/domain/claudecode/](#coredomainclaudecode) | Command envelope, inclusion, context normalization |
+| [core/domain/conversation/](#coredomainconversation) | Request-kind classification and identity |
+| [core/domain/transport/](#coredomaintransport) | Transport selection, lease, chain registry |
+| [core/domain/contextmgmt/](#coredomaincontextmgmt) | Context management edits and hard limits |
+| [core/impl/](#coreimpl) | Concrete adapters and orchestrators |
+| [handlers/](#handlers) | Thin Echo handlers |
+| [middleware/](#middleware) | Request-id, recovery, capture |
+| [observability/](#observability) | Exchange logs, redaction, transport diagnostics |
+| [config/](#config) | Viper-based config load and model resolution |
+| [core/ (root)](#core-root) | RequestID, Secret, error-chain helper |
+| [tui/](#tui) | Login-selector terminal UI |
+| [File count](#file-count-41-files) | Total files this map covers |
+
+Derived from the verified Rust public API surface (`old_rust/crates/gateway-state` 48 public
+items; auth/net/backend/core/module APIs extracted from `old_rust/`). Public surface only —
+unexported internals are an implementation detail. GAP fixes (`docs/GAPS.md`) marked with a
+leading `✱` where they add methods beyond the ported Rust surface.
 
 ## cmd/cld-gateway/main.go
 - `func Main()` — argv: `serve` (default) | `login [openai|gemini]`;
@@ -109,7 +145,7 @@ validator.Register(validator.New[MessagesRequest]())` etc.)
     FindTurnCheckpoint(ctx, sessionID, branchID, turnID string) (*TurnOpenAiCheckpoint, bool)
     CleanupSessionsOlderThan(ctx context.Context, days int) (int, error)
   }` — 1:1 port of the 20 ConversationStateStore methods
-  (`crates/gateway-state/src/conversation.rs`).
+  (`old_rust/crates/gateway-state/src/conversation.rs`).
 **state/toolcalls.go**
 - `type ToolCallRepo interface {
     EnsureSchema(ctx context.Context) error
@@ -217,7 +253,7 @@ services.MessageService; steps 1-9 per ARCHITECTURE_v2.
 **services/stream_writer.go** — the single writer goroutine: owns
 echo.Response, `WriteEvent(dto.SSEEvent) error` (write+flush),
 ✱G4 idle-event timeout; hands accumulated events to logger at close.
-**services/models_service.go / auth_status_service.go / count_tokens.go**
+**services/models_service.go / auth_status_service.go / count_tokens_service.go**
 **port/backend/codex/client.go** — `type Client struct`;
 `func New(cfg Config, auth portauth.Provider, http *netpolicy.Client) *Client`;
 implements port.Backend (SendUnary, SendStream, Capabilities,
@@ -266,14 +302,15 @@ streaming routes).
 **config.go** — viper load; `type Config struct` (Workflow/Providers/
 Network); `func Load(path string) (*Config, error)`;
 `func DefaultPath() string`; providers map keyed by backend name with
-`active: true` on one.
-**models.go** — `func ResolveModel(c *Config, requested string) Resolution`;
-`func ServiceTier(c *Config) *string`.
+`active: true` on one; also owns model resolution (no separate `models.go`
+file exists): `func ResolveModel(cfg *Config, requested string) ModelResolution`;
+`func ServiceTier(cfg *Config) *string`.
 
 ## core/ (root)
-**ids.go** — `type RequestID string`; `func NewRequestID() RequestID`
-**secret.go** — `type Secret string`; `func (s Secret) Expose() string`
-**errors.go** — error-chain helper.
+**core.go** — no separate `ids.go`/`secret.go`/`errors.go` files exist; all three concerns share
+this one file: `type RequestID string`; `func NewRequestID() RequestID`; `type Secret string`;
+`func (s Secret) Expose() string`; `func Unwrap(err error) error` and
+`func FormatErrorChain(err error) string` (error-chain helpers).
 
 ## tui/
 **login.go** — bubbletea model for vendor picker; `func RunLoginSelector()

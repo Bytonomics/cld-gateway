@@ -46,13 +46,7 @@ func ErrorHandler(err error, c echo.Context) {
 		return
 	}
 
-	appErr := toAppError(err)
-	status := appErr.HTTPStatus
-	if status == 0 {
-		status = http.StatusInternalServerError
-	}
-
-	payload := apperr.AnthropicPayload(appErr)
+	status, payload := ClassifyForResponse(err)
 
 	var writeErr error
 	if c.Request().Method == http.MethodHead {
@@ -82,4 +76,36 @@ func toAppError(err error) *apperr.AppError {
 	}
 
 	return apperr.Wrap(err, apperr.CodeAPI, err.Error(), http.StatusInternalServerError)
+}
+
+// ClassifyForResponse normalizes err (via toAppError, so pedantigoecho
+// binder validation failures and any *AppError are both handled) and runs
+// it through errors.Classify to get the branded message, HTTP status, and
+// - when the failure looks like a possible gateway bug - the report
+// instruction folded into the final message text. Returns the HTTP status
+// to use and the exact JSON payload to serialize. Used by both ErrorHandler
+// (below) and middleware.Capture, so the exchange log's recorded
+// status/body is guaranteed identical to what the client actually receives
+// - never independently re-derived.
+func ClassifyForResponse(err error) (int, map[string]any) {
+	gwErr := apperr.Classify(toAppError(err))
+
+	status := gwErr.HTTPStatus
+	if status == 0 {
+		status = http.StatusInternalServerError
+	}
+
+	message := gwErr.Message
+	if gwErr.SuggestIssue && gwErr.Instruction != "" {
+		message = message + " " + gwErr.Instruction
+	}
+
+	payload := map[string]any{
+		"type": "error",
+		"error": map[string]any{
+			"type":    string(gwErr.Code),
+			"message": message,
+		},
+	}
+	return status, payload
 }

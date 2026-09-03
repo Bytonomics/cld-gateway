@@ -11,22 +11,30 @@ import (
 	"github.com/Bytonomics/cld-gateway/observability"
 )
 
-// Capture is UNARY-ONLY exchange capture: it buffers the request body,
-// wraps the response writer to tee response bytes into a buffer, runs
-// next(c), then appends one observability.Entry once next(c) returns.
+// Capture is exchange capture for both unary and streaming routes: it
+// buffers the request body, wraps the response writer to tee response bytes
+// into a buffer, runs next(c), then appends one observability.Entry once
+// next(c) returns.
 //
-// This middleware must NEVER be mounted on POST /v1/messages. Wrapping
-// c.Response().Writer up front (as this middleware structurally must, to
-// see response bytes/status before Append) is only safe when the route's
-// handler is guaranteed to write its own single response before returning.
-// /v1/messages can instead hand off to the single SSE-writer goroutine in
-// core/impl/services/stream_writer.go, which owns c.Response() directly and
-// must be the ONLY thing that ever writes to it (ARCHITECTURE_v2.md, "SSE +
-// logging"); a second wrapper installed here would double-wrap that writer
-// and break the Flusher-forwarding invariant the architecture doc calls
-// out. Mount Capture only on routes that are always-unary (count_tokens,
-// models, health, auth); handlers/messages.go performs its own equivalent
-// logging inline for the unary case instead of relying on this middleware.
+// Safe on streaming routes (including POST /v1/messages) because
+// captureWriter implements Unwrap() http.ResponseWriter (Go 1.20+,
+// http.ResponseController) - echo.Response.Flush() resolves flushing through
+// http.NewResponseController(r.Writer).Flush(), which follows Unwrap() to
+// find the real underlying http.Flusher when the immediate writer doesn't
+// implement it directly. This supersedes ADR-0004's "no middleware may wrap
+// the response writer on streaming routes" constraint - see ADR-0013.
+// core/impl/services/stream_writer.go's StreamWriter.Run is still the sole
+// writer of SSE bytes to c.Response() for the duration of one streaming
+// exchange (unchanged; that invariant was never about middleware, it's
+// about not racing two goroutines on the same writer), and handlers/
+// messages.go calls it synchronously, so Capture's post-next(c) logging
+// still runs strictly after the last byte reaches the client - Option C
+// logging semantics are preserved, just from the middleware side instead of
+// from inside StreamWriter itself.
+//
+// Handlers set per-request log metadata (e.g. dto.MessagesResponse's
+// ContextManagementMetadata) via c.Set(exchangeMetadataContextKey, v) before
+// returning; Capture reads it back after next(c) to populate Entry.Metadata.
 func Capture(log observability.ExchangeLog) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
@@ -54,10 +62,16 @@ func Capture(log observability.ExchangeLog) echo.MiddlewareFunc {
 				}
 			}
 
+			var metadata map[string]any
+			if v, ok := c.Get(exchangeMetadataContextKey).(map[string]any); ok {
+				metadata = v
+			}
+
 			entry := observability.Entry{
 				RequestID:       RequestIDFromEcho(c),
 				StartedAtUnixMs: started.UnixMilli(),
 				DurationMs:      time.Since(started).Milliseconds(),
+				Metadata:        metadata,
 				Request: observability.HTTPRequestRecord{
 					Method:  c.Request().Method,
 					URI:     c.Request().RequestURI,
@@ -80,9 +94,21 @@ func Capture(log observability.ExchangeLog) echo.MiddlewareFunc {
 	}
 }
 
+// exchangeMetadataContextKey is the echo.Context key a handler sets via
+// c.Set before returning, carrying per-request data (e.g.
+// dto.MessagesResponse.ContextManagementMetadata) that Capture folds into
+// the logged Entry.Metadata after next(c) returns.
+const exchangeMetadataContextKey = "exchange_metadata"
+
 // captureWriter tees every Write into buf while still forwarding to the
 // underlying http.ResponseWriter, so the wrapped handler's response reaches
 // the client unchanged.
+//
+// Implements Unwrap() http.ResponseWriter so http.ResponseController (which
+// echo.Response.Flush()/Hijack() use internally) can find the real
+// underlying http.Flusher/http.Hijacker through this wrapper - this is what
+// makes it safe to mount on streaming routes (see the Capture doc comment
+// and ADR-0013).
 type captureWriter struct {
 	http.ResponseWriter
 	buf *bytes.Buffer
@@ -91,4 +117,8 @@ type captureWriter struct {
 func (w *captureWriter) Write(b []byte) (int, error) {
 	w.buf.Write(b)
 	return w.ResponseWriter.Write(b)
+}
+
+func (w *captureWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
 }

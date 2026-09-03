@@ -1,12 +1,11 @@
-// stream_writer.go is the single SSE writer goroutine described in
-// ARCHITECTURE_v2.md ("SSE + logging (settled)"): one goroutine owns the
+// stream_writer.go is the single SSE writer described in ADR-0013 (which
+// supersedes ADR-0004's "Option C" logging): one goroutine owns the
 // echo.Response for a streaming /v1/messages exchange, writes+flushes every
-// event as it arrives, and hands the accumulated events to Option-C
-// exchange logging only after the stream has finished.
+// event as it arrives; exchange logging is middleware.Capture's job now,
+// not this file's.
 package services
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -15,11 +14,8 @@ import (
 
 	"github.com/labstack/echo/v4"
 
-	"github.com/Bytonomics/cld-gateway/config"
-	"github.com/Bytonomics/cld-gateway/core"
 	"github.com/Bytonomics/cld-gateway/core/domain/dto"
 	apperr "github.com/Bytonomics/cld-gateway/core/domain/errors"
-	"github.com/Bytonomics/cld-gateway/observability"
 )
 
 // DefaultIdleEventTimeout is the ✱G4 idle-event timeout: if no event
@@ -27,21 +23,13 @@ import (
 // the stream instead of hanging forever.
 const DefaultIdleEventTimeout = 60 * time.Second
 
-// StreamLogEntry is the caller-captured half of the Option-C exchange log
-// entry (request side, timing origin) that StreamWriter merges with the
-// events it wrote before calling log.Append at stream close.
-type StreamLogEntry struct {
-	RequestID           core.RequestID
-	StartedAtUnixMs     int64
-	ModelResolution     *config.ModelResolution
-	ContextManagementMd map[string]any
-	Request             observability.HTTPRequestRecord
-}
-
 // StreamWriter is the sole owner of resp for the lifetime of one streaming
-// exchange. No middleware may wrap resp on the streaming path (enforced by
-// wiring in a later wave); StreamWriter itself assumes nothing about
-// wrapping - it writes and flushes resp directly.
+// exchange - exactly one goroutine ever writes SSE bytes to it, so there is
+// no write race to guard against. Middleware MAY wrap resp's underlying
+// writer (middleware.Capture does, as of ADR-0013) as long as the wrapper
+// implements Unwrap() http.ResponseWriter so Flush()/WriteHeader() still
+// reach the real writer; StreamWriter itself writes and flushes resp
+// exactly as before, unaware of and unaffected by any such wrapping.
 type StreamWriter struct {
 	resp        *echo.Response
 	idleTimeout time.Duration
@@ -85,31 +73,28 @@ func (w *StreamWriter) ensureHeaders() {
 // documented channel contract) or ctx is done, writing every event via
 // WriteEvent. Run is meant to be called synchronously by the HTTP handler
 // (it blocks until the stream ends) so that no byte is ever written to
-// resp after the handler has returned.
+// resp after the handler has returned - this is also what makes
+// middleware.Capture's post-next(c) exchange logging correct for streaming
+// responses: it wraps the whole synchronous handler call, so its logging
+// still runs strictly after the last byte reaches the client (see
+// middleware/capture.go's doc comment and ADR-0013). Run no longer logs
+// the exchange itself (ADR-0004's Option C is superseded by ADR-0013) -
+// Capture is the single place that does it now, for every route.
 //
 // If no event arrives within the idle timeout (✱G4), Run writes a
 // terminal error SSE event and stops - since message_service.go remains
 // the only permitted closer of in, Run keeps draining (and discarding) in
 // on a background goroutine afterward so the producer is never left
 // blocked on an unbuffered send.
-//
-// At close, Run hands the accumulated events to log.Append (Option C):
-// this happens strictly after the last byte reaches the client, so
-// logging never delays streaming.
-func (w *StreamWriter) Run(ctx context.Context, in <-chan dto.SSEEvent, base StreamLogEntry, log observability.ExchangeLog) {
-	var accumulated []dto.SSEEvent
-
+func (w *StreamWriter) Run(ctx context.Context, in <-chan dto.SSEEvent) {
 	timer := time.NewTimer(w.idleTimeout)
 	defer timer.Stop()
 
 	finalize := func(terminalReason string) {
 		if terminalReason != "" {
-			ev := finalizeErrorEvent(terminalReason)
-			accumulated = append(accumulated, ev)
-			_ = w.WriteEvent(ev)
+			_ = w.WriteEvent(finalizeErrorEvent(terminalReason))
 		}
 		go drainSSEChannel(in)
-		w.logAccumulated(base, accumulated, log)
 	}
 
 	for {
@@ -124,15 +109,12 @@ func (w *StreamWriter) Run(ctx context.Context, in <-chan dto.SSEEvent, base Str
 		select {
 		case ev, ok := <-in:
 			if !ok {
-				w.logAccumulated(base, accumulated, log)
 				return
 			}
-			accumulated = append(accumulated, ev)
 			if err := w.WriteEvent(ev); err != nil {
 				// Client is gone; stop writing but keep draining in so
 				// message_service.go's close(in) never blocks.
 				go drainSSEChannel(in)
-				w.logAccumulated(base, accumulated, log)
 				return
 			}
 		case <-ctx.Done():
@@ -169,32 +151,4 @@ func finalizeErrorEvent(reason string) dto.SSEEvent {
 		payload = []byte(`{"type":"error","error":{"type":"api_error","message":"stream terminated"}}`)
 	}
 	return dto.SSEEvent{Event: "error", Data: payload}
-}
-
-func (w *StreamWriter) logAccumulated(base StreamLogEntry, events []dto.SSEEvent, log observability.ExchangeLog) {
-	if log == nil {
-		return
-	}
-	var buf bytes.Buffer
-	for _, ev := range events {
-		buf.WriteString("event: ")
-		buf.WriteString(ev.Event)
-		buf.WriteString("\ndata: ")
-		buf.Write(ev.Data)
-		buf.WriteString("\n\n")
-	}
-
-	entry := observability.Entry{
-		RequestID:       base.RequestID,
-		StartedAtUnixMs: base.StartedAtUnixMs,
-		DurationMs:      time.Now().UnixMilli() - base.StartedAtUnixMs,
-		ModelResolution: base.ModelResolution,
-		Metadata:        base.ContextManagementMd,
-		Request:         base.Request,
-		Response: observability.HTTPResponseRecord{
-			Status: w.resp.Status,
-			Body:   observability.CaptureBody("text/event-stream", buf.Bytes()),
-		},
-	}
-	_ = log.Append(entry)
 }

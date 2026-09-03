@@ -1,14 +1,33 @@
 ---
 type: decision
 title: "ADR-0004: SSE single-writer goroutine + Option C post-stream logging"
-status: stable
+status: superseded
 tags:
   - adr
   - streaming
+  - superseded
 generated:
   by: claude-sonnet-5
   at: 2026-09-03T00:00:00Z
 ---
+
+> **SUPERSEDED (2026-09-04) by [ADR-0013](ADR-0013-flusher-safe-capture-middleware-on-streaming.md).**
+> The "no middleware wraps the response writer on streaming routes" constraint
+> below (Decision, first bullet) does not hold as stated: it was written
+> assuming `http.Flusher` could only be forwarded through a writer wrapper by
+> implementing it directly. Go 1.20's `http.ResponseController` and its
+> `Unwrap() http.ResponseWriter` convention — which `echo.Response.Flush()`
+> itself already uses internally, verified against the installed Echo module
+> — solves this with a single trivial method on the wrapper, not by
+> forbidding wrapping middleware on streaming routes entirely. ADR-0013
+> mounts `middleware.Capture` (now `Unwrap()`-safe) on `/v1/messages`,
+> including its streaming path, and removes the "Option C" post-stream
+> logging this ADR's Decision section describes below (`StreamWriter` no
+> longer logs the exchange itself). The single-writer invariant — exactly
+> one goroutine ever writes SSE bytes to the response for one exchange — is
+> the one part of this ADR that remains fully accurate and binding; it was
+> never actually a middleware constraint, only conflated with one here.
+> The rest of this document is kept for historical context only.
 
 # ADR-0004: SSE single-writer goroutine + Option C post-stream logging
 
@@ -24,7 +43,8 @@ generated:
 
 ## Status
 
-Accepted
+Superseded by ADR-0013 (2026-09-04) — see the notice at the top of this
+document. Originally: Accepted
 
 ## Date
 

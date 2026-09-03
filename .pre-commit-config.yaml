@@ -7,10 +7,22 @@ repos:
       - id: trailing-whitespace
       - id: end-of-file-fixer
       - id: check-yaml
+        # The docsmith-generated MkDocs config legitimately uses
+        # MkDocs-Material's `!!python/name:...` tag (mermaid superfences),
+        # which check-yaml's safe loader has no constructor for. It is
+        # excluded here and validated instead by the `check-mkdocs-yaml`
+        # local hook below, which safe-loads it while whitelisting only
+        # that one known tag.
+        exclude: ^\.docsmith/.*mkdocs\.ya?ml$
       - id: check-toml
 
   - repo: local
     hooks:
+      - id: check-mkdocs-yaml
+        name: check mkdocs yaml (safe loader + whitelisted python/name tag)
+        entry: uv run .docsmith/engine/check_mkdocs_yaml.py
+        language: system
+        files: ^\.docsmith/.*mkdocs\.ya?ml$
       - id: docsmith-validate
         name: docsmith validate
         entry: uv run .docsmith/engine/docsmith.py validate

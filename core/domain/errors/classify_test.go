@@ -67,8 +67,8 @@ func TestClassify_UpstreamQuota429_SuppressesIssue(t *testing.T) {
 	if gwErr.SuggestIssue {
 		t.Error("SuggestIssue = true, want false for a 429 quota rejection")
 	}
-	if gwErr.Instruction != "" {
-		t.Errorf("Instruction = %q, want empty", gwErr.Instruction)
+	if gwErr.Instruction == "" {
+		t.Error("Instruction is empty, want a non-empty explanation that this is not a gateway bug")
 	}
 }
 
@@ -99,14 +99,62 @@ func TestClassify_UpstreamNonQuota5xx_SuggestsIssue(t *testing.T) {
 	}
 }
 
-func TestClassify_UpstreamNonQuota4xx_SuppressesIssue(t *testing.T) {
+func TestClassify_UpstreamNonQuota4xx_SuggestsIssue(t *testing.T) {
 	fakeErr := &fakeUpstreamError{status: 400, body: "invalid model id"}
 	wrapped := Wrap(fakeErr, CodeAPI, "backend request failed", 502)
 	gwErr := Classify(wrapped)
 	if gwErr.Origin != OriginUpstream {
 		t.Errorf("Origin = %q, want %q", gwErr.Origin, OriginUpstream)
 	}
+	if !gwErr.SuggestIssue {
+		t.Error("SuggestIssue = false, want true for a non-quota, non-429, non-503 upstream 4xx - could be a gateway-caused defect")
+	}
+	if gwErr.Instruction == "" {
+		t.Error("Instruction is empty, want non-empty")
+	}
+}
+
+func TestClassify_UpstreamServiceUnavailable503_SuppressesIssue(t *testing.T) {
+	fakeErr := &fakeUpstreamError{status: 503, body: "service unavailable"}
+	wrapped := Wrap(fakeErr, CodeAPI, "backend request failed", 502)
+	gwErr := Classify(wrapped)
+	if gwErr.Origin != OriginUpstream {
+		t.Errorf("Origin = %q, want %q", gwErr.Origin, OriginUpstream)
+	}
 	if gwErr.SuggestIssue {
-		t.Error("SuggestIssue = true, want false for a non-quota upstream 4xx")
+		t.Error("SuggestIssue = true, want false for a 503 service-unavailable rejection")
+	}
+	if gwErr.Instruction == "" {
+		t.Error("Instruction is empty, want a non-empty explanation that this is not a gateway bug")
+	}
+}
+
+func TestClassify_WithProviderAndModel_IncludesBothInMessage(t *testing.T) {
+	appErr := New(CodeAPI, "backend request failed", 500)
+	appErr.Provider = "codex"
+	appErr.Model = "gpt-5.1"
+	gwErr := Classify(appErr)
+	want := "[CLD-Gateway] backend request failed (provider: codex, model: gpt-5.1)"
+	if gwErr.Message != want {
+		t.Errorf("Message = %q, want %q", gwErr.Message, want)
+	}
+}
+
+func TestClassify_SuppressedUpstream_MessageNamesProviderAndModel(t *testing.T) {
+	fakeErr := &fakeUpstreamError{status: 429, body: "rate limited"}
+	wrapped := Wrap(fakeErr, CodeRateLimit, "backend request failed", 502)
+	wrapped.Provider = "codex"
+	wrapped.Model = "gpt-5.1"
+	gwErr := Classify(wrapped)
+	if gwErr.SuggestIssue {
+		t.Error("SuggestIssue = true, want false for a 429 quota rejection")
+	}
+	wantMsg := "[CLD-Gateway] backend request failed (provider: codex, model: gpt-5.1)"
+	if gwErr.Message != wantMsg {
+		t.Errorf("Message = %q, want %q", gwErr.Message, wantMsg)
+	}
+	wantInstruction := "Neither Claude Code nor cld-gateway can do anything about this (provider: codex, model: gpt-5.1) - it's on the upstream provider's side."
+	if gwErr.Instruction != wantInstruction {
+		t.Errorf("Instruction = %q, want %q", gwErr.Instruction, wantInstruction)
 	}
 }

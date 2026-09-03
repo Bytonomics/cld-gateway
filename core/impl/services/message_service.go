@@ -298,7 +298,10 @@ func (s *MessageService) handleUnary(ctx context.Context, plan *turnPlan, workin
 	resp, err := s.deps.Backend.SendUnary(ctx, plan.backendReq)
 	if err != nil {
 		s.releaseLease(plan, transport.BackendFailedBeforeCommit)
-		return services.MessageResult{Err: apperr.Wrap(err, apperr.CodeAPI, err.Error(), 502)}
+		wrapped := apperr.Wrap(err, apperr.CodeAPI, err.Error(), 502)
+		wrapped.Provider = s.deps.Config.Providers.Active
+		wrapped.Model = plan.backendReq.Model
+		return services.MessageResult{Err: wrapped}
 	}
 
 	// Promote WebSocket chain on the lease if one was acquired (only when persisted && commitTurn).
@@ -367,7 +370,10 @@ func (s *MessageService) handleStream(ctx context.Context, plan *turnPlan, worki
 	backendEvents, err := s.deps.Backend.SendStream(ctx, plan.backendReq)
 	if err != nil {
 		s.releaseLease(plan, transport.BackendFailedBeforeCommit)
-		return services.MessageResult{Err: apperr.Wrap(err, apperr.CodeAPI, err.Error(), 502)}
+		wrapped := apperr.Wrap(err, apperr.CodeAPI, err.Error(), 502)
+		wrapped.Provider = s.deps.Config.Providers.Active
+		wrapped.Model = plan.backendReq.Model
+		return services.MessageResult{Err: wrapped}
 	}
 
 	out := make(chan dto.SSEEvent)

@@ -113,6 +113,44 @@ func TestCapture_HandlerSucceeds_LogsRealSuccessStatus(t *testing.T) {
 	}
 }
 
+// TestCapture_StreamingHandler_FlushWorksThroughWrapper proves the
+// ADR-0013 fix: a handler that writes and flushes multiple times (as
+// StreamWriter does for SSE) still reaches the client correctly when
+// wrapped by Capture, because captureWriter implements Unwrap() and
+// httptest.NewRecorder implements http.Flusher.
+func TestCapture_StreamingHandler_FlushWorksThroughWrapper(t *testing.T) {
+	e, log := newTestEcho()
+	e.GET("/test", func(c echo.Context) error {
+		c.Response().Header().Set(echo.HeaderContentType, "text/event-stream")
+		c.Response().WriteHeader(http.StatusOK)
+		for i := 0; i < 3; i++ {
+			if _, err := c.Response().Write([]byte("event: message\ndata: chunk\n\n")); err != nil {
+				return err
+			}
+			c.Response().Flush()
+		}
+		return nil
+	}, Capture(log))
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Errorf("rec.Code = %d, want 200", rec.Code)
+	}
+	wantBody := "event: message\ndata: chunk\n\nevent: message\ndata: chunk\n\nevent: message\ndata: chunk\n\n"
+	if rec.Body.String() != wantBody {
+		t.Errorf("rec.Body = %q, want %q", rec.Body.String(), wantBody)
+	}
+	if !log.appended {
+		t.Fatal("log.appended = false, want true")
+	}
+	if log.lastEntry.Response.Status != 200 {
+		t.Errorf("logged Status = %d, want 200", log.lastEntry.Response.Status)
+	}
+}
+
 func TestCapture_NilLog_DoesNotPanicAndCallsHandler(t *testing.T) {
 	e := echo.New()
 	e.HTTPErrorHandler = ErrorHandler

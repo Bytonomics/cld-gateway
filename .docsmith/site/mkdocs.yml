@@ -175,6 +175,9 @@ nav:
     - "ADR-0012: Rust retained until parity cutover, then one-commit delete": "decisions/ADR-0012-rust-retained-until-parity-cutover.md"
 
 
+    - "ADR-0013: Flusher-safe Capture middleware covers streaming routes": "decisions/ADR-0013-flusher-safe-capture-middleware-on-streaming.md"
+
+
   - "Plans":
 
 

@@ -18,6 +18,14 @@ type AppError struct {
 	Message    string
 	HTTPStatus int
 	Cause      error
+	// Provider and Model, when set, name the backend provider (e.g.
+	// config.Providers.Active, "codex") and model in use for the request
+	// that produced this error. Populated by the caller when known (e.g.
+	// core/impl/services/message_service.go's backend-error wrap sites,
+	// which have both in scope from plan.backendReq.Model and
+	// s.deps.Config.Providers.Active) — never guessed or defaulted here.
+	Provider string
+	Model    string
 }
 
 func (e *AppError) Error() string {

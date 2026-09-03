@@ -1,0 +1,158 @@
+site_name: {{ site_name | yaml_str }}
+site_description: {{ site_description | yaml_str }}
+site_author: {{ site_author | yaml_str }}
+
+{% if repo_name %}repo_name: {{ repo_name | yaml_str }}
+{% endif -%}
+{% if repo_url %}repo_url: {{ repo_url | yaml_str }}
+{% endif -%}
+{% if edit_uri %}edit_uri: {{ edit_uri | yaml_str }}
+{% endif %}
+docs_dir: {{ docs_dir }}
+site_dir: {{ site_dir }}
+
+# Fail the build on ANY mkdocs warning -- most importantly a broken internal
+# link, which yields a broken (404) site. Warnings are errors; fix them.
+strict: true
+
+{% macro render_nav_items(items, indent) %}
+{%- for item in items %}
+{% if item.path is defined %}
+{{ indent }}- {{ item.title | yaml_str }}: {{ item.path | yaml_str }}
+{%- else %}
+{{ indent }}- {{ item.title | yaml_str }}:
+{{ render_nav_items(item.children, indent ~ '  ') }}
+{%- endif %}
+{% endfor -%}
+{% endmacro %}
+nav:
+  - Home: index.md
+{% for section in navigation_sections %}
+  - {{ section.title | yaml_str }}:
+{{ render_nav_items(section.nav_items, '    ') }}
+{% endfor %}
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: {{ theme_primary }}
+      accent: {{ theme_accent }}
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: {{ theme_primary }}
+      accent: {{ theme_accent }}
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - navigation.tracking
+    - navigation.indexes
+    - search.highlight
+    - search.share
+    - search.suggest
+    - toc.follow
+    - toc.integrate
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+    - content.tooltips
+    - header.autohide
+  icon:
+    repo: fontawesome/brands/github
+    edit: material/pencil
+    view: material/eye
+  font:
+    text: {{ font_text | yaml_str }}
+    code: {{ font_code | yaml_str }}
+
+plugins:
+  - search:
+      separator: '[\s\-,:!=\[\]()"`/]+|\.(?!\d)|&[lg]t;|(?!\b)(?=[A-Z][a-z])'
+{% if enable_mermaid %}
+  - mermaid2:
+      arguments:
+        theme: |
+          ^(JSON.parse(__md_get("__palette").index == 1)) ?
+          'dark' : 'light'
+{% endif %}
+{%- if enable_swagger_ui %}
+  - swagger-ui-tag:
+      background: White
+      docExpansion: none
+      syntaxHighlightTheme: agate
+{% endif %}
+{%- if enable_git_revision_date %}
+  - git-revision-date-localized:
+      # enable_creation_date is OFF on purpose. The site is built from the
+      # generated, gitignored autogen/ tree, which has no git history. With
+      # creation dates ON, the plugin computes a fallback "first" vs "last"
+      # timestamp and, whenever first > last, emits a "First revision timestamp
+      # is older than last revision timestamp" message via logging.warning() on
+      # the ROOT logger (plugin.py). That call bypasses this plugin's own
+      # strict:false (which only governs its own `log` channel), so it cannot
+      # be downgraded -- the ONLY switch that skips it is enable_creation_date:
+      # false, which early-returns before the comparison. On an untracked
+      # autogen tree that comparison fires on essentially every page, so
+      # leaving creation dates on produced hundreds of un-suppressable warnings.
+      enable_creation_date: false
+      type: timeago
+      # The autogen tree has no git history, so last-updated falls back to the
+      # build date; strict:false keeps a missing history an info, not a warning,
+      # under mkdocs' top-level strict:true. The autogen tree stays
+      # generated-only; nothing here edits those files.
+      fallback_to_build_date: true
+      strict: false
+      enable_git_follow: false
+{% endif %}
+{%- if enable_minify %}
+  - minify:
+      minify_html: true
+      minify_js: true
+      minify_css: true
+      htmlmin_opts:
+        remove_comments: true
+{% endif %}
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets:
+      check_paths: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - admonition
+  - attr_list
+  - tables
+  - toc:
+      permalink: true
+      title: On this page
+{% if social_links %}
+extra:
+  social:
+{%- for social in social_links %}
+    - icon: {{ social.icon | yaml_str }}
+      link: {{ social.link | yaml_str }}
+{%- if social.name is defined %}
+      name: {{ social.name | yaml_str }}
+{%- endif %}
+{%- endfor %}
+{% endif %}
+{% if copyright %}copyright: {{ copyright | yaml_str }}
+{% endif %}

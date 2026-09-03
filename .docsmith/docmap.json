@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "updated_at": "2026-09-02T21:49:24.070925+00:00",
+  "map": {
+    "cmd/cld-gateway/main.go": [
+      {
+        "path": "docs/runbooks/deferred-work-audit-triage.md",
+        "reason": "documents the graceful-shutdown (G3) and Gemini-unsupported deferred-work gaps"
+      }
+    ],
+    "core/domain/transport/chain_registry.go": [
+      {
+        "path": "docs/runbooks/deferred-work-audit-triage.md",
+        "reason": "documents the memory-only WS chain association gap (G1)"
+      }
+    ],
+    "core/domain/transport/lease.go": [
+      {
+        "path": "docs/runbooks/deferred-work-audit-triage.md",
+        "reason": "documents the missing lease-store TTL startup sweep"
+      }
+    ],
+    "core/domain/conversation/classifier.go": [
+      {
+        "path": "docs/runbooks/deferred-work-audit-triage.md",
+        "reason": "documents the unimplemented HookEvaluator classification gap"
+      }
+    ],
+    "core/impl/port/backend/codex/wspool.go": [
+      {
+        "path": "docs/runbooks/deferred-work-audit-triage.md",
+        "reason": "documents the hardcoded WS keepalive value gap (G10)"
+      }
+    ],
+    "core/domain/translator/sse_bridge.go": [
+      {
+        "path": "docs/runbooks/deferred-work-audit-triage.md",
+        "reason": "documents the message_start incident that motivated this audit"
+      }
+    ],
+    "core/impl/services/message_service.go": [
+      {
+        "path": "docs/runbooks/deferred-work-audit-triage.md",
+        "reason": "documents the message_start incident that motivated this audit"
+      }
+    ]
+  }
+}

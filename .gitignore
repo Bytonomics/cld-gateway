@@ -23,3 +23,7 @@ __pycache__/
 **/.claude/agent-memory-local
 **/.claude/first-run
 **/.claude/assistant-daemon-state.json
+.docsmith/state.json
+.docsmith/site/autogen/
+.docsmith/site/.venv/
+.docsmith/site/site/

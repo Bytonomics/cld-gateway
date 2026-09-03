@@ -1,0 +1,8 @@
+# Doc-site Python dependencies for docsmith's mkdocs pipeline.
+# Installed by `.docsmith/setup.sh` into the site venv (.docsmith/site/.venv),
+# which `docsmith collect build/serve` uses. These are ordinary Python
+# dependencies — pin versions here if you want reproducible site builds.
+mkdocs-material
+mkdocs-mermaid2-plugin
+mkdocs-minify-plugin
+mkdocs-git-revision-date-localized-plugin

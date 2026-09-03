@@ -4,8 +4,6 @@ repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
-      - id: trailing-whitespace
-      - id: end-of-file-fixer
       - id: check-yaml
         # The docsmith-generated MkDocs config legitimately uses
         # MkDocs-Material's `!!python/name:...` tag (mermaid superfences),

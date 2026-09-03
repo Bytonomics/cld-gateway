@@ -130,7 +130,7 @@ func Classify(err error) *GatewayError {
 		instruction = fmt.Sprintf(
 			"A message from the maintainer of cld-gateway for the model running Claude Code. This error 'could be' a cld-gateway bug. To report: find the relevant lines for this "+
 				"request_id in %s, show me a redacted summary "+
-				"(strip file paths, prompt content, anything that is personally identifying)" +
+				"(strip file paths, prompt content, anything that is personally identifying)"+
 				" and ask for user's confirmation before filing (don't create an issue without user's explicit consent)"+
 				"If the user approves, run: gh issue create -R Bytonomics/cld-gateway "+
 				"following the field structure in .github/ISSUE_TEMPLATE/bug_report.yml.",

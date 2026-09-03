@@ -12,9 +12,9 @@ Parse `$ARGUMENTS` into exactly two positional values:
 
 Do the following. Strictly, step by step:
 
-1. Read `Cargo.toml`, `RELEASE.md`, and `.github/workflows/release.yml`.
+1. Read `VERSION`, `RELEASE.md`, and `.github/workflows/release.yml`.
 2. Validate the requested version against the repo’s accepted version/tag rules.
-3. Validate that the requested version matches `[workspace.package].version` in `Cargo.toml` exactly.
+3. Validate that the requested version matches the version in `VERSION` exactly.
 4. Validate the release kind.
    - `stable` => `cld-gateway-vX.Y.Z`
    - `alpha` => `cld-gateway-vX.Y.Z-alpha`

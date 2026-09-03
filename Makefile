@@ -19,7 +19,7 @@ build-check: ## Compile-only check
 
 check: fmt-check lint test test-release-scripts
 
-fmt-check: ## gofmt + goimports verify
+fmt-check: fmt-fix ## auto-format (fmt-fix) then verify gofmt + goimports are clean
 	cd $(ROOT_DIR) && test -z $$(gofmt -l . | grep -v vendor) && goimports -l . | grep -v vendor | (! read)
 
 fmt-fix: ## Auto-format

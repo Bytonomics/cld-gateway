@@ -3,8 +3,8 @@ module github.com/Bytonomics/cld-gateway
 go 1.25.0
 
 require (
-	github.com/SmrutAI/pedantigo/plugins/web/pedantigoecho/v2 v2.1.1
-	github.com/SmrutAI/pedantigo/v2 v2.1.1
+	github.com/SmrutAI/pedantigo/plugins/web/pedantigoecho/v2 v2.1.3
+	github.com/SmrutAI/pedantigo/v2 v2.1.3
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/coder/websocket v1.8.15
@@ -66,5 +66,3 @@ require (
 	modernc.org/memory v1.5.0 // indirect
 	modernc.org/sqlite v1.23.1 // indirect
 )
-
-replace github.com/SmrutAI/pedantigo/v2 => /Users/tushar/Documents/SmrutAI/smriti/smritea-cloud/smritea-oss/pedantigo

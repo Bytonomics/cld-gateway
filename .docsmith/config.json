@@ -1,0 +1,240 @@
+{
+  "docsmith_version": 1,
+  "engine_version": "1.0.0",
+  "project": {
+    "name": "gateway",
+    "repo_url": "https://github.com/Bytonomics/cld-gateway",
+    "default_branch": "main",
+    "docs_dir": "docs",
+    "subsystem_depth": 1
+  },
+  "profile": "standard",
+  "overrides": {},
+  "categories": {
+    "tutorial": {
+      "enabled": true,
+      "lifecycle": "evergreen",
+      "dir_patterns": [
+        "docs/tutorials/**"
+      ],
+      "type_aliases": [
+        "Tutorial"
+      ],
+      "template": "tutorial.md",
+      "stale_after_days": 180,
+      "site": {
+        "include": true
+      }
+    },
+    "how-to": {
+      "enabled": true,
+      "lifecycle": "evergreen",
+      "dir_patterns": [
+        "docs/how-to/**"
+      ],
+      "type_aliases": [
+        "Guide"
+      ],
+      "template": "how-to.md",
+      "stale_after_days": 120,
+      "site": {
+        "include": true
+      }
+    },
+    "reference": {
+      "enabled": true,
+      "lifecycle": "evergreen",
+      "dir_patterns": [
+        "docs/reference/**"
+      ],
+      "type_aliases": [
+        "Reference",
+        "API",
+        "Spec",
+        "Index",
+        "Priming"
+      ],
+      "template": "reference.md",
+      "stale_after_days": 90,
+      "site": {
+        "include": true
+      }
+    },
+    "explanation": {
+      "enabled": true,
+      "lifecycle": "evergreen",
+      "dir_patterns": [
+        "docs/explanation/**"
+      ],
+      "type_aliases": [
+        "Overview"
+      ],
+      "template": "explanation.md",
+      "stale_after_days": 240,
+      "site": {
+        "include": true
+      }
+    },
+    "runbook": {
+      "enabled": true,
+      "lifecycle": "evergreen",
+      "dir_patterns": [
+        "docs/runbooks/**"
+      ],
+      "type_aliases": [
+        "Runbook"
+      ],
+      "template": "runbook.md",
+      "stale_after_days": 90,
+      "site": {
+        "include": true
+      }
+    },
+    "prd": {
+      "enabled": true,
+      "lifecycle": "evergreen",
+      "dir_patterns": [
+        "docs/prd/**"
+      ],
+      "type_aliases": [
+        "PRD"
+      ],
+      "template": "prd.md",
+      "stale_after_days": 180,
+      "site": {
+        "include": true
+      }
+    },
+    "decision": {
+      "enabled": true,
+      "lifecycle": "immutable",
+      "dir_patterns": [
+        "docs/decisions/**"
+      ],
+      "type_aliases": [
+        "ADR"
+      ],
+      "template": "decision.md",
+      "site": {
+        "include": true
+      },
+      "numbering": {
+        "prefix": "ADR-",
+        "digits": 3
+      }
+    },
+    "plan": {
+      "enabled": true,
+      "lifecycle": "ephemeral",
+      "dir_patterns": [
+        "docs/plans/**"
+      ],
+      "type_aliases": [
+        "Plan"
+      ],
+      "template": "plan.md",
+      "site": {
+        "include": true
+      },
+      "ttl_days": 45,
+      "archive_dir": "docs/plans/archive"
+    },
+    "external": {
+      "enabled": true,
+      "lifecycle": "evergreen",
+      "dir_patterns": [],
+      "type_aliases": [],
+      "template": "external.md",
+      "stale_after_days": 365,
+      "site": {
+        "include": false
+      }
+    }
+  },
+  "frontmatter": {
+    "allowed_statuses": [
+      "draft",
+      "stable",
+      "deprecated",
+      "superseded"
+    ],
+    "require_title": true,
+    "require_stale_after": false
+  },
+  "validate": {},
+  "freshness": {
+    "threshold": 70,
+    "weights": {
+      "age": 0.5,
+      "ttl": 0.3,
+      "drift": 0.2
+    },
+    "age_grace_days": 30
+  },
+  "extra_gate_paths": [
+    "CLAUDE.md",
+    "AGENTS.md",
+    "README.md",
+    "docs/**/README.md"
+  ],
+  "hook": {
+    "enabled": true
+  },
+  "site": {
+    "enabled": true,
+    "workdir": ".docsmith/site",
+    "name": "gateway Docs",
+    "description": "",
+    "site_author": "",
+    "repo_name": "",
+    "repo_url": "",
+    "edit_branch": "main",
+    "landing_title": null,
+    "tarball_name": null,
+    "copyright": "",
+    "theme": {
+      "primary": "blue",
+      "accent": "blue",
+      "font_text": "Roboto",
+      "font_code": "Roboto Mono"
+    },
+    "plugins": {
+      "mermaid": true,
+      "swagger_ui": false,
+      "git_revision_date": true,
+      "minify": true
+    },
+    "nav": {
+      "style": "subsystem-first",
+      "section_order": [],
+      "subgroup_min_entries": 8
+    },
+    "exclude": {
+      "dir_basenames": [
+        ".git",
+        "node_modules",
+        ".venv",
+        "vendor",
+        "dist",
+        "build",
+        "target",
+        "autogen",
+        "__pycache__"
+      ],
+      "dir_paths": [],
+      "filenames": []
+    },
+    "sources": [
+      {
+        "id": "docs",
+        "collector": "markdown_tree",
+        "path": "docs",
+        "destination": "."
+      }
+    ]
+  },
+  "okf_compat": {
+    "allowed_types": [],
+    "mapping_rules": []
+  }
+}

@@ -2,6 +2,9 @@
 
 An Anthropic-compatible HTTP proxy that routes requests through the ChatGPT/Codex backend.
 
+> **Community update:** cld-gateway has been rewritten from Rust to Go. Installation, commands, and
+> config are unchanged — see below for details.
+
 ---
 
 ## Why another Proxy?
@@ -116,7 +119,7 @@ curl -fsSL https://github.com/Bytonomics/cld-gateway/releases/latest/download/in
 Pin a release when needed:
 
 ```sh
-curl -fsSL https://github.com/Bytonomics/cld-gateway/releases/latest/download/install.sh | sh -s -- --release 1.0.1
+curl -fsSL https://github.com/Bytonomics/cld-gateway/releases/latest/download/install.sh | sh -s -- --release 1.1.0-beta
 ```
 
 ### Direct download

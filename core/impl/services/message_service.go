@@ -131,6 +131,7 @@ type turnPlan struct {
 	backendReq         *backendport.Request
 	previousResponseID *string // populated by selectTransport, passed to Acquire
 	leaseHeld          bool
+	warnings           []dto.Warning
 }
 
 // Handle ports the 9-step flow. Steps 1-7 are shared (prepare); step 8/9
@@ -265,7 +266,20 @@ func (s *MessageService) selectTransport(ctx context.Context, plan *turnPlan, se
 		LiveChain:          liveChain,
 	}
 	decision, err := s.deps.Selector.Select(ctx, planIn)
-	if err != nil || !decision.UseWS {
+	if err != nil {
+		plan.warnings = append(plan.warnings, dto.Warning{
+			Code:    "delta_calculation_failed",
+			Message: "[CLD-Gateway] Could not determine whether an incremental update could be sent; sent full conversation history instead.",
+		})
+		return
+	}
+	if !decision.UseWS {
+		if hasCheckpoint {
+			plan.warnings = append(plan.warnings, dto.Warning{
+				Code:    "delta_calculation_skipped",
+				Message: "[CLD-Gateway] Sent full conversation history instead of an incremental update for this turn.",
+			})
+		}
 		return
 	}
 	plan.backendReq.PreviousResponseID = &previousResponseID
@@ -325,6 +339,7 @@ func (s *MessageService) handleUnary(ctx context.Context, plan *turnPlan, workin
 		validation := s.deps.Leases.ValidateForCommit(plan.identity, string(plan.requestID), chainID)
 		if !validation.Accepted {
 			s.releaseLease(plan, transport.CommitSuppressedAfterAbort)
+			unary.Warnings = plan.warnings
 			return services.MessageResult{
 				Unary:                     unary,
 				ContextManagementMetadata: plan.contextMgmtReport.MetadataValue(),
@@ -335,6 +350,7 @@ func (s *MessageService) handleUnary(ctx context.Context, plan *turnPlan, workin
 	s.commitTurn(ctx, plan, workingReq, unary)
 	s.releaseLease(plan, transport.CompletedCommitted)
 
+	unary.Warnings = plan.warnings
 	return services.MessageResult{
 		Unary:                     unary,
 		ContextManagementMetadata: plan.contextMgmtReport.MetadataValue(),
@@ -377,7 +393,7 @@ func (s *MessageService) runStream(ctx context.Context, plan *turnPlan, workingR
 	// lib.rs:2617-2641,2902-2906; see translator.BuildStreamStartEvents's
 	// doc comment for why TranslateResponseEvent cannot own this itself).
 	msgID := "msg_" + uuid.NewString()
-	for _, startEvent := range translatorpkg.BuildStreamStartEvents(msgID, workingReq.Model) {
+	for _, startEvent := range translatorpkg.BuildStreamStartEvents(msgID, workingReq.Model, plan.warnings) {
 		select {
 		case out <- startEvent:
 			visibleOutputSent = true

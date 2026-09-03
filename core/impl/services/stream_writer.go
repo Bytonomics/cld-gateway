@@ -18,6 +18,7 @@ import (
 	"github.com/Bytonomics/cld-gateway/config"
 	"github.com/Bytonomics/cld-gateway/core"
 	"github.com/Bytonomics/cld-gateway/core/domain/dto"
+	apperr "github.com/Bytonomics/cld-gateway/core/domain/errors"
 	"github.com/Bytonomics/cld-gateway/observability"
 )
 
@@ -150,13 +151,23 @@ func drainSSEChannel(in <-chan dto.SSEEvent) {
 }
 
 func finalizeErrorEvent(reason string) dto.SSEEvent {
-	payload, _ := json.Marshal(map[string]any{
+	// Reuses errors.Classify only for message-branding consistency (the
+	// "[CLD-Gateway] " prefix, same as every other error surface) - an
+	// idle-timeout or client-abort termination is expected, self-inflicted
+	// behavior, never a gateway defect, so SuggestIssue/Instruction from
+	// Classify are deliberately discarded here, not surfaced.
+	gwErr := apperr.Classify(apperr.New(apperr.CodeAPI, "stream terminated: "+reason, 0))
+	payload, err := json.Marshal(map[string]any{
 		"type": "error",
 		"error": map[string]any{
-			"type":    "api_error",
-			"message": "stream terminated: " + reason,
+			"type":    string(gwErr.Code),
+			"message": gwErr.Message,
 		},
 	})
+	if err != nil {
+		// Fallback if marshaling fails (should be extremely rare for simple maps)
+		payload = []byte(`{"type":"error","error":{"type":"api_error","message":"stream terminated"}}`)
+	}
 	return dto.SSEEvent{Event: "error", Data: payload}
 }
 

@@ -1,0 +1,71 @@
+name: Bug report
+description: Report a defect in cld-gateway
+title: "[bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a cld-gateway bug. Please do not paste secrets, API keys, or auth
+        tokens into any field below — review the log excerpt yourself (or have Claude Code review
+        it with you) before pasting it in.
+  - type: input
+    id: request_id
+    attributes:
+      label: Request ID
+      description: The x-proxy-request-id / request_id value from the failing exchange, if known.
+      placeholder: e.g. 8f3a21c9
+    validations:
+      required: false
+  - type: input
+    id: gateway_version
+    attributes:
+      label: cld-gateway version
+      description: Output of `cld-gateway --version`, or the git commit if running from source.
+    validations:
+      required: true
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Backend
+      options:
+        - codex
+        - gemini
+        - other/unknown
+    validations:
+      required: true
+  - type: dropdown
+    id: run_mode
+    attributes:
+      label: Run mode
+      description: Which alias/mode you were running (see CLAUDE.md's "Developer mode" / "Homebrew/package mode" distinction).
+      options:
+        - "cldc / clddc (go-run dev mode, port 6483)"
+        - "cldg / clddg (Homebrew package mode, port 6473)"
+        - other/unknown
+    validations:
+      required: true
+  - type: textarea
+    id: repro_steps
+    attributes:
+      label: Reproduction steps
+      description: What you did, step by step.
+    validations:
+      required: true
+  - type: textarea
+    id: expected_actual
+    attributes:
+      label: Expected vs actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: log_excerpt
+    attributes:
+      label: Relevant exchange log excerpt
+      description: >
+        From ~/.gateway/logs/http-exchange.log, filtered to the relevant request_id. Review this
+        yourself before pasting — strip anything identifying (file paths, prompt/tool content,
+        usernames). Never paste secrets or auth tokens even if you believe they're redacted.
+      render: text
+    validations:
+      required: false

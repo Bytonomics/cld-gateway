@@ -45,6 +45,15 @@ func Capture(log observability.ExchangeLog) echo.MiddlewareFunc {
 
 			handlerErr := next(c)
 
+			if handlerErr != nil && !c.Response().Committed {
+				status, payload := ClassifyForResponse(handlerErr)
+				if c.Request().Method == http.MethodHead {
+					_ = c.NoContent(status)
+				} else {
+					_ = c.JSON(status, payload)
+				}
+			}
+
 			entry := observability.Entry{
 				RequestID:       RequestIDFromEcho(c),
 				StartedAtUnixMs: started.UnixMilli(),
@@ -63,6 +72,9 @@ func Capture(log observability.ExchangeLog) echo.MiddlewareFunc {
 			}
 			_ = log.Append(entry)
 
+			if handlerErr != nil && !c.Response().Committed {
+				return nil
+			}
 			return handlerErr
 		}
 	}

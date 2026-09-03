@@ -1,9 +1,40 @@
-# golang_port Architecture (approved)
+---
+type: explanation
+title: "Gateway Architecture (Detailed Package Design)"
+status: stable
+tags:
+  - architecture
+  - go-port
+  - design
+stale_after: 2027-05-01
+generated:
+  by: claude-sonnet-5
+  at: 2026-09-03T00:00:00Z
+---
 
-Status: design agreed in interview, 2026-08-22. Libraries APPROVED below.
-Behavioral source of truth: `crates/` (Rust). Slop exclusions: `AI_SLOP.md`.
-Note: written as ARCHITECTURE_v2.md because a stale hook state referenced an
-ARCHITECTURE.md that no longer exists on disk; rename freely.
+# Gateway Architecture (Detailed Package Design)
+
+| Section | What it covers |
+|---------|----------------|
+| [Scope: 1-to-n](#scope-1-to-n) | Claude Code as the only inbound harness; backends as the extension axis |
+| [Layout (single Go module)](#layout-smritea-cloud-style-single-go-module) | Package tree and its responsibilities |
+| [Ports (core/domain/port)](#ports-coredomainport) | Backend, translator, auth, and state interfaces |
+| [Request flow (POST /v1/messages)](#request-flow-post-v1messages) | The 9-step orchestration |
+| [Concurrency (CORE FEATURE — port verbatim)](#concurrency-core-feature--port-verbatim) | The main-turn lease state machine |
+| [SSE + logging (settled)](#sse--logging-settled) | Single-writer goroutine and Option C logging |
+| [Log format (user-specified)](#log-format-user-specified) | The formatted-text exchange log entry shape |
+| [Error model](#error-model) | AppError to Anthropic error-shape serialization |
+| [Config (viper)](#config-viper) | Provider map shape and env overrides |
+| [Behavioral invariants (from Rust — preserve ALL)](#behavioral-invariants-from-rust--preserve-all) | Runtime behaviors carried over from the Rust implementation |
+| [Approved libraries](#approved-libraries) | The library choices and why |
+| [Homebrew / release](#homebrew--release) | Packaging and rollback contract |
+| [Related documents](#related-documents) | Where the distilled version and the file-level reference live |
+
+This is the detailed package design for the gateway's Go implementation, matching the current
+codebase's `core/domain` / `core/impl` split. A shorter distillation lives at
+`docs/explanation/architecture.md`; the exhaustive file/interface listing is
+`docs/FILEMAP.md`. The Rust implementation this design replaced is frozen for reference at
+`old_rust/`; slop exclusions carried forward from it are documented in `docs/AI_SLOP.md`.
 
 ## Scope: 1-to-n
 
@@ -13,7 +44,7 @@ providers, one active at a time. No harness port. No neutral IR.
 
 ## Layout (smritea-cloud style, single Go module)
 
-Module `github.com/Bytonomics/cld-gateway`. One `go.mod`. No workspace.
+Module github.com/Bytonomics/cld-gateway (see `go.mod`). One module. No workspace.
 
 ```
 cmd/cld-gateway/main.go     thin: argv (serve | login [vendor]), calls app
@@ -44,8 +75,8 @@ type Backend interface {
     EvictSession(sessionKey SessionKey)
 }
 ```
-One impl today: `impl/port/backend/codex` — POST
-`chatgpt.com/backend-api/codex/responses` (SSE), pooled WebSocket sessions
+One impl today: `core/impl/port/backend/codex` — POST
+`https://chatgpt.com/backend-api/codex/responses` (SSE), pooled WebSocket sessions
 per SessionKey, chain IDs, 401 refresh-retry-once. A second backend later
 adds one package, zero core edits.
 
@@ -193,8 +224,11 @@ Python packager retained; build step = `go build` with CGO_ENABLED=0; target
 triples remapped to Go OS/arch pairs. Rust stays until parity + daily-driver
 cutover, then one-commit delete; rollback = revert release tag.
 
-## Parked (this folder)
+## Related documents
 
-- classification-signal-redesign.md — slop re-audit + replacement signals.
-- test-audit-and-migration-plan.md — every Rust test labeled
-  CONTRACT/FAKE/SLOP-ADJACENT → migration matrix → phased build order.
+- `docs/explanation/architecture.md` — the shorter, contributor-facing distillation of this
+  document.
+- `docs/FILEMAP.md` — the exhaustive file/interface listing this design maps to.
+- `docs/AI_SLOP.md` — the prompt-text-dependency exclusions carried forward from Rust.
+- `docs/classification-signal-redesign.md` — the parked classification-signal re-audit.
+- `docs/test-audit-and-migration-plan.md` — the parked Rust test audit and migration matrix.

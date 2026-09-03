@@ -1,8 +1,33 @@
-# golang_port TEST PLAN (C2)
+---
+type: plan
+title: "Plan: Test Coverage Buildout (C2)"
+status: draft
+tags:
+  - plan
+  - testing
+  - go-port
+generated:
+  by: claude-sonnet-5
+  at: 2026-09-03T00:00:00Z
+---
 
-Purpose: close the test-coverage gap flagged as review finding C2 and lock in
-the 26 functional fixes so they cannot silently regress. Behavior parity
-source of truth is the Rust workspace under `crates/` and its fixtures.
+# Plan: Test Coverage Buildout (C2)
+
+| Section | What it covers |
+|---------|----------------|
+| [Principles](#principles) | What a good test in this suite asserts |
+| [Seams & shared harness](#seams--shared-harness-build-first) | Fakes, mock server, golden loader |
+| [P0 - fixed-finding regressions + correctness core](#p0---fixed-finding-regressions--correctness-core) | Regression tests for findings #1-#26 |
+| [P1 - untested domain logic](#p1---untested-domain-logic) | Coverage for domain packages without P0 findings |
+| [P2 - infra & wiring](#p2---infra--wiring) | netpolicy, middleware, handlers, app, tui |
+| [Cross-cutting: end-to-end parity harness](#cross-cutting-end-to-end-parity-harness) | The whole-pipeline scenario matrix |
+| [Execution, CI, coverage](#execution-ci-coverage) | Makefile targets and the coverage gate |
+| [Build sequence](#build-sequence) | The order this plan executes in |
+| [Traceability: finding -> guarding suite](#traceability-finding--guarding-suite) | Which suite guards which numbered finding |
+
+Purpose: close the test-coverage gap flagged as review finding C2 and lock in the 26 functional
+fixes so they cannot silently regress. Behavior parity source of truth is the Rust workspace
+under `old_rust/crates/` and its fixtures.
 
 ## Principles
 
@@ -17,7 +42,7 @@ source of truth is the Rust workspace under `crates/` and its fixtures.
    pre-fix failure mode.
 4. Table-driven; ports mocked with hand-written fakes (no new mock framework).
 5. Parity tests compare against Rust: reuse the Rust fixture corpus
-   (crates/gateway-http-anthropic/tests/fixtures, translate/sse test tables) as
+   (old_rust/crates/gateway-http-anthropic/tests/fixtures, translate/sse test tables) as
    golden files where they exist.
 6. Determinism: no wall-clock (stateport.Clock fake), no network (httptest +
    in-process WS server), no ~/.gateway (t.TempDir() + GATEWAY_*/CLAUDE_GATEWAY_*

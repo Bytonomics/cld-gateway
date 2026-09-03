@@ -63,4 +63,5 @@ type MessageResult struct {
 	Stream                    <-chan dto.SSEEvent
 	Err                       error
 	ContextManagementMetadata map[string]any
+	Warnings                  []dto.Warning
 }

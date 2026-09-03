@@ -120,7 +120,7 @@
       },
       "numbering": {
         "prefix": "ADR-",
-        "digits": 3
+        "digits": 4
       }
     },
     "plan": {
@@ -174,8 +174,7 @@
   "extra_gate_paths": [
     "CLAUDE.md",
     "AGENTS.md",
-    "README.md",
-    "docs/**/README.md"
+    "README.md"
   ],
   "hook": {
     "enabled": true

@@ -368,6 +368,17 @@ func (s ImageSource) MarshalJSON() ([]byte, error) {
 	return json.Marshal(out)
 }
 
+// Warning is a non-fatal, structured signal attached to an otherwise
+// successful response, e.g. when the gateway fell back to sending full
+// conversation history instead of an incremental delta. Code is a stable,
+// machine-readable identifier (e.g. "delta_calculation_failed"); Message is
+// the human-readable explanation, branded to identify cld-gateway as the
+// source, matching the branding convention used for error messages.
+type Warning struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
 // MessagesResponse is the unary /v1/messages response shape built in Rust
 // by build_unary_messages_response (crates/gateway-http-anthropic/src/lib.rs:1549-1618).
 // types.rs itself has no response struct (Rust builds raw serde_json::Value);
@@ -382,6 +393,7 @@ type MessagesResponse struct {
 	StopSequence      *string        `json:"stop_sequence"`
 	Usage             Usage          `json:"usage"`
 	ContextManagement map[string]any `json:"context_management,omitempty"`
+	Warnings          []Warning      `json:"warnings,omitempty"`
 }
 
 // Usage ports the usage object built at lib.rs:1555-1573.

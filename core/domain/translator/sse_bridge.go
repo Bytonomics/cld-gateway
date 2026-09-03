@@ -173,25 +173,35 @@ func sseEvent(name string, payload any) dto.SSEEvent {
 // a time and has no notion of "this is the first one", so it cannot safely
 // own this; the caller who controls the outgoing channel and its ordering
 // must send this first, unconditionally, before consuming the backend
-// stream at all).
-func BuildStreamStartEvents(msgID, model string) []dto.SSEEvent {
-	return []dto.SSEEvent{sseEvent("message_start", map[string]any{
-		"type": "message_start",
-		"message": map[string]any{
-			"id":            msgID,
-			"type":          "message",
-			"role":          "assistant",
-			"content":       []any{},
-			"model":         model,
-			"stop_reason":   nil,
-			"stop_sequence": nil,
-			"usage": map[string]any{
-				"input_tokens":                0,
-				"cache_creation_input_tokens": 0,
-				"cache_read_input_tokens":     0,
-				"output_tokens":               0,
-			},
+// stream at all). warnings, when non-empty, is attached to the "message"
+// object's "warnings" key - the streaming-path equivalent of
+// dto.MessagesResponse.Warnings on the unary path, since a streaming
+// response has no other JSON object to attach non-fatal, structured
+// warnings to. When warnings is empty or nil, no "warnings" key is added at
+// all, keeping the common (no-degradation) case byte-identical to today's
+// output.
+func BuildStreamStartEvents(msgID, model string, warnings []dto.Warning) []dto.SSEEvent {
+	message := map[string]any{
+		"id":            msgID,
+		"type":          "message",
+		"role":          "assistant",
+		"content":       []any{},
+		"model":         model,
+		"stop_reason":   nil,
+		"stop_sequence": nil,
+		"usage": map[string]any{
+			"input_tokens":                0,
+			"cache_creation_input_tokens": 0,
+			"cache_read_input_tokens":     0,
+			"output_tokens":               0,
 		},
+	}
+	if len(warnings) > 0 {
+		message["warnings"] = warnings
+	}
+	return []dto.SSEEvent{sseEvent("message_start", map[string]any{
+		"type":    "message_start",
+		"message": message,
 	})}
 }
 

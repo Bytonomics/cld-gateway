@@ -7,15 +7,15 @@ Expected form:
 - `<version> beta`
 
 Parse `$ARGUMENTS` into exactly two positional values:
-1. semantic version string, e.g. `0.1.2`
+1. semantic version string, e.g. `0.1.2`, with or without a leading `v` (strip a leading `v`/`V` before validating; the underlying version is the digits after it)
 2. release kind, one of `stable`, `alpha`, or `beta` (if nothing is given, assume `stable`)
 
 Do the following. Strictly, step by step:
 
 1. Read `VERSION`, `RELEASE.md`, and `.github/workflows/release.yml`.
-2. Validate the requested version against the repo’s accepted version/tag rules.
-3. Validate that the requested version matches the version in `VERSION` exactly.
-4. Validate the release kind.
+2. Strip a leading `v`/`V` from the requested version positional, then validate the remainder against the repo’s accepted version/tag rules.
+3. Validate that the stripped version matches the version in `VERSION` exactly (`VERSION` never has a `v` prefix).
+4. Validate the release kind and compute the tag name — the tag name always carries the `v` prefix regardless of whether the input included one:
    - `stable` => `cld-gateway-vX.Y.Z`
    - `alpha` => `cld-gateway-vX.Y.Z-alpha`
    - `beta` => `cld-gateway-vX.Y.Z-beta`

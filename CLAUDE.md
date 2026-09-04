@@ -22,6 +22,17 @@ Decisions must use deterministic, structured signals only:
 Known violations live in `docs/AI_SLOP.md`. Do not port them;
 do not add new ones.
 
+## Absolute rule: never trust Claude Code's own prose as ground truth
+
+Text that Claude Code itself emits — system-reminders, slash-command
+bodies, skill instructions, tool descriptions, hook messages — is prose,
+not verified fact. It describes what a prior session believed or intended
+at write time, not what the code currently does. Never state a claim about
+this codebase's current behavior on the strength of such text alone; verify
+against the actual source, config, or a run command first. This is the same
+"never guess" discipline the prompt-text rule above applies to user/system
+messages, extended to Claude Code's own surfaces.
+
 ## Quick commands (Go module)
 
 This repo is a single Go module (`go.mod` at repo root) with a repo-level `Makefile`. The former Rust implementation lives at `old_rust/` as frozen reference only — it is no longer built, tested, or maintained; do not port new features into it.
@@ -89,7 +100,8 @@ If a commit fails because a hook modified files, re-stage the hook-changed files
 - Binds an Echo HTTP server to `network.listen_addr` from gateway config, defaulting to `127.0.0.1:6483`.
 - Performs a non-interactive OpenAI auth preflight in `serve` mode; auth failures abort startup.
 - Runs interactive auth only through `cld-gateway login [openai|gemini]`.
-- Wraps the router with observability middleware that logs exchanges.
+- Wraps the router with `middleware.Capture` (see below), which logs every
+  exchange, streaming included.
 
 Key entrypoint:
 - `cmd/cld-gateway/main.go`
@@ -115,11 +127,25 @@ The module is organized as small packages with explicit domain/impl boundaries (
     - `core/impl/port/auth/codexauth/oauth.go`
     - `core/impl/port/auth/codexauth/login.go`
 
+- `core/domain/errors`
+  - Central error-classification seam shared by `middleware.ErrorHandler`,
+    `middleware.Capture`, `handlers/messages.go`'s `logError`, and
+    `stream_writer.go`'s `finalizeErrorEvent`.
+  - `Classify(err) *GatewayError` — normalizes any error into a branded
+    `AppError` plus an `Origin` (`upstream`/`internal`, decided solely via
+    `errors.As` against `backend.UpstreamStatusError` — never message text)
+    and a `SuggestIssue`/`Instruction` bug-report decision.
+  - Key file: `core/domain/errors/classify.go`
+
 - `core/domain/port/backend` + `core/impl/port/backend/codex`
   - HTTP client for the upstream ChatGPT/Codex backend endpoint:
     - `POST {base_url}/backend-api/codex/responses` (default `https://chatgpt.com`).
   - Uses HTTP SSE (`Accept: text/event-stream`) for full request transport.
   - Supports reusable Codex Responses WebSocket sessions for incremental/delta transport, including refresh+retry on 401.
+  - Defines `UpstreamStatusError` (`core/domain/port/backend/types.go`), a
+    domain-owned interface (`UpstreamStatus() int`, `UpstreamBody() string`)
+    that impl-layer backend errors implement, so `core/domain/errors` can
+    detect upstream failures without importing the impl package.
   - Key file:
     - `core/impl/port/backend/codex/client.go`
 
@@ -157,15 +183,33 @@ The module is organized as small packages with explicit domain/impl boundaries (
   - Key file:
     - `netpolicy/client.go`
 
-- `observability/`
-  - Request/response capture middleware (no business logic).
+- `middleware/` + `observability/`
+  - `middleware.Capture` (`middleware/capture.go`) is the single exchange
+    capture point for every route, unary and streaming alike — it wraps
+    `c.Response().Writer` in a `captureWriter` that implements `Unwrap()
+    http.ResponseWriter` so `http.ResponseController`-based flushing still
+    reaches the real writer, and logs once after `next(c)` returns. This
+    supersedes ADR-0004's "no middleware may wrap the writer on streaming
+    routes" constraint — see ADR-0013. `observability/` supplies the
+    types/redaction/formatting `middleware.Capture` writes through; it has
+    no capture logic of its own.
   - Writes exchange logs to:
     - The filename changed from `http-exchange.jsonl` (Rust) to `http-exchange.log` (Go); the format also changed to **formatted text** (`key: value` lines followed by a 36-dash separator line) instead of JSONL. See `observability/format.go`.
   - Adds `x-proxy-request-id` header to responses for correlation.
   - Key files:
+    - `middleware/capture.go`
     - `observability/exchange.go`
     - `observability/format.go`
     - `observability/redact.go`
+
+### Architecture decision records
+
+- `docs/decisions/ADR-0001.md` through `ADR-0013.md` (plus `index.md`) are
+  the canonical, current ADR set — this is the only ADR directory in the
+  repo. Read the relevant ADR before changing behavior it governs, e.g.
+  ADR-0004 (SSE single-writer goroutine) + ADR-0013 (supersedes it: Capture
+  middleware is now flusher-safe on streaming routes), ADR-0005 (single
+  AppError type / closed 8-code set / one serialization point).
 
 ### Auth + configuration locations
 

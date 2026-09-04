@@ -157,7 +157,7 @@ cmd_doctor() {
     # Verify installed command assets match packaged assets when both are present
     if [ -f "$PYTHON_HELPER" ]; then
         FORMULA_PREFIX="$(dirname "$(dirname "$PYTHON_HELPER")")"
-        PACKAGED_COMMANDS_DIR="$FORMULA_PREFIX/share/cld-gateway/commands"
+        PACKAGED_COMMANDS_DIR="$FORMULA_PREFIX/libexec/commands"
         if [ -d "$PACKAGED_COMMANDS_DIR" ] && [ -d "$CODEX_COMMANDS_HOME" ]; then
             mismatch_found=0
             for pkg_file in $(find "$PACKAGED_COMMANDS_DIR" -type f); do

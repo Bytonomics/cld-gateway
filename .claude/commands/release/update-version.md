@@ -3,28 +3,36 @@ Update the release version across the known version-pinned files in this repo.
 Command arguments are provided in `$ARGUMENTS`.
 Expected form:
 - `<version>`
+- `<version> stable`
+- `<version> alpha`
+- `<version> beta`
 
-Parse `$ARGUMENTS` as exactly one positional value:
-1. semantic version string, e.g. `0.1.2`
+Parse `$ARGUMENTS` into exactly two positional values:
+1. semantic version string, e.g. `0.1.2`, with or without a leading `v` (strip a leading `v`/`V` before validating; the underlying version is the digits after it)
+2. release kind, one of `stable`, `alpha`, or `beta` (if nothing is given, assume `stable`)
 
 Rules:
 1. Read every target file before changing it.
-2. Validate the argument is a plain semantic version: `X.Y.Z` with optional `-alpha(.N)` or `-beta(.N)` suffix only if needed by the repo’s existing version rules.
-3. Update only the exact release/version references that are supposed to move together.
-4. Do not make unrelated edits.
-5. After editing, show a concise summary of which files were updated and what old value changed to what new value.
+2. Validate the version positional is a plain semantic version `X.Y.Z` once any leading `v`/`V` is stripped.
+3. Validate the kind positional is one of `stable`, `alpha`, or `beta` (default `stable` when omitted).
+4. Update only the exact release/version references that are supposed to move together.
+5. Do not make unrelated edits.
+6. After editing, show a concise summary of which files were updated and what old value changed to what new value.
 
 Do these tasks in this exact order:
-1. Validate the input version.
-   - Parse `$ARGUMENTS` as exactly one semantic version string.
-   - Reject anything that is not `X.Y.Z` or the repo’s accepted prerelease format.
+1. Validate the input version and kind.
+   - Parse `$ARGUMENTS` into the version and kind positionals above.
+   - Strip a leading `v`/`V` from the version positional before validating.
+   - Reject a version that is not `X.Y.Z` once stripped.
+   - Reject a kind that is not `stable`, `alpha`, or `beta`; default to `stable` when the kind positional is omitted entirely.
 2. Read the allowed target files.
    - Read `VERSION`.
    - Read `README.md`.
    - Read `homebrew-tap/Formula/cld-gateway.rb` only to verify later that it was not modified.
 3. Apply only the allowed version updates.
+   - Compute the version string to write: `stable` => `X.Y.Z`; `alpha` => `X.Y.Z-alpha`; `beta` => `X.Y.Z-beta`. Never write a leading `v` into `VERSION` — it stores the bare number only, matching `.github/workflows/release.yml`'s exact-match tag-check against this file's raw content.
    - Update `VERSION`
-     - replace its entire content with the new version string followed by a single trailing newline (e.g. `0.1.2\n`) — the file contains nothing but the bare version number, no key, no quotes, no section header
+     - replace its entire content with the computed version string followed by a single trailing newline (e.g. `0.1.2\n` or `0.1.2-beta\n`) — the file contains nothing but the bare version number, no `v` prefix, no key, no quotes, no section header
    - Update `README.md`
      - change the pinned shell installer example that uses a concrete release version
 4. Verify the generated formula file was untouched and run validation.

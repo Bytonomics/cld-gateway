@@ -119,7 +119,7 @@ curl -fsSL https://github.com/Bytonomics/cld-gateway/releases/latest/download/in
 Pin a release when needed:
 
 ```sh
-curl -fsSL https://github.com/Bytonomics/cld-gateway/releases/latest/download/install.sh | sh -s -- --release 1.1.0
+curl -fsSL https://github.com/Bytonomics/cld-gateway/releases/latest/download/install.sh | sh -s -- --release 1.1.1
 ```
 
 ### Direct download

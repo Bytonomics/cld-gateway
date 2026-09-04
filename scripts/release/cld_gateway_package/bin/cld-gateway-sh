@@ -190,12 +190,24 @@ cmd_doctor() {
             health_url="http://$listen_addr/health"
 
             if command -v lsof >/dev/null 2>&1; then
-                lsof_output="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)"
-                if [ -n "$lsof_output" ]; then
-                    if printf '%s\n' "$lsof_output" | grep -F "$(brew --prefix)/bin/cld-gateway" >/dev/null 2>&1 \
-                        || printf '%s\n' "$lsof_output" | grep -F "$(brew --prefix cld-gateway)/bin/cld-gateway" >/dev/null 2>&1; then
-                        :
-                    else
+                # lsof's formatted COMMAND column is truncated (commonly to 9
+                # chars) and never contains the executable's full path, so a
+                # path grep against it can never match - even for our own,
+                # genuinely running process. Resolve PIDs via `lsof -t`
+                # (untruncated, PID-only output) instead, then resolve each
+                # PID's real executable path via `ps -o comm=`, which does
+                # return the full path on macOS.
+                listen_pids="$(lsof -t -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)"
+                if [ -n "$listen_pids" ]; then
+                    match_found=0
+                    for pid in $listen_pids; do
+                        proc_path="$(ps -o comm= -p "$pid" 2>/dev/null || true)"
+                        if [ "$proc_path" = "$(brew --prefix)/bin/cld-gateway" ] \
+                            || [ "$proc_path" = "$(brew --prefix cld-gateway)/bin/cld-gateway" ]; then
+                            match_found=1
+                        fi
+                    done
+                    if [ "$match_found" -ne 1 ]; then
                         echo "[FAIL] A different process is already listening on $host:$port"
                         critical_exit_code=1
                     fi

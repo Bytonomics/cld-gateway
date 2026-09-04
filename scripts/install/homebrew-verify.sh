@@ -172,20 +172,26 @@ detect_conflicting_gateway_process() {
     return
   fi
 
-  lsof_output="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)"
-  if [ -z "$lsof_output" ]; then
+  # lsof's formatted COMMAND column is truncated and never contains the
+  # executable's full path, so a path grep against it can never match -
+  # even for our own, genuinely running process. Resolve PIDs via `lsof -t`
+  # (untruncated, PID-only output) instead, then resolve each PID's real
+  # executable path via `ps -o comm=`, which does return the full path on
+  # macOS.
+  listen_pids="$(lsof -t -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)"
+  if [ -z "$listen_pids" ]; then
     return
   fi
 
-  if printf '%s\n' "$lsof_output" | grep -F "$INSTALLED_BINARY_ONE" >/dev/null 2>&1; then
-    return
-  fi
-  if printf '%s\n' "$lsof_output" | grep -F "$INSTALLED_BINARY_TWO" >/dev/null 2>&1; then
-    return
-  fi
+  for pid in $listen_pids; do
+    proc_path="$(ps -o comm= -p "$pid" 2>/dev/null || true)"
+    if [ "$proc_path" = "$INSTALLED_BINARY_ONE" ] || [ "$proc_path" = "$INSTALLED_BINARY_TWO" ]; then
+      return
+    fi
+  done
 
   echo "A different process is already listening on $host:$port; refusing to treat /health as proof of a correct Homebrew install." >&2
-  printf '%s\n' "$lsof_output" >&2
+  printf 'Listening PIDs: %s\n' "$listen_pids" >&2
   exit 1
 }
 

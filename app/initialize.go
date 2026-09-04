@@ -89,6 +89,7 @@ func Initialize(cfg *config.Config) (*Providers, error) {
 		Conversations: conversations,
 		ToolCalls:     toolCalls,
 		Clock:         clock,
+		Auth:          authProvider,
 	})
 
 	return &Providers{

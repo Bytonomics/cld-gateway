@@ -20,10 +20,17 @@ PACKAGE_ASSET_FILENAMES = (
     "bin/cldg",
     "bin/clddg",
 )
-# Directories to package recursively (preserve relative directory structure)
-PACKAGE_DIRECTORIES = (
-    "commands",
-)
+# Source directory (relative to the repo root) holding every packaged
+# translated-command prompt file, and its destination (relative to the
+# package dir). This directory lives in the Go module tree so
+# core/domain/claudecode can //go:embed the whole tree directly (Go can't
+# embed files outside its own package tree, unlike Rust's include_str!) -
+# this is the single source of truth; the whole directory is copied
+# recursively, so adding a new packaged command's .md file there is picked
+# up automatically by both the Go embed and this packaging step, with no
+# code change required in either place.
+PACKAGE_COMMANDS_SRC = Path("core") / "domain" / "claudecode" / "assets" / "commands"
+PACKAGE_COMMANDS_DST = Path("commands")
 
 
 def prepare_package_dir(package_dir: Path, *, force: bool) -> None:
@@ -80,12 +87,11 @@ def build_package_dir(
             mode = src.stat().st_mode
             dst.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
-    # Copy directories recursively, preserving relative structure
-    for dir_name in PACKAGE_DIRECTORIES:
-        src_dir = package_source_dir / dir_name
-        dst_dir = package_dir / dir_name
-        if src_dir.is_dir():
-            shutil.copytree(src_dir, dst_dir, dirs_exist_ok=True)
+    # Copy every packaged command file, recursively, from its canonical
+    # location in the Go module tree (see PACKAGE_COMMANDS_SRC).
+    commands_src = _repo_root() / PACKAGE_COMMANDS_SRC
+    commands_dst = package_dir / PACKAGE_COMMANDS_DST
+    shutil.copytree(commands_src, commands_dst, dirs_exist_ok=True)
 
 
 def validate_package_dir(package_dir: Path, spec: TargetSpec) -> None:
@@ -136,14 +142,13 @@ def validate_package_dir(package_dir: Path, spec: TargetSpec) -> None:
             if not _is_executable(asset_path):
                 raise RuntimeError(f"Script is not executable: {asset_filename}")
 
-    # Validate that directories exist and contain files
-    for dir_name in PACKAGE_DIRECTORIES:
-        dir_path = package_dir / dir_name
-        if not dir_path.is_dir():
-            raise RuntimeError(f"Missing package directory: {dir_name}")
-        # Verify directory has content
-        if not any(dir_path.rglob("*")):
-            raise RuntimeError(f"Package directory is empty: {dir_name}")
+    # Validate that the packaged commands directory (see PACKAGE_COMMANDS_SRC)
+    # was copied in and is non-empty.
+    commands_dst = package_dir / PACKAGE_COMMANDS_DST
+    if not commands_dst.is_dir():
+        raise RuntimeError(f"Missing package directory: {PACKAGE_COMMANDS_DST}")
+    if not any(commands_dst.rglob("*")):
+        raise RuntimeError(f"Package directory is empty: {PACKAGE_COMMANDS_DST}")
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -158,3 +163,8 @@ def _is_executable(path: Path) -> bool:
 
 def _package_source_dir() -> Path:
     return Path(__file__).resolve().parent
+
+
+def _repo_root() -> Path:
+    # layout.py -> cld_gateway_package -> release -> scripts -> repo root
+    return Path(__file__).resolve().parents[3]

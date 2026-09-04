@@ -46,6 +46,10 @@ func (f *fakeBackendForSelectTransport) LiveChainID(key backendport.SessionKey) 
 	return "", false
 }
 
+func (f *fakeBackendForSelectTransport) FetchStatusData(ctx context.Context) (map[string]any, error) {
+	return nil, nil
+}
+
 // TestSelectTransport_SelectorError_RecordsWarning tests that a Selector error
 // results in a "delta_calculation_failed" warning being appended to plan.warnings.
 func TestSelectTransport_SelectorError_RecordsWarning(t *testing.T) {

@@ -12,6 +12,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -24,6 +26,7 @@ import (
 	"github.com/Bytonomics/cld-gateway/core/domain/conversation"
 	"github.com/Bytonomics/cld-gateway/core/domain/dto"
 	apperr "github.com/Bytonomics/cld-gateway/core/domain/errors"
+	"github.com/Bytonomics/cld-gateway/core/domain/port/auth"
 	backendport "github.com/Bytonomics/cld-gateway/core/domain/port/backend"
 	stateport "github.com/Bytonomics/cld-gateway/core/domain/port/state"
 	"github.com/Bytonomics/cld-gateway/core/domain/services"
@@ -92,6 +95,16 @@ type Deps struct {
 	Conversations stateport.ConversationRepo
 	ToolCalls     stateport.ToolCallRepo
 	Clock         stateport.Clock
+
+	// Auth/GatewayVersion feed translated slash-command executors (see
+	// applyTranslatedCommandExecutor), mirroring ExecutorRuntime's
+	// construction at execute_translated_command_input (lib.rs:1961-1987).
+	// Backend-specific status/usage fetching goes through Backend's own
+	// FetchStatusData (backend.Backend), not through a field here.
+	// GatewayVersion has no source of truth in this repo yet (no
+	// ldflags-injected build version), so it is currently always "".
+	Auth           auth.Provider
+	GatewayVersion string
 }
 
 // MessageService implements services.MessageService.
@@ -226,6 +239,10 @@ func (s *MessageService) prepare(ctx context.Context, req *dto.MessagesRequest) 
 	}
 	plan.backendReq = backendReq
 
+	if err := s.applyTranslatedCommandExecutor(ctx, plan, &workingReq); err != nil {
+		return nil, nil, err
+	}
+
 	if plan.persisted {
 		s.selectTransport(ctx, plan, selection)
 	}
@@ -283,6 +300,91 @@ func (s *MessageService) selectTransport(ctx context.Context, plan *turnPlan, se
 		return
 	}
 	plan.backendReq.PreviousResponseID = &previousResponseID
+}
+
+// applyTranslatedCommandExecutor ports execute_translated_command_input's
+// two call sites (lib.rs:1111-1122 unary, lib.rs:2781-2792 streaming) into
+// the single shared prepare() step: when the just-translated backend
+// request carries a claude_code_translated_slash_command client-metadata
+// tag (set by the translator's own claudecode.NormalizeContext call,
+// core/domain/translator/generic.go:83,151), run that command's executor
+// and push its result as a new input item onto the outgoing backend
+// request - never short-circuiting the backend call itself, matching
+// Rust's translated.input.push(command_input).
+func (s *MessageService) applyTranslatedCommandExecutor(ctx context.Context, plan *turnPlan, workingReq *dto.MessagesRequest) error {
+	commandName := plan.backendReq.ClientMetadata["claude_code_translated_slash_command"]
+	if commandName == "" {
+		return nil
+	}
+
+	runtime := s.buildExecutorRuntime(ctx, plan, workingReq)
+
+	executorJSON, err := ExecuteTranslatedCommand(ctx, &commandName, runtime)
+	if err != nil {
+		return apperr.Wrap(err, apperr.CodeAPI, fmt.Sprintf("translated command '%s' failed: %s", commandName, err.Error()), 500)
+	}
+	if executorJSON == nil {
+		return apperr.New(apperr.CodeAPI, fmt.Sprintf("no executor registered for translated command '%s'", commandName), 500)
+	}
+
+	postResultFn, ok := GetPostResultFunction(commandName)
+	if !ok {
+		return apperr.New(apperr.CodeAPI, fmt.Sprintf("no post-result function registered for translated command '%s'", commandName), 500)
+	}
+	resultText := postResultFn(executorJSON, claudecode.GetPackagedCommandBody(commandName))
+
+	plan.backendReq.Input = append(plan.backendReq.Input, map[string]any{
+		"type": "message",
+		"role": "user",
+		"content": []map[string]any{
+			{"type": "input_text", "text": resultText},
+		},
+	})
+	return nil
+}
+
+// buildExecutorRuntime assembles the runtime context a translated-command
+// executor needs, mirroring ExecutorRuntime construction at
+// execute_translated_command_input (lib.rs:1961-1987). Backend is passed
+// through as-is (s.deps.Backend) so the executor can call FetchStatusData
+// without this file knowing which concrete backend is active. Credentials
+// are looked up here rather than injected once at startup because they can
+// rotate mid-process via refresh; HasCredentials stays false whenever
+// either lookup fails, matching Rust's maybe_creds.is_ok() gate (a failed
+// lookup must never leave a stale account id looking valid).
+func (s *MessageService) buildExecutorRuntime(ctx context.Context, plan *turnPlan, workingReq *dto.MessagesRequest) *ExecutorRuntime {
+	runtime := &ExecutorRuntime{
+		Backend:         s.deps.Backend,
+		BackendName:     s.deps.Config.Providers.Active,
+		CurrentModel:    strPtr(workingReq.Model),
+		GatewayVersion:  s.deps.GatewayVersion,
+		ConfigPath:      strPtr(config.DefaultPath()),
+		ResolvedModel:   strPtr(plan.resolution.SelectedBackendModel),
+		ReasoningEffort: nonEmptyStrPtr(plan.backendReq.ClientMetadata["anthropic_effort"]),
+	}
+
+	if dir, err := os.Getwd(); err == nil {
+		runtime.CurrentDir = strPtr(dir)
+	}
+
+	if s.deps.Auth != nil {
+		if _, err := s.deps.Auth.AccessToken(ctx); err == nil {
+			if accountID, err2 := s.deps.Auth.AccountID(ctx); err2 == nil {
+				runtime.HasCredentials = true
+				runtime.AccountID = accountID
+				runtime.SessionInfo.AccountDisplay = strPtr(accountID)
+			}
+		}
+	}
+
+	return runtime
+}
+
+func nonEmptyStrPtr(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 func reasoningEffortOf(req *dto.MessagesRequest) string {

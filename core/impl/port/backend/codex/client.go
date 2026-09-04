@@ -319,3 +319,148 @@ func (c *Client) HasLiveSession(key backend.SessionKey) bool { return false }
 func (c *Client) LiveChainID(key backend.SessionKey) (backend.ChainID, bool) {
 	return "", false
 }
+
+// codexUsagePath is the Codex backend's live usage/rate-limit endpoint,
+// mirroring fetch_live_usage_data (translate_executor.rs:150-183).
+const codexUsagePath = "/api/codex/usage"
+
+// FetchStatusData implements backend.Backend's FetchStatusData for the
+// Codex backend: a live GET against codexUsagePath using this Client's own
+// auth/http wiring, then normalizes Codex's own response shape into the
+// backend-agnostic keys the translated "status" command executor
+// (core/impl/services/translate_executor.go) expects: plan_type,
+// rate_limits, spend_control, usage_raw. All Codex-specific field-name
+// knowledge (rate_limit/primary_window/individual_limit, etc.) stays in
+// this package - the executor never needs to know which backend answered.
+func (c *Client) FetchStatusData(ctx context.Context) (map[string]any, error) {
+	token, err := c.auth.AccessToken(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("codex backend: load access token: %w", err)
+	}
+	accountID, err := c.auth.AccountID(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("codex backend: load account id: %w", err)
+	}
+
+	url := strings.TrimRight(c.cfg.BaseURL, "/") + codexUsagePath
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("codex backend: build usage request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token.Expose())
+	req.Header.Set("chatgpt-account-id", accountID)
+
+	res, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("codex backend: send usage request: %w", err)
+	}
+	defer func() { _ = res.Body.Close() }()
+
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		return nil, fmt.Errorf("codex backend: read usage response: %w", err)
+	}
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return nil, newStatusError(res.StatusCode, body)
+	}
+
+	var usage map[string]any
+	if err := json.Unmarshal(body, &usage); err != nil {
+		return nil, fmt.Errorf("codex backend: parse usage response: %w", err)
+	}
+
+	normalized := map[string]any{
+		"rate_limits": normalizeRateLimits(usage),
+		"usage_raw":   usage,
+	}
+	if planType, ok := usage["plan_type"]; ok {
+		normalized["plan_type"] = planType
+	}
+	if spend, ok := usage["spend_control"].(map[string]any); ok {
+		normalized["spend_control"] = normalizeSpendControl(spend)
+	}
+	return normalized, nil
+}
+
+// normalizeRateLimits normalizes Codex's rate-limit response shape into
+// stable, backend-agnostic fields, mirroring normalize_rate_limits
+// (translate_executor.rs:186-237).
+func normalizeRateLimits(usage map[string]any) map[string]any {
+	limits := map[string]any{}
+
+	if rl, ok := usage["rate_limit"].(map[string]any); ok {
+		primary := map[string]any{
+			"allowed":       rl["allowed"],
+			"limit_reached": rl["limit_reached"],
+		}
+		if pw, ok := rl["primary_window"].(map[string]any); ok {
+			primary["used_percent"] = pw["used_percent"]
+			primary["reset_at"] = pw["reset_at"]
+			primary["window_seconds"] = pw["limit_window_seconds"]
+		}
+		limits["primary"] = primary
+
+		if sw, ok := rl["secondary_window"].(map[string]any); ok {
+			limits["secondary"] = map[string]any{
+				"used_percent":   sw["used_percent"],
+				"reset_at":       sw["reset_at"],
+				"window_seconds": sw["limit_window_seconds"],
+			}
+		}
+	}
+
+	if additional, ok := usage["additional_rate_limits"].([]any); ok {
+		entries := make([]any, 0, len(additional))
+		for _, raw := range additional {
+			entry, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			name, ok := entry["limit_name"].(string)
+			if !ok {
+				continue
+			}
+			rl, ok := entry["rate_limit"].(map[string]any)
+			if !ok {
+				continue
+			}
+			pw, ok := rl["primary_window"].(map[string]any)
+			if !ok {
+				continue
+			}
+			entries = append(entries, map[string]any{
+				"limit_name":     name,
+				"allowed":        rl["allowed"],
+				"limit_reached":  rl["limit_reached"],
+				"used_percent":   pw["used_percent"],
+				"reset_at":       pw["reset_at"],
+				"window_seconds": pw["limit_window_seconds"],
+			})
+		}
+		if len(entries) > 0 {
+			limits["additional"] = entries
+		}
+	}
+
+	return limits
+}
+
+// normalizeSpendControl normalizes Codex's spend-control response shape,
+// mirroring normalize_spend_control (translate_executor.rs:240-256).
+func normalizeSpendControl(spend map[string]any) map[string]any {
+	result := map[string]any{
+		"reached": spend["reached"],
+	}
+	if limit, ok := spend["individual_limit"].(map[string]any); ok {
+		result["individual_limit"] = map[string]any{
+			"source":            limit["source"],
+			"limit":             limit["limit"],
+			"used":              limit["used"],
+			"remaining":         limit["remaining"],
+			"used_percent":      limit["used_percent"],
+			"remaining_percent": limit["remaining_percent"],
+			"reset_at":          limit["reset_at"],
+		}
+	}
+	return result
+}

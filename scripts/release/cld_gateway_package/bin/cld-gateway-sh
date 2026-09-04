@@ -134,11 +134,11 @@ cmd_doctor() {
         critical_exit_code=1
     fi
 
-    STATUS_ASSET_PATH="$CODEX_COMMANDS_HOME/codex/status.md"
+    STATUS_ASSET_PATH="$CODEX_COMMANDS_HOME/gateway/status.md"
     if [ -f "$STATUS_ASSET_PATH" ]; then
-        echo "[OK] Found ~/.codex_gateway/commands/codex/status.md"
+        echo "[OK] Found ~/.codex_gateway/commands/gateway/status.md"
     else
-        echo "[FAIL] Missing ~/.codex_gateway/commands/codex/status.md"
+        echo "[FAIL] Missing ~/.codex_gateway/commands/gateway/status.md"
         critical_exit_code=1
     fi
 

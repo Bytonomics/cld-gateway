@@ -4,20 +4,22 @@
 // document for translated Claude Code slash commands (currently "/status"),
 // with non-blocking live usage enrichment and rate-limit/spend-control
 // normalization.
+//
+// This executor is backend-agnostic: it fetches usage/rate-limit data via
+// backend.Backend.FetchStatusData, which every backend implements against
+// its own status API and returns already normalized into the generic
+// plan_type/rate_limits/spend_control/usage_raw shape below. Adding status
+// support for a new backend never requires touching this file.
 package services
 
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"strings"
 	"time"
 
-	"github.com/Bytonomics/cld-gateway/core"
-	"github.com/Bytonomics/cld-gateway/netpolicy"
+	backendport "github.com/Bytonomics/cld-gateway/core/domain/port/backend"
 )
 
 // SessionInfo carries Gateway's local session/thread information for status
@@ -29,15 +31,15 @@ type SessionInfo struct {
 }
 
 // ExecutorRuntime is the runtime context passed to executor functions,
-// mirroring translate_executor.rs ExecutorRuntime (:8-25). It intentionally
-// depends only on core.Secret/netpolicy.Client rather than the codex backend
-// client package, keeping this file free of a codex-specific import.
+// mirroring translate_executor.rs ExecutorRuntime (:8-25). Backend is the
+// active backend.Backend implementation, used only through
+// backend.Backend.FetchStatusData - this file never imports a concrete
+// backend package.
 type ExecutorRuntime struct {
+	Backend         backendport.Backend
 	HasCredentials  bool
-	AccessToken     core.Secret
 	AccountID       string
-	BaseURL         string
-	HTTPClient      *netpolicy.Client
+	BackendName     string
 	CurrentModel    *string
 	SessionInfo     SessionInfo
 	GatewayVersion  string
@@ -102,10 +104,9 @@ func ExecuteTranslatedCommand(ctx context.Context, commandName *string, runtime 
 // executeStatusCommand builds a Gateway-owned status document with local
 // session info and optional usage data, mirroring execute_status_command
 // (:81-146). It returns immediately with local state; usage enrichment is
-// best-effort and never fails the executor.
+// best-effort (via the active backend's FetchStatusData) and never fails
+// the executor.
 func executeStatusCommand(ctx context.Context, runtime *ExecutorRuntime) map[string]any {
-	baseURL := strings.TrimRight(runtime.BaseURL, "/")
-
 	accountID := "unavailable"
 	if runtime.HasCredentials {
 		accountID = runtime.AccountID
@@ -132,7 +133,7 @@ func executeStatusCommand(ctx context.Context, runtime *ExecutorRuntime) map[str
 			"reasoning_effort": derefOrNil(runtime.ReasoningEffort),
 		},
 		"provider": map[string]any{
-			"base_url": baseURL,
+			"name": runtime.BackendName,
 		},
 		"auth": map[string]any{
 			"account_id": accountID,
@@ -145,149 +146,32 @@ func executeStatusCommand(ctx context.Context, runtime *ExecutorRuntime) map[str
 	}
 
 	// Errors are captured in the status document, not escalated as executor
-	// failure (:126).
-	if usageData, err := fetchLiveUsageData(ctx, runtime); err == nil {
-		if planType, ok := usageData["plan_type"]; ok {
-			status["plan_type"] = planType
+	// failure (:126). usageData is already normalized into these generic
+	// keys by the active backend's FetchStatusData - no backend-specific
+	// parsing happens here.
+	if runtime.Backend != nil {
+		if usageData, err := runtime.Backend.FetchStatusData(ctx); err == nil {
+			if v, ok := usageData["plan_type"]; ok {
+				status["plan_type"] = v
+			}
+			if v, ok := usageData["rate_limits"]; ok {
+				status["rate_limits"] = v
+			}
+			if v, ok := usageData["spend_control"]; ok {
+				status["spend_control"] = v
+			}
+			if v, ok := usageData["usage_raw"]; ok {
+				status["usage_raw"] = v
+			}
+			status["usage_state"] = "current"
+		} else {
+			status["usage_state"] = "stale_or_unavailable"
 		}
-		status["rate_limits"] = normalizeRateLimits(usageData)
-		if spend, ok := usageData["spend_control"].(map[string]any); ok {
-			status["spend_control"] = normalizeSpendControl(spend)
-		}
-		status["usage_raw"] = usageData
-		status["usage_state"] = "current"
 	} else {
 		status["usage_state"] = "stale_or_unavailable"
 	}
 
 	return status
-}
-
-// fetchLiveUsageData fetches live usage/rate-limit data from the upstream
-// Codex API, mirroring fetch_live_usage_data (:150-183).
-func fetchLiveUsageData(ctx context.Context, runtime *ExecutorRuntime) (map[string]any, error) {
-	if !runtime.HasCredentials {
-		return nil, errors.New("credentials_unavailable")
-	}
-
-	baseURL := strings.TrimRight(runtime.BaseURL, "/")
-	url := baseURL + "/api/codex/usage"
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("usage_fetch_policy_error: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+runtime.AccessToken.Expose())
-	req.Header.Set("chatgpt-account-id", runtime.AccountID)
-
-	httpClient := runtime.HTTPClient
-	if httpClient == nil {
-		httpClient = netpolicy.New(nil)
-	}
-
-	res, err := httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("usage_fetch_transport_error: %w", err)
-	}
-	defer func() { _ = res.Body.Close() }()
-
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return nil, fmt.Errorf("usage_fetch_status_%d", res.StatusCode)
-	}
-
-	body, err := io.ReadAll(res.Body)
-	if err != nil {
-		return nil, fmt.Errorf("usage_fetch_body_error: %w", err)
-	}
-
-	var parsed map[string]any
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		return nil, fmt.Errorf("usage_fetch_parse_error: %w", err)
-	}
-	return parsed, nil
-}
-
-// normalizeRateLimits normalizes rate-limit data from the upstream usage
-// response into stable Gateway-owned fields, mirroring normalize_rate_limits
-// (:186-237).
-func normalizeRateLimits(usage map[string]any) map[string]any {
-	limits := map[string]any{}
-
-	if rl, ok := usage["rate_limit"].(map[string]any); ok {
-		primary := map[string]any{
-			"allowed":       rl["allowed"],
-			"limit_reached": rl["limit_reached"],
-		}
-		if pw, ok := rl["primary_window"].(map[string]any); ok {
-			primary["used_percent"] = pw["used_percent"]
-			primary["reset_at"] = pw["reset_at"]
-			primary["window_seconds"] = pw["limit_window_seconds"]
-		}
-		limits["primary"] = primary
-
-		if sw, ok := rl["secondary_window"].(map[string]any); ok {
-			limits["secondary"] = map[string]any{
-				"used_percent":   sw["used_percent"],
-				"reset_at":       sw["reset_at"],
-				"window_seconds": sw["limit_window_seconds"],
-			}
-		}
-	}
-
-	if additional, ok := usage["additional_rate_limits"].([]any); ok {
-		entries := make([]any, 0, len(additional))
-		for _, raw := range additional {
-			entry, ok := raw.(map[string]any)
-			if !ok {
-				continue
-			}
-			name, ok := entry["limit_name"].(string)
-			if !ok {
-				continue
-			}
-			rl, ok := entry["rate_limit"].(map[string]any)
-			if !ok {
-				continue
-			}
-			pw, ok := rl["primary_window"].(map[string]any)
-			if !ok {
-				continue
-			}
-			entries = append(entries, map[string]any{
-				"limit_name":     name,
-				"allowed":        rl["allowed"],
-				"limit_reached":  rl["limit_reached"],
-				"used_percent":   pw["used_percent"],
-				"reset_at":       pw["reset_at"],
-				"window_seconds": pw["limit_window_seconds"],
-			})
-		}
-		if len(entries) > 0 {
-			limits["additional"] = entries
-		}
-	}
-
-	return limits
-}
-
-// normalizeSpendControl normalizes spend-control data from the upstream
-// usage response, mirroring normalize_spend_control (:240-256).
-func normalizeSpendControl(spend map[string]any) map[string]any {
-	result := map[string]any{
-		"reached": spend["reached"],
-	}
-	if limit, ok := spend["individual_limit"].(map[string]any); ok {
-		result["individual_limit"] = map[string]any{
-			"source":            limit["source"],
-			"limit":             limit["limit"],
-			"used":              limit["used"],
-			"remaining":         limit["remaining"],
-			"used_percent":      limit["used_percent"],
-			"remaining_percent": limit["remaining_percent"],
-			"reset_at":          limit["reset_at"],
-		}
-	}
-	return result
 }
 
 // PostResultForTranslatedCommand wraps executor JSON result with packaged

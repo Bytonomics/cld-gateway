@@ -40,7 +40,7 @@ Usage: homebrew-verify.sh
 Verifies a Homebrew installation of cld-gateway by checking:
   - installed binaries and wrapper scripts (cld-gateway, cld-gateway-sh, cldg, clddg)
   - installed config/settings files
-  - deployed command assets (e.g. ~/.codex_gateway/commands/codex/status.md)
+  - deployed command assets (e.g. ~/.codex_gateway/commands/gateway/status.md)
   - wrapper script contents
   - health endpoint using the listen address from ~/.gateway/config.yml
 EOF

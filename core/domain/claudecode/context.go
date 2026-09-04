@@ -2,6 +2,7 @@
 package claudecode
 
 import (
+	"embed"
 	"strings"
 
 	"github.com/Bytonomics/cld-gateway/config"
@@ -15,16 +16,40 @@ const (
 	skillDirectoryAnalysisSuffix    = "analyze the files in this directory before proceeding"
 )
 
-// packagedCodexStatusCommand mirrors
-// scripts/release/cld_gateway_package/commands/codex/status.md (Rust embeds
-// it via include_str!; that file is currently empty on disk in this repo).
-// Keep this constant in sync with that file's content.
-const packagedCodexStatusCommand = ""
+// packagedCommandsFS embeds every packaged translated-command prompt body
+// under assets/commands/ (Rust embeds each equivalent file individually via
+// include_str!). This is the single source of truth for that content:
+// scripts/release/cld_gateway_package/layout.py copies this whole directory
+// tree into the release package's commands/ at package-build time, so end
+// users get the identical files installed under ~/.codex_gateway/commands/.
+// Adding a new translated command's packaged body means dropping a new
+// assets/commands/gateway/<name>.md file here - no code change in this file
+// or in layout.py is needed for the file to be embedded and shipped; only
+// registering the command name itself (commands.go's internalCommands,
+// translate_executor.go's CommandExecutorNames/CommandPostResults) is.
+//
+// The "gateway" subdirectory (not "codex") is deliberate: it becomes the
+// Claude Code slash-command namespace prefix (directory name -> "/<dir>:
+// <file>"), and "codex" collides with an unrelated, officially-installed
+// Codex plugin that already owns a /codex:status command - "gateway" is
+// also backend-agnostic, matching FetchStatusData being backend-agnostic
+// (see translate_executor.go and core/domain/port/backend.Backend).
+//
+//go:embed assets/commands
+var packagedCommandsFS embed.FS
 
-// translatedCommandBodies ports TRANSLATED_COMMAND_BODIES
-// (claude_code_context.rs:17).
-var translatedCommandBodies = map[string]string{
-	"status": packagedCodexStatusCommand,
+// translatedCommandBody reads a translated command's packaged prompt body
+// from packagedCommandsFS, mirroring TRANSLATED_COMMAND_BODIES's lookup
+// (claude_code_context.rs:17) but resolved dynamically against the embedded
+// directory tree instead of a hardcoded per-command map. Every translated
+// command's packaged body lives at assets/commands/gateway/<name>.md.
+func translatedCommandBody(commandName string) (string, bool) {
+	name := normalizeCommandName(commandName)
+	data, err := packagedCommandsFS.ReadFile("assets/commands/gateway/" + name + ".md")
+	if err != nil {
+		return "", false
+	}
+	return string(data), true
 }
 
 // NormalizedContext ports NormalizedClaudeCodeContext
@@ -174,11 +199,6 @@ func activeCommandInstructions(dispatch commandDispatch) (string, bool) {
 		// JSON exists (post-result step). Not applied at this layer.
 		return "", false
 	}
-}
-
-func translatedCommandBody(commandName string) (string, bool) {
-	body, ok := translatedCommandBodies[normalizeCommandName(commandName)]
-	return body, ok
 }
 
 // GetPackagedCommandBody ports get_packaged_command_body

@@ -256,14 +256,14 @@ def test_wrapper_doctor_checks_user_facing_usability_signals() -> None:
     wrapper = load_wrapper_script()
 
     assert 'CODEX_COMMANDS_HOME="$USER_HOME/.codex_gateway/commands"' in wrapper
-    assert 'Found ~/.codex_gateway/commands/codex/status.md' in wrapper
+    assert 'Found ~/.codex_gateway/commands/gateway/status.md' in wrapper
     assert 'Installed Codex command assets match packaged assets' in wrapper
     assert 'Health endpoint responded at $health_url' in wrapper
     assert 'Health check failed at $health_url' in wrapper
     assert 'A different process is already listening on $host:$port' in wrapper
 
 
-def test_post_install_deploys_codex_status_asset() -> None:
+def test_post_install_deploys_gateway_status_asset() -> None:
     post_install = load_post_install_module()
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -271,8 +271,8 @@ def test_post_install_deploys_codex_status_asset() -> None:
         user_home = tmp_path / "home"
         formula_prefix = tmp_path / "formula"
         user_home.mkdir(parents=True)
-        (formula_prefix / "libexec" / "commands" / "codex").mkdir(parents=True)
-        (formula_prefix / "libexec" / "commands" / "codex" / "status.md").write_text(
+        (formula_prefix / "libexec" / "commands" / "gateway").mkdir(parents=True)
+        (formula_prefix / "libexec" / "commands" / "gateway" / "status.md").write_text(
             "translated status instructions\n",
             encoding="utf-8",
         )
@@ -296,6 +296,6 @@ def test_post_install_deploys_codex_status_asset() -> None:
             post_install.__file__ = original_file
             Path.home = original_path_home
 
-        installed_status = user_home / ".codex_gateway" / "commands" / "codex" / "status.md"
+        installed_status = user_home / ".codex_gateway" / "commands" / "gateway" / "status.md"
         assert installed_status.is_file(), f"Installed status asset not found: {installed_status}"
         assert installed_status.read_text(encoding="utf-8") == "translated status instructions\n"

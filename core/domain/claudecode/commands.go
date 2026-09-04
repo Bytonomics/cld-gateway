@@ -112,6 +112,19 @@ func localOnlyStdoutSpec(stdout string) (*internalCommandSpec, bool) {
 	return nil, false
 }
 
+// gatewayPluginNamespace is the packaged "gateway" plugin's marketplace
+// name (core/domain/claudecode/assets/commands/gateway/.claude-plugin/
+// marketplace.json), which Claude Code prefixes onto every command it owns
+// once it's installed as a real plugin (e.g. "/status" arrives on the wire
+// as "/gateway:status", not "/status" - confirmed from a live
+// <command-name> envelope tag). Every classification/lookup in this
+// package must strip that prefix the same way it strips a leading "/", or
+// a plugin-owned command silently falls through to the PromptBacked
+// default instead of being recognized as Translate/LocalOnly.
+const gatewayPluginNamespace = "gateway:"
+
 func normalizeCommandName(name string) string {
-	return strings.TrimPrefix(strings.TrimSpace(name), "/")
+	name = strings.TrimPrefix(strings.TrimSpace(name), "/")
+	name = strings.TrimPrefix(name, gatewayPluginNamespace)
+	return name
 }

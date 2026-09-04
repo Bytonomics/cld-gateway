@@ -64,10 +64,25 @@ var CommandPostResults = map[string]PostResultFn{
 	"status": PostResultForTranslatedCommand,
 }
 
-// normalizeCommandName strips leading/trailing whitespace and a leading
-// slash, matching the Rust normalization at translate_executor.rs:62.
+// gatewayPluginNamespace mirrors claudecode.gatewayPluginNamespace
+// (core/domain/claudecode/commands.go): Claude Code prefixes every command
+// owned by the packaged "gateway" plugin with this namespace on the wire
+// (e.g. "/gateway:status", confirmed from a live <command-name> envelope
+// tag), so lookups here against the bare CommandExecutorNames/
+// CommandPostResults keys ("status") must strip it the same way
+// claudecode's own classification does, or a plugin-owned command's
+// executor silently never runs even after correctly classifying as
+// Translate.
+const gatewayPluginNamespace = "gateway:"
+
+// normalizeCommandName strips leading/trailing whitespace, a leading
+// slash, and the gateway plugin namespace, matching the Rust normalization
+// at translate_executor.rs:62 (extended for the plugin-namespace prefix,
+// which Rust never had to handle).
 func normalizeCommandName(name string) string {
-	return strings.TrimPrefix(strings.TrimSpace(name), "/")
+	name = strings.TrimPrefix(strings.TrimSpace(name), "/")
+	name = strings.TrimPrefix(name, gatewayPluginNamespace)
+	return name
 }
 
 // ExecuteTranslatedCommand executes a translated command if one is present,

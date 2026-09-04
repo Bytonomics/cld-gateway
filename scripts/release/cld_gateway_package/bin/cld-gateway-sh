@@ -97,25 +97,15 @@ cmd_setup() {
 
     echo "==> Setup finished"
     echo
-    echo "⚠️  ==================================================== ⚠️"
-    echo "⚠️   REQUIRED NEXT STEP 1 - start the service:            ⚠️"
-    echo "⚠️                                                        ⚠️"
-    echo "⚠️     brew services start cld-gateway                    ⚠️"
-    echo "⚠️                                                        ⚠️"
-    echo "⚠️   If this is an update or the service was already      ⚠️"
-    echo "⚠️   installed before, use instead:                       ⚠️"
-    echo "⚠️                                                        ⚠️"
-    echo "⚠️     brew services restart cld-gateway                  ⚠️"
-    echo "⚠️  ==================================================== ⚠️"
+    echo "⚠️  REQUIRED NEXT STEPS:"
     echo
-    echo "⚠️  ==================================================== ⚠️"
-    echo "⚠️   REQUIRED NEXT STEP 2 - verify the installation:      ⚠️"
-    echo "⚠️                                                        ⚠️"
-    echo "⚠️     cld-gateway-sh doctor                               ⚠️"
-    echo "⚠️                                                        ⚠️"
-    echo "⚠️   This checks installed files and the /health          ⚠️"
-    echo "⚠️   endpoint.                                            ⚠️"
-    echo "⚠️  ==================================================== ⚠️"
+    echo "  1. Start the Homebrew service"
+    echo "       brew services start cld-gateway"
+    echo "     (updating an existing install? use: brew services restart cld-gateway)"
+    echo
+    echo "  2. Verify the installation"
+    echo "       cld-gateway-sh doctor"
+    echo "     (checks installed files and the /health endpoint)"
     echo
 }
 

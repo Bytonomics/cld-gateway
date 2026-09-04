@@ -256,7 +256,8 @@ def test_wrapper_doctor_checks_user_facing_usability_signals() -> None:
     wrapper = load_wrapper_script()
 
     assert 'CODEX_COMMANDS_HOME="$USER_HOME/.codex_gateway/commands"' in wrapper
-    assert 'Found ~/.codex_gateway/commands/gateway/status.md' in wrapper
+    assert 'Found ~/.codex_gateway/commands/gateway/plugin/commands/status.md' in wrapper
+    assert 'gateway plugin registered in ~/.claude_gateway/settings.json' in wrapper
     assert 'Installed Codex command assets match packaged assets' in wrapper
     assert 'Health endpoint responded at $health_url' in wrapper
     assert 'Health check failed at $health_url' in wrapper
@@ -271,9 +272,16 @@ def test_post_install_deploys_gateway_status_asset() -> None:
         user_home = tmp_path / "home"
         formula_prefix = tmp_path / "formula"
         user_home.mkdir(parents=True)
-        (formula_prefix / "libexec" / "commands" / "gateway").mkdir(parents=True)
-        (formula_prefix / "libexec" / "commands" / "gateway" / "status.md").write_text(
+        plugin_commands = formula_prefix / "libexec" / "commands" / "gateway" / "plugin" / "commands"
+        plugin_commands.mkdir(parents=True)
+        (plugin_commands / "status.md").write_text(
             "translated status instructions\n",
+            encoding="utf-8",
+        )
+        marketplace_manifest_dir = formula_prefix / "libexec" / "commands" / "gateway" / ".claude-plugin"
+        marketplace_manifest_dir.mkdir(parents=True)
+        (marketplace_manifest_dir / "marketplace.json").write_text(
+            '{"name": "gateway", "plugins": [{"name": "gateway", "source": "./plugin"}]}\n',
             encoding="utf-8",
         )
         (formula_prefix / "share" / "cld-gateway").mkdir(parents=True)
@@ -296,6 +304,22 @@ def test_post_install_deploys_gateway_status_asset() -> None:
             post_install.__file__ = original_file
             Path.home = original_path_home
 
-        installed_status = user_home / ".codex_gateway" / "commands" / "gateway" / "status.md"
+        installed_status = (
+            user_home / ".codex_gateway" / "commands" / "gateway" / "plugin" / "commands" / "status.md"
+        )
         assert installed_status.is_file(), f"Installed status asset not found: {installed_status}"
         assert installed_status.read_text(encoding="utf-8") == "translated status instructions\n"
+
+        installed_manifest = (
+            user_home / ".codex_gateway" / "commands" / "gateway" / ".claude-plugin" / "marketplace.json"
+        )
+        assert installed_manifest.is_file(), f"Installed marketplace manifest not found: {installed_manifest}"
+
+        installed_settings = user_home / ".claude_gateway" / "settings.json"
+        settings = json.loads(installed_settings.read_text(encoding="utf-8"))
+        expected_marketplace_path = str(user_home / ".codex_gateway" / "commands" / "gateway")
+        assert settings["extraKnownMarketplaces"]["gateway"]["source"] == {
+            "source": "directory",
+            "path": expected_marketplace_path,
+        }
+        assert settings["enabledPlugins"]["gateway@gateway"] is True

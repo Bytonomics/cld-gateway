@@ -266,7 +266,9 @@ class TestPackageMetadataValidation:
             assert expected_names.issubset(set(names))
 
             # Explicitly verify the packaged Python helper and wrapper scripts
-            assert "commands/gateway/status.md" in names, "Gateway status asset missing from archive"
+            assert "commands/gateway/plugin/commands/status.md" in names, "Gateway status asset missing from archive"
+            assert "commands/gateway/.claude-plugin/marketplace.json" in names, "Gateway plugin marketplace manifest missing from archive"
+            assert "commands/gateway/plugin/.claude-plugin/plugin.json" in names, "Gateway plugin manifest missing from archive"
             assert "homebrew/post_install.py" in names, "Python helper missing from archive"
             assert "bin/cldg" in names, "cldg wrapper missing from archive"
             assert "bin/clddg" in names, "clddg wrapper missing from archive"

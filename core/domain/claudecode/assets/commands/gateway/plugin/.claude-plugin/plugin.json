@@ -1,0 +1,8 @@
+{
+  "name": "gateway",
+  "version": "0.1.0",
+  "description": "cld-gateway status and other gateway-owned commands",
+  "author": {
+    "name": "Bytonomics"
+  }
+}

@@ -96,14 +96,27 @@ cmd_setup() {
     fi
 
     echo "==> Setup finished"
-    echo "Next steps:"
-    echo "  1. Start the Homebrew service:"
-    echo "     brew services start cld-gateway"
-    echo "     If this is an update or the service was already installed before, use:"
-    echo "     brew services restart cld-gateway"
-    echo "  2. Verify the installation:"
-    echo "     cld-gateway-sh doctor"
-    echo "     This checks installed files and the /health endpoint."
+    echo
+    echo "⚠️  ==================================================== ⚠️"
+    echo "⚠️   REQUIRED NEXT STEP 1 - start the service:            ⚠️"
+    echo "⚠️                                                        ⚠️"
+    echo "⚠️     brew services start cld-gateway                    ⚠️"
+    echo "⚠️                                                        ⚠️"
+    echo "⚠️   If this is an update or the service was already      ⚠️"
+    echo "⚠️   installed before, use instead:                       ⚠️"
+    echo "⚠️                                                        ⚠️"
+    echo "⚠️     brew services restart cld-gateway                  ⚠️"
+    echo "⚠️  ==================================================== ⚠️"
+    echo
+    echo "⚠️  ==================================================== ⚠️"
+    echo "⚠️   REQUIRED NEXT STEP 2 - verify the installation:      ⚠️"
+    echo "⚠️                                                        ⚠️"
+    echo "⚠️     cld-gateway-sh doctor                               ⚠️"
+    echo "⚠️                                                        ⚠️"
+    echo "⚠️   This checks installed files and the /health          ⚠️"
+    echo "⚠️   endpoint.                                            ⚠️"
+    echo "⚠️  ==================================================== ⚠️"
+    echo
 }
 
 # Doctor command: usability-focused health check
@@ -134,11 +147,26 @@ cmd_doctor() {
         critical_exit_code=1
     fi
 
-    STATUS_ASSET_PATH="$CODEX_COMMANDS_HOME/gateway/status.md"
+    STATUS_ASSET_PATH="$CODEX_COMMANDS_HOME/gateway/plugin/commands/status.md"
     if [ -f "$STATUS_ASSET_PATH" ]; then
-        echo "[OK] Found ~/.codex_gateway/commands/gateway/status.md"
+        echo "[OK] Found ~/.codex_gateway/commands/gateway/plugin/commands/status.md"
     else
-        echo "[FAIL] Missing ~/.codex_gateway/commands/gateway/status.md"
+        echo "[FAIL] Missing ~/.codex_gateway/commands/gateway/plugin/commands/status.md"
+        critical_exit_code=1
+    fi
+
+    MARKETPLACE_MANIFEST="$CODEX_COMMANDS_HOME/gateway/.claude-plugin/marketplace.json"
+    if [ -f "$MARKETPLACE_MANIFEST" ]; then
+        echo "[OK] Found ~/.codex_gateway/commands/gateway/.claude-plugin/marketplace.json"
+    else
+        echo "[FAIL] Missing ~/.codex_gateway/commands/gateway/.claude-plugin/marketplace.json"
+        critical_exit_code=1
+    fi
+
+    if [ -f "$CLAUDE_GATEWAY_HOME/settings.json" ] && grep -q '"gateway@gateway": true' "$CLAUDE_GATEWAY_HOME/settings.json"; then
+        echo "[OK] gateway plugin registered in ~/.claude_gateway/settings.json"
+    else
+        echo "[FAIL] gateway plugin not registered in ~/.claude_gateway/settings.json"
         critical_exit_code=1
     fi
 

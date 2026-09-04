@@ -7,6 +7,7 @@ directories, copies configuration files, and symlinks Claude Code entries.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -249,6 +250,45 @@ def copy_text_file(src: Path, dst: Path) -> None:
         sys.exit(f'Failed to copy {src} to {dst}: {exc}')
 
 
+def register_gateway_plugin_marketplace(settings_path: Path, marketplace_path: Path) -> None:
+    """Register the packaged "gateway" plugin marketplace in settings.json.
+
+    Injects extraKnownMarketplaces + enabledPlugins into the already-copied
+    settings.json so Claude Code auto-registers and auto-enables the
+    "gateway" plugin (source: core/domain/claudecode/assets/commands/gateway
+    in the main repo) on launch, with no separate `claude plugin install`
+    step required. marketplace_path must already exist on disk (it is the
+    post-sync destination under ~/.codex_gateway/commands/gateway, so this
+    must run after install_codex_gateway_commands).
+
+    Args:
+        settings_path: Path to the already-installed settings.json to edit
+            in place (e.g. ~/.claude_gateway/settings.json).
+        marketplace_path: Path to the installed marketplace root (contains
+            .claude-plugin/marketplace.json).
+
+    Raises:
+        SystemExit: If settings.json cannot be read, parsed, or written.
+    """
+    try:
+        settings = json.loads(settings_path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError) as exc:
+        sys.exit(f'Failed to read {settings_path}: {exc}')
+
+    settings.setdefault('extraKnownMarketplaces', {})['gateway'] = {
+        'source': {
+            'source': 'directory',
+            'path': str(marketplace_path),
+        },
+    }
+    settings.setdefault('enabledPlugins', {})['gateway@gateway'] = True
+
+    try:
+        settings_path.write_text(json.dumps(settings, indent=2) + '\n', encoding='utf-8')
+    except OSError as exc:
+        sys.exit(f'Failed to write {settings_path}: {exc}')
+
+
 def ensure_claude_source_root(claude_home: Path) -> None:
     """Ensure ~/.claude exists as a directory or symlink.
 
@@ -432,6 +472,7 @@ def post_install() -> None:
     - Runtime config installation
     - Claude gateway settings installation
     - Packaged translated commands installation
+    - Gateway plugin marketplace registration
     - Source-side Claude directory preparation
     - Shared entry symlink synchronization
 
@@ -451,6 +492,10 @@ def post_install() -> None:
     install_gateway_runtime_config(gateway_home)
     install_claude_gateway_settings(claude_gateway_home)
     install_codex_gateway_commands(codex_gateway_home)
+    register_gateway_plugin_marketplace(
+        claude_gateway_home / 'settings.json',
+        codex_gateway_home / 'commands' / 'gateway',
+    )
 
     ensure_claude_source_root(claude_home)
     sync_shared_claude_entries(claude_home, claude_gateway_home)

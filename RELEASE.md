@@ -26,7 +26,7 @@ Every published package archive must contain:
 - `bin/cld-gateway-sh` (Setup and diagnostics facade wrapper)
 - `bin/cldg` (Claude wrapper script)
 - `bin/clddg` (Dangerously-skip-permissions variant wrapper)
-- `commands/` subtree (packaged translated-command files, e.g. `commands/codex/status.md`)
+- `commands/` subtree (a Claude Code plugin marketplace, e.g. `commands/gateway/plugin/commands/status.md`)
 
 ---
 
@@ -278,7 +278,7 @@ cld-gateway-sh setup
 cld-gateway-sh doctor
 ```
 
-The `cld-gateway-sh setup` command runs the packaged Python helper with zero arguments; the helper derives paths internally. The packaged archive includes the `commands/` subtree (currently `commands/codex/status.md`), and setup syncs each file to `~/.codex_gateway/commands/` (e.g. `~/.codex_gateway/commands/codex/status.md`). After setup, the verifier checks that:
+The `cld-gateway-sh setup` command runs the packaged Python helper with zero arguments; the helper derives paths internally. The packaged archive includes the `commands/` subtree (a Claude Code plugin marketplace rooted at `commands/gateway/`, currently providing `commands/gateway/plugin/commands/status.md`), and setup syncs each file to `~/.codex_gateway/commands/` (e.g. `~/.codex_gateway/commands/gateway/plugin/commands/status.md`), then registers `~/.codex_gateway/commands/gateway` as a plugin marketplace in `~/.claude_gateway/settings.json` (`extraKnownMarketplaces`/`enabledPlugins`) so `/gateway:status` is auto-enabled on launch. After setup, the verifier checks that:
 
 - `~/.gateway/config.yml` exists and matches packaged config
 - `~/.claude_gateway/settings.json` exists and matches packaged settings

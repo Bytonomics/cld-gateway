@@ -68,4 +68,11 @@ step "Installing $FORMULA"
 brew install "$FORMULA"
 
 step "Homebrew reinstall finished"
-printf 'Next step: cld-gateway-sh setup\n'
+
+printf '\n'
+printf '⚠️  ==================================================== ⚠️\n'
+printf '⚠️   REQUIRED NEXT STEP - run this now:                  ⚠️\n'
+printf '⚠️                                                       ⚠️\n'
+printf '⚠️     cld-gateway-sh setup                               ⚠️\n'
+printf '⚠️  ==================================================== ⚠️\n'
+printf '\n'

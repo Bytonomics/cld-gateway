@@ -16,21 +16,32 @@ const (
 	skillDirectoryAnalysisSuffix    = "analyze the files in this directory before proceeding"
 )
 
-// packagedCommandsFS embeds every packaged translated-command prompt body
-// under assets/commands/ (Rust embeds each equivalent file individually via
-// include_str!). This is the single source of truth for that content:
+// packagedCommandsFS embeds a real Claude Code plugin marketplace under
+// assets/commands/gateway/ (Rust embeds each packaged file individually via
+// include_str!; Go has no equivalent of a settings-driven plugin auto-load,
+// so this is embedded purely so the same tree can be shipped to end users -
+// see below). This is the single source of truth for that content:
 // scripts/release/cld_gateway_package/layout.py copies this whole directory
-// tree into the release package's commands/ at package-build time, so end
-// users get the identical files installed under ~/.codex_gateway/commands/.
-// Adding a new translated command's packaged body means dropping a new
-// assets/commands/gateway/<name>.md file here - no code change in this file
-// or in layout.py is needed for the file to be embedded and shipped; only
-// registering the command name itself (commands.go's internalCommands,
-// translate_executor.go's CommandExecutorNames/CommandPostResults) is.
+// tree into the release package's commands/ at package-build time, and
+// post_install.py both syncs it to ~/.codex_gateway/commands/ AND registers
+// it as a Claude Code plugin marketplace (extraKnownMarketplaces/
+// enabledPlugins in the generated ~/.claude_gateway/settings.json), so
+// end users get /gateway:<command> as a real plugin-owned slash command
+// rather than a loose, undiscoverable file.
 //
-// The "gateway" subdirectory (not "codex") is deliberate: it becomes the
-// Claude Code slash-command namespace prefix (directory name -> "/<dir>:
-// <file>"), and "codex" collides with an unrelated, officially-installed
+// Layout: assets/commands/gateway/ is the marketplace root
+// (.claude-plugin/marketplace.json); assets/commands/gateway/plugin/ is the
+// "gateway" plugin's own source (.claude-plugin/plugin.json +
+// commands/<name>.md). Adding a new translated command's packaged body
+// means dropping a new assets/commands/gateway/plugin/commands/<name>.md
+// file here - no code change in this file or in layout.py is needed for
+// the file to be embedded and shipped; only registering the command name
+// itself (commands.go's internalCommands, translate_executor.go's
+// CommandExecutorNames/CommandPostResults) is.
+//
+// The "gateway" namespace (not "codex") is deliberate: it becomes the
+// Claude Code slash-command namespace prefix (plugin name -> "/<plugin>:
+// <command>"), and "codex" collides with an unrelated, officially-installed
 // Codex plugin that already owns a /codex:status command - "gateway" is
 // also backend-agnostic, matching FetchStatusData being backend-agnostic
 // (see translate_executor.go and core/domain/port/backend.Backend).
@@ -42,10 +53,12 @@ var packagedCommandsFS embed.FS
 // from packagedCommandsFS, mirroring TRANSLATED_COMMAND_BODIES's lookup
 // (claude_code_context.rs:17) but resolved dynamically against the embedded
 // directory tree instead of a hardcoded per-command map. Every translated
-// command's packaged body lives at assets/commands/gateway/<name>.md.
+// command's packaged body lives at
+// assets/commands/gateway/plugin/commands/<name>.md (the "gateway" plugin's
+// own commands/ directory, per the Claude Code plugin layout).
 func translatedCommandBody(commandName string) (string, bool) {
 	name := normalizeCommandName(commandName)
-	data, err := packagedCommandsFS.ReadFile("assets/commands/gateway/" + name + ".md")
+	data, err := packagedCommandsFS.ReadFile("assets/commands/gateway/plugin/commands/" + name + ".md")
 	if err != nil {
 		return "", false
 	}

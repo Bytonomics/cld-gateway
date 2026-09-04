@@ -1,0 +1,20 @@
+{
+  "name": "gateway",
+  "owner": {
+    "name": "Bytonomics"
+  },
+  "metadata": {
+    "description": "cld-gateway packaged commands"
+  },
+  "plugins": [
+    {
+      "name": "gateway",
+      "description": "cld-gateway status and other gateway-owned commands",
+      "version": "0.1.0",
+      "author": {
+        "name": "Bytonomics"
+      },
+      "source": "./plugin"
+    }
+  ]
+}

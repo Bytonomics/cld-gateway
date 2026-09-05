@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -247,6 +248,12 @@ func (c *Client) doRequest(ctx context.Context, req *backend.Request) (*http.Res
 		raw, _ := io.ReadAll(res.Body)
 		return nil, newStatusError(res.StatusCode, raw)
 	}
+
+	slog.Info("codex backend: response headers",
+		"status", res.StatusCode,
+		"content_type", res.Header.Get("Content-Type"),
+		"content_length", res.Header.Get("Content-Length"),
+		"transfer_encoding", strings.Join(res.TransferEncoding, ","))
 
 	return res, nil
 }

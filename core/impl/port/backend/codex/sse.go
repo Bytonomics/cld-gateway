@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -39,6 +40,13 @@ const (
 // channel closes, mirroring the WebSocket-stage error mapping
 // response_to_event_stream applies to decode failures (client.rs:283-289).
 // DecodeEventStream takes ownership of body and closes it.
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
 func DecodeEventStream(ctx context.Context, body io.ReadCloser, idleTimeout time.Duration) <-chan backend.Event {
 	out := make(chan backend.Event)
 
@@ -51,22 +59,32 @@ func DecodeEventStream(ctx context.Context, body io.ReadCloser, idleTimeout time
 
 		var dataLines []string
 		var eventName string
+		totalLines := 0
+		totalEvents := 0
 		emit := func() bool {
 			if len(dataLines) == 0 {
 				return true
 			}
 			data := strings.Join(dataLines, "\n")
 			dataLines = dataLines[:0]
-			eventName = ""
 
 			// Use eventName from SSE event: line; default to "message" per WHATWG spec.
+			// Must be read before resetting eventName for the next event - a
+			// prior version reset eventName to "" first, so eventType always
+			// read back the just-cleared "" and every event silently fell
+			// back to the generic "message" type, which TranslateResponseEvent
+			// has no handling for, so every real backend event (response.
+			// output_text.delta, response.completed, etc.) was silently
+			// dropped: the client only ever saw the synthetic message_start.
 			eventType := eventName
 			if eventType == "" {
 				eventType = "message"
 			}
+			eventName = ""
 
 			select {
 			case out <- backend.Event{Type: eventType, Data: json.RawMessage(data)}:
+				totalEvents++
 				return true
 			case <-ctx.Done():
 				return false
@@ -136,6 +154,8 @@ func DecodeEventStream(ctx context.Context, body io.ReadCloser, idleTimeout time
 			case result, ok := <-scanResults:
 				if !ok {
 					// Scanner closed (end of stream or context done).
+					slog.Info("codex backend: SSE stream closed (scanResults channel closed)",
+						"total_lines", totalLines, "total_events", totalEvents, "scan_err", errString(result.err))
 					if !emit() {
 						return
 					}
@@ -147,6 +167,8 @@ func DecodeEventStream(ctx context.Context, body io.ReadCloser, idleTimeout time
 
 				if !result.ok {
 					// Scan failed.
+					slog.Info("codex backend: SSE stream ended (scan not ok)",
+						"total_lines", totalLines, "total_events", totalEvents, "scan_err", errString(result.err))
 					if !emit() {
 						return
 					}
@@ -156,6 +178,7 @@ func DecodeEventStream(ctx context.Context, body io.ReadCloser, idleTimeout time
 					return
 				}
 
+				totalLines++
 				// Scan succeeded; process the line.
 				line := result.line
 				switch {

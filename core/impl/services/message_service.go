@@ -13,6 +13,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
@@ -182,9 +183,23 @@ func (s *MessageService) prepare(ctx context.Context, req *dto.MessagesRequest) 
 	classifyReq.Messages = normalized.Messages
 	plan.kind = s.deps.Classifier.Classify(&classifyReq, normalized.ClientMetadata)
 
+	// workingReq stays on req's RAW (unnormalized) System/Messages here,
+	// deliberately never assigned normalized.System/normalized.Messages.
+	// Translator.TranslateRequest (below) performs its own single
+	// claudecode.NormalizeContext pass, mirroring Rust's
+	// translate_request_with_context (translate.rs:73), which is always
+	// called with the untouched request (lib.rs:1090,1108,1212) - never
+	// with a pre-normalized copy. Feeding workingReq through NormalizeContext
+	// a second time here, then handing that already-blanked copy to the
+	// translator, silently erases the active command envelope before the
+	// translator's own pass can see it: normalizeClaudeCodeCommands finds no
+	// non-empty active user message, so it never sets
+	// clientMetadata["claude_code_translated_slash_command"], and
+	// applyTranslatedCommandExecutor (below) then sees an empty commandName
+	// and injects nothing - leaving translated commands (e.g.
+	// "/gateway:status") with an empty backend Input and a generic
+	// model response instead of the status JSON.
 	workingReq := *req
-	workingReq.System = normalized.System
-	workingReq.Messages = normalized.Messages
 	if s.deps.ContextMgmt != nil {
 		_, plan.contextMgmtReport = s.deps.ContextMgmt.Apply(&workingReq)
 	}
@@ -194,9 +209,18 @@ func (s *MessageService) prepare(ctx context.Context, req *dto.MessagesRequest) 
 
 	plan.persisted = hasSession && s.deps.Config.Workflow.ConversationState.Enabled && s.deps.Conversations != nil
 
-	plan.fingerprints = branchFingerprints(workingReq.Messages)
-	plan.canonicalMsgs = canonicalValue(workingReq.Messages)
-	plan.canonicalMsgHash = canonicalHash(workingReq.Messages)
+	// Fingerprinting/branch-selection want the normalized+durable message
+	// view (mirroring Rust's analyze_conversation_branch_request, which
+	// derives durable_messages from its own local normalize_claude_code_context
+	// call - lib.rs:3893-3899 - never from what gets translated). Re-derive
+	// that view from workingReq (post-ContextMgmt pruning) rather than
+	// reusing the top-level `normalized` (pre-pruning) value, so pruning and
+	// slash-command blanking both land in the fingerprint the same way they
+	// did before this fix.
+	normalizedForFingerprint := claudecode.NormalizeContext(workingReq.System, workingReq.Messages, s.deps.Config.Workflow.ClaudeCode)
+	plan.fingerprints = branchFingerprints(normalizedForFingerprint.Messages)
+	plan.canonicalMsgs = canonicalValue(normalizedForFingerprint.Messages)
+	plan.canonicalMsgHash = canonicalHash(normalizedForFingerprint.Messages)
 
 	var selection stateport.BranchSelectionResult
 	if plan.persisted {
@@ -314,24 +338,40 @@ func (s *MessageService) selectTransport(ctx context.Context, plan *turnPlan, se
 func (s *MessageService) applyTranslatedCommandExecutor(ctx context.Context, plan *turnPlan, workingReq *dto.MessagesRequest) error {
 	commandName := plan.backendReq.ClientMetadata["claude_code_translated_slash_command"]
 	if commandName == "" {
+		slog.Info("applyTranslatedCommandExecutor: no translated command detected",
+			"request_id", string(plan.requestID),
+			"client_metadata_keys", clientMetadataKeys(plan.backendReq.ClientMetadata))
 		return nil
 	}
+	slog.Info("applyTranslatedCommandExecutor: translated command detected",
+		"request_id", string(plan.requestID), "command", commandName)
 
 	runtime := s.buildExecutorRuntime(ctx, plan, workingReq)
 
 	executorJSON, err := ExecuteTranslatedCommand(ctx, &commandName, runtime)
 	if err != nil {
+		slog.Error("applyTranslatedCommandExecutor: executor failed",
+			"request_id", string(plan.requestID), "command", commandName, "error", err)
 		return apperr.Wrap(err, apperr.CodeAPI, fmt.Sprintf("translated command '%s' failed: %s", commandName, err.Error()), 500)
 	}
 	if executorJSON == nil {
+		slog.Error("applyTranslatedCommandExecutor: no executor registered",
+			"request_id", string(plan.requestID), "command", commandName)
 		return apperr.New(apperr.CodeAPI, fmt.Sprintf("no executor registered for translated command '%s'", commandName), 500)
 	}
 
 	postResultFn, ok := GetPostResultFunction(commandName)
 	if !ok {
+		slog.Error("applyTranslatedCommandExecutor: no post-result function registered",
+			"request_id", string(plan.requestID), "command", commandName)
 		return apperr.New(apperr.CodeAPI, fmt.Sprintf("no post-result function registered for translated command '%s'", commandName), 500)
 	}
-	resultText := postResultFn(executorJSON, claudecode.GetPackagedCommandBody(commandName))
+	packagedBody := claudecode.GetPackagedCommandBody(commandName)
+	resultText := postResultFn(executorJSON, packagedBody)
+	slog.Info("applyTranslatedCommandExecutor: injecting result into backend request",
+		"request_id", string(plan.requestID), "command", commandName,
+		"packaged_body_len", len(packagedBody), "result_text_len", len(resultText),
+		"executor_json_keys", mapKeys(executorJSON))
 
 	plan.backendReq.Input = append(plan.backendReq.Input, map[string]any{
 		"type": "message",
@@ -341,6 +381,22 @@ func (s *MessageService) applyTranslatedCommandExecutor(ctx context.Context, pla
 		},
 	})
 	return nil
+}
+
+func clientMetadataKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+func mapKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 // buildExecutorRuntime assembles the runtime context a translated-command
@@ -523,7 +579,13 @@ func (s *MessageService) runStream(ctx context.Context, plan *turnPlan, workingR
 
 		sseEvents, err := s.deps.Translator.TranslateResponseEvent(ev)
 		if err != nil {
+			slog.Info("runStream: TranslateResponseEvent error, event dropped",
+				"request_id", string(plan.requestID), "backend_event_type", ev.Type, "error", err)
 			continue
+		}
+		if len(sseEvents) == 0 {
+			slog.Info("runStream: TranslateResponseEvent produced no SSE events",
+				"request_id", string(plan.requestID), "backend_event_type", ev.Type)
 		}
 		for _, sse := range sseEvents {
 			select {
